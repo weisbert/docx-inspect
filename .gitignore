@@ -1,0 +1,35 @@
+# Local working directory: sample inputs, scratch scripts, generated output.
+# Not part of the toolkit; never commit.
+local/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Local documents and generated reports — keep sample/test files
+# and tool output out of version control
+*.docx
+*.doc
+*.pptx
+*.ppt
+*.xlsx
+*.xls
+*.pdf
+*_inspect.txt
+inspect_*.txt
+*_probe.txt
+probe_*.txt
+*_media/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.tmp
+~$*

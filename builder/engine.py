@@ -1,0 +1,781 @@
+# -*- coding: utf-8 -*-
+"""
+engine.py -- Generic, config-driven structured-document renderer.
+
+Reads a project file (``project.json``, schema v1) plus a template configuration file and
+produces a .docx whose layout (page geometry, 3-column header/footer tables, cover tables,
+heading styles + multilevel autonumber, fixed rich-text bodies, the four content block
+types, chapter-sequence caption numbering, and an inline portrait data-driven table) is
+entirely defined by the configuration -- nothing domain specific is hardcoded here.
+
+CLI:
+    python engine.py <report_folder> [--config <template_config.json>] [--out <dir>]
+
+    <report_folder> must contain ``project.json`` (and an ``images/`` folder for image blocks).
+    The template config path may also come from the ``BUILDER_TEMPLATE_CONFIG`` env var; if
+    neither is given, the engine looks for ``project.json``'s ``template`` id as
+    ``template_config_<id>.json`` next to the project folder's parent.
+
+Output: ``<report_folder>/out/<name>.docx``.
+"""
+import argparse
+import json
+import os
+import sys
+
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH as ALIGN
+from docx.enum.style import WD_STYLE_TYPE
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+
+import tables
+
+
+# ===========================================================================
+# Low-level docx helpers (ported, kept generic)
+# ===========================================================================
+def _rgb(hex6):
+    return RGBColor.from_string(hex6)
+
+
+def set_rfonts(el, ascii=None, hansi=None, eastasia=None, cs=None):
+    rpr = el.get_or_add_rPr()
+    rf = rpr.find(qn("w:rFonts"))
+    if rf is None:
+        rf = OxmlElement("w:rFonts")
+        rpr.insert(0, rf)
+    for k, v in (("w:ascii", ascii), ("w:hAnsi", hansi),
+                 ("w:eastAsia", eastasia), ("w:cs", cs)):
+        if v:
+            rf.set(qn(k), v)
+
+
+def run_fmt(run, ascii=None, eastasia=None, size=None, bold=None, italic=None,
+            color=None, underline=None):
+    if ascii or eastasia:
+        set_rfonts(run._r, ascii=ascii, hansi=ascii, eastasia=eastasia, cs=ascii)
+    f = run.font
+    if size is not None:
+        f.size = Pt(size)
+    if bold is not None:
+        f.bold = bold
+    if italic is not None:
+        f.italic = italic
+    if underline is not None:
+        f.underline = underline
+    if color is not None:
+        f.color.rgb = color if isinstance(color, RGBColor) else _rgb(color)
+
+
+def style_font(st, ascii=None, eastasia=None, size=None, bold=None, italic=None,
+               color=None, underline=None):
+    if ascii or eastasia:
+        set_rfonts(st.element, ascii=ascii, hansi=ascii, eastasia=eastasia, cs=ascii)
+    f = st.font
+    if size is not None:
+        f.size = Pt(size)
+    if bold is not None:
+        f.bold = bold
+    if italic is not None:
+        f.italic = italic
+    if underline is not None:
+        f.underline = underline
+    if color is not None:
+        f.color.rgb = color if isinstance(color, RGBColor) else _rgb(color)
+
+
+def style_para(st, align=None, left=None, first_line=None, before=None, after=None,
+               line=None, keepnext=None):
+    pf = st.paragraph_format
+    if align is not None:
+        pf.alignment = align
+    if left is not None:
+        pf.left_indent = Cm(left)
+    if first_line is not None:
+        pf.first_line_indent = Cm(first_line)
+    if before is not None:
+        pf.space_before = Pt(before)
+    if after is not None:
+        pf.space_after = Pt(after)
+    if line is not None:
+        pf.line_spacing = line
+    if keepnext:
+        st.element.get_or_add_pPr().append(OxmlElement("w:keepNext"))
+
+
+def new_style(doc, name, base=None):
+    try:
+        st = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    except Exception:
+        st = doc.styles[name]
+    if base:
+        st.base_style = doc.styles[base]
+    return st
+
+
+def cell_valign(cell, val="center"):
+    tcPr = cell._tc.get_or_add_tcPr()
+    e = OxmlElement("w:vAlign")
+    e.set(qn("w:val"), val)
+    tcPr.append(e)
+
+
+def _border(tag, val, sz, color):
+    e = OxmlElement(tag)
+    e.set(qn("w:val"), val)
+    e.set(qn("w:sz"), str(sz))
+    e.set(qn("w:space"), "0")
+    e.set(qn("w:color"), color)
+    return e
+
+
+def cell_borders(cell, edges, val="single", sz=6, color="auto"):
+    tcPr = cell._tc.get_or_add_tcPr()
+    b = tcPr.find(qn("w:tcBorders"))
+    if b is None:
+        b = OxmlElement("w:tcBorders")
+        tcPr.append(b)
+    for edge in edges:
+        for old in b.findall(qn("w:" + edge)):
+            b.remove(old)
+        b.append(_border("w:" + edge, val, sz, color))
+
+
+def table_grid(table, widths_cm):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    layout = OxmlElement("w:tblLayout")
+    layout.set(qn("w:type"), "fixed")
+    tblPr.append(layout)
+    grid = tbl.find(qn("w:tblGrid"))
+    if grid is None:
+        grid = OxmlElement("w:tblGrid")
+        tblPr.addnext(grid)
+    else:
+        for gc in grid.findall(qn("w:gridCol")):
+            grid.remove(gc)
+    for w in widths_cm:
+        gc = OxmlElement("w:gridCol")
+        gc.set(qn("w:w"), str(int(w * 567)))
+        grid.append(gc)
+    for row in table.rows:
+        for i, w in enumerate(widths_cm):
+            if i < len(row.cells):
+                row.cells[i].width = Cm(w)
+
+
+def table_outer_inner(table, outer="double", outer_sz=6, inner="single",
+                      inner_sz=6, color="000000"):
+    tblPr = table._tbl.tblPr
+    for old in tblPr.findall(qn("w:tblBorders")):
+        tblPr.remove(old)
+    b = OxmlElement("w:tblBorders")
+    b.append(_border("w:top", outer, outer_sz, color))
+    b.append(_border("w:left", outer, outer_sz, color))
+    b.append(_border("w:bottom", outer, outer_sz, color))
+    b.append(_border("w:right", outer, outer_sz, color))
+    b.append(_border("w:insideH", inner, inner_sz, color))
+    b.append(_border("w:insideV", inner, inner_sz, color))
+    tblPr.append(b)
+
+
+def table_all_single(table, sz=6, color="auto"):
+    table_outer_inner(table, outer="single", outer_sz=sz, inner="single",
+                      inner_sz=sz, color=color)
+
+
+def table_center(table):
+    tblPr = table._tbl.tblPr
+    jc = OxmlElement("w:jc")
+    jc.set(qn("w:val"), "center")
+    tblPr.append(jc)
+
+
+def row_exact_height(row, twips):
+    trPr = row._tr.get_or_add_trPr()
+    h = OxmlElement("w:trHeight")
+    h.set(qn("w:hRule"), "exact")
+    h.set(qn("w:val"), str(twips))
+    trPr.append(h)
+
+
+def add_field(p, instr, placeholder="", bold=None):
+    def mk(run_el):
+        if bold:
+            rpr = OxmlElement("w:rPr")
+            rpr.append(OxmlElement("w:b"))
+            run_el.append(rpr)
+    r1 = OxmlElement("w:r"); mk(r1)
+    b = OxmlElement("w:fldChar"); b.set(qn("w:fldCharType"), "begin"); r1.append(b)
+    r2 = OxmlElement("w:r"); mk(r2)
+    it = OxmlElement("w:instrText"); it.set(qn("xml:space"), "preserve"); it.text = instr; r2.append(it)
+    r3 = OxmlElement("w:r"); mk(r3)
+    s = OxmlElement("w:fldChar"); s.set(qn("w:fldCharType"), "separate"); r3.append(s)
+    r4 = OxmlElement("w:r"); mk(r4)
+    t = OxmlElement("w:t"); t.text = placeholder; r4.append(t)
+    r5 = OxmlElement("w:r"); mk(r5)
+    e = OxmlElement("w:fldChar"); e.set(qn("w:fldCharType"), "end"); r5.append(e)
+    for r in (r1, r2, r3, r4, r5):
+        p._p.append(r)
+
+
+def fill(cell, text, ascii=None, eastasia=None, size=None, bold=None, italic=None,
+         color=None, underline=None, align=None, valign=None):
+    p = cell.paragraphs[0]
+    if align is not None:
+        p.alignment = align
+    if valign:
+        cell_valign(cell, valign)
+    if text:
+        r = p.add_run(text)
+        run_fmt(r, ascii=ascii, eastasia=eastasia, size=size, bold=bold,
+                italic=italic, color=color, underline=underline)
+    return p
+
+
+def add_inline_logo(part_container, cell, logo_path, width_cm=1.13):
+    p = cell.paragraphs[0]
+    p.alignment = ALIGN.CENTER
+    if not logo_path or not os.path.exists(logo_path):
+        r = p.add_run("[LOGO]")
+        run_fmt(r, color="FF0000")
+        return
+    try:
+        inline = part_container.part.new_pic_inline(logo_path, Cm(width_cm), Cm(width_cm))
+        run = p.add_run()
+        drawing = OxmlElement("w:drawing")
+        drawing.append(inline)
+        run._r.append(drawing)
+    except Exception as ex:
+        r = p.add_run("[LOGO]")
+        run_fmt(r, color="FF0000")
+        print("  ! logo failed:", ex)
+
+
+# ===========================================================================
+# Heading multilevel autonumber (config-driven num_id / fonts)
+# ===========================================================================
+def add_heading_numbering(doc, num_id=88, abstract_id=88, suffix="space", ascii_font="Arial"):
+    numbering = doc.part.numbering_part.element
+    abs_el = OxmlElement("w:abstractNum")
+    abs_el.set(qn("w:abstractNumId"), str(abstract_id))
+    ml = OxmlElement("w:multiLevelType")
+    ml.set(qn("w:val"), "multilevel")
+    abs_el.append(ml)
+    for i in range(9):
+        lvl = OxmlElement("w:lvl")
+        lvl.set(qn("w:ilvl"), str(i))
+        st = OxmlElement("w:start"); st.set(qn("w:val"), "1"); lvl.append(st)
+        nf = OxmlElement("w:numFmt"); nf.set(qn("w:val"), "decimal"); lvl.append(nf)
+        ps = OxmlElement("w:pStyle"); ps.set(qn("w:val"), f"Heading{i+1}"); lvl.append(ps)
+        suff = OxmlElement("w:suff"); suff.set(qn("w:val"), suffix); lvl.append(suff)
+        lt = OxmlElement("w:lvlText")
+        lt.set(qn("w:val"), ".".join(f"%{j+1}" for j in range(i + 1)) + " ")
+        lvl.append(lt)
+        jc = OxmlElement("w:lvlJc"); jc.set(qn("w:val"), "left"); lvl.append(jc)
+        pPr = OxmlElement("w:pPr"); ind = OxmlElement("w:ind")
+        ind.set(qn("w:left"), "0"); ind.set(qn("w:firstLine"), "0")
+        pPr.append(ind); lvl.append(pPr)
+        abs_el.append(lvl)
+    first = numbering.find(qn("w:num"))
+    if first is not None:
+        first.addprevious(abs_el)
+    else:
+        numbering.append(abs_el)
+    num = OxmlElement("w:num"); num.set(qn("w:numId"), str(num_id))
+    aid = OxmlElement("w:abstractNumId"); aid.set(qn("w:val"), str(abstract_id))
+    num.append(aid)
+    numbering.append(num)
+    for i in range(9):
+        st = doc.styles[f"Heading {i+1}"]
+        pPr = st.element.get_or_add_pPr()
+        for old in pPr.findall(qn("w:numPr")):
+            pPr.remove(old)
+        numPr = OxmlElement("w:numPr")
+        il = OxmlElement("w:ilvl"); il.set(qn("w:val"), str(i)); numPr.append(il)
+        nid = OxmlElement("w:numId"); nid.set(qn("w:val"), str(num_id)); numPr.append(nid)
+        pPr.append(numPr)
+
+
+# ===========================================================================
+# Document setup from config (page / styles / header / footer / cover)
+# ===========================================================================
+def _apply_page_and_styles(doc, styles):
+    page = styles["page"]
+    sec = doc.sections[0]
+    sec.page_width = Cm(page["w_cm"])
+    sec.page_height = Cm(page["h_cm"])
+    m = page["margin_cm"]
+    sec.top_margin = sec.bottom_margin = Cm(m)
+    sec.left_margin = sec.right_margin = Cm(m)
+    sec.header_distance = Cm(page["header_dist_cm"])
+    sec.footer_distance = Cm(page["footer_dist_cm"])
+    sec.different_first_page_header_footer = page.get("different_first_page", True)
+
+    # ---- Normal (font only; never touched again for row-height tricks) ----
+    nm = styles["normal"]
+    normal = doc.styles["Normal"]
+    normal.font.size = Pt(nm["size_pt"])
+    set_rfonts(normal.element, ascii=nm["ascii"], hansi=nm["ascii"],
+               eastasia=nm["eastAsia"], cs=nm["ascii"])
+
+    # ---- headings ----
+    hd = styles["headings"]
+    levels = hd["levels"]
+    before = hd.get("space_before_pt", {})
+    for lv in range(1, 10):
+        st = doc.styles[f"Heading {lv}"]
+        spec = levels.get(str(lv), levels.get("default", {"ascii": "Arial",
+                                                          "size_pt": 12, "bold": False}))
+        style_font(st, ascii=spec["ascii"], size=spec["size_pt"],
+                   bold=spec.get("bold", False), italic=False, color="000000")
+        style_para(st, before=before.get(str(lv), 10),
+                   after=(hd.get("h1_after_pt", 58) if lv == 1 else 0))
+    an = hd["autonumber"]
+    add_heading_numbering(doc, num_id=an.get("num_id", 88), abstract_id=an.get("num_id", 88),
+                          suffix=an.get("suffix", "space"), ascii_font=an.get("ascii", "Arial"))
+    # Heading 1 bottom border (chapter rule)
+    h1b = hd["h1_bottom_border"]
+    pPr = doc.styles["Heading 1"].element.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bot = OxmlElement("w:bottom")
+    bot.set(qn("w:val"), h1b["val"])
+    bot.set(qn("w:sz"), str(h1b["sz"]))
+    bot.set(qn("w:space"), "1")
+    bot.set(qn("w:color"), h1b.get("color", "auto"))
+    pBdr.append(bot)
+    pPr.append(pBdr)
+
+    # ---- caption ----
+    cp = styles["caption"]
+    cap = doc.styles["Caption"]
+    style_font(cap, ascii=cp["ascii"], size=cp["size_pt"], bold=cp.get("bold", True),
+               italic=False, color="000000")
+    style_para(cap, align=ALIGN.CENTER, before=12, after=6)
+
+    # ---- body / mybody (mybody name comes from config so domain label stays local) ----
+    bd = styles["body"]
+    body = new_style(doc, bd.get("name", "body"), base=bd.get("base", "Normal"))
+    style_font(body, size=bd["size_pt"])
+    style_para(body, left=bd["left_cm"], before=6, after=2)
+
+    mb = styles["mybody"]
+    mybody = new_style(doc, mb["name"], base=mb.get("base", bd.get("name", "body")))
+    style_font(mybody, ascii=mb["ascii"])
+    style_para(mybody, left=mb["left_cm"], first_line=mb["first_line_cm"])
+
+    # ---- header / footer fonts ----
+    ht = styles["header_table"]
+    ft = styles["footer_table"]
+    style_font(doc.styles["Header"], ascii=ht["title_font"].get("ascii", "Arial"), size=9)
+    style_font(doc.styles["Footer"], ascii=ft["font"]["ascii"], size=ft["font"]["size_pt"])
+
+    return {"body_name": bd.get("name", "body"), "mybody_name": mb["name"]}
+
+
+def _build_header(doc, styles, meta, logo_path):
+    sec = doc.sections[0]
+    ht = styles["header_table"]
+    cols = ht["cols_cm"]
+    total = sum(cols)
+    htbl = sec.header.add_table(rows=1, cols=3, width=Cm(total))
+    table_grid(htbl, cols)
+    row_exact_height(htbl.rows[0], ht.get("row_h_twips", 751))
+    cb = ht.get("cell_bottom_border", {"val": "single", "sz": 6, "color": "auto"})
+    for c in range(3):
+        cell_borders(htbl.cell(0, c), ["bottom"], val=cb["val"], sz=cb["sz"],
+                     color=cb.get("color", "auto"))
+    add_inline_logo(sec.header, htbl.cell(0, 0), logo_path, width_cm=ht.get("logo_cm", 1.13))
+    # title cell (project title; placeholder from config if empty)
+    tc = htbl.cell(0, 1)
+    cell_valign(tc, "bottom")
+    tp = tc.paragraphs[0]
+    tp.alignment = ALIGN.CENTER
+    tf = ht["title_font"]
+    title_text = meta.get("title") or ht.get("title_placeholder", "")
+    rr = tp.add_run(title_text)
+    run_fmt(rr, ascii=tf["ascii"], eastasia=tf.get("eastAsia", tf["ascii"]),
+            size=tf["size_pt"], underline=False)
+    # secrecy cell
+    mc = htbl.cell(0, 2)
+    cell_valign(mc, "bottom")
+    mp = mc.paragraphs[0]
+    mp.style = doc.styles["Header"]
+    rr = mp.add_run(ht.get("secrecy_label", ""))
+    run_fmt(rr, underline=False)
+
+
+def _build_footer(doc, styles):
+    sec = doc.sections[0]
+    ft = styles["footer_table"]
+    cols = ft["cols_cm"]
+    ftbl = sec.footer.add_table(rows=1, cols=3, width=Cm(sum(cols)))
+    table_grid(ftbl, cols)
+    tb = ft.get("top_border", {"val": "single", "sz": 4})
+    fpr = ftbl._tbl.tblPr
+    fb = OxmlElement("w:tblBorders")
+    fb.append(_border("w:top", tb["val"], tb["sz"], "auto"))
+    fpr.append(fb)
+    # date field
+    f0 = ftbl.cell(0, 0).paragraphs[0]
+    f0.style = doc.styles["Footer"]
+    add_field(f0, f' DATE \\@ "{ft.get("date_format", "yyyy-MM-dd")}" ',
+              placeholder="2026-01-01", bold=True)
+    # center text
+    f1 = ftbl.cell(0, 1).paragraphs[0]
+    f1.style = doc.styles["Footer"]
+    rr = f1.add_run(ft.get("center_text", ""))
+    run_fmt(rr, bold=True)
+    # page numbers
+    pt = ft.get("page_text", ["", " / ", ""])
+    f2 = ftbl.cell(0, 2).paragraphs[0]
+    f2.alignment = ALIGN.RIGHT
+    f2.style = doc.styles["Footer"]
+    rr = f2.add_run(pt[0]); run_fmt(rr, bold=True)
+    add_field(f2, "PAGE", placeholder="1", bold=True)
+    rr = f2.add_run(pt[1]); run_fmt(rr, bold=True)
+    add_field(f2, " NUMPAGES ", placeholder="1", bold=True)
+    rr = f2.add_run(pt[2]); run_fmt(rr, bold=True)
+
+
+def _build_cover(doc, cfg, meta):
+    cover = cfg["cover"]
+    t = cover["tables"]
+    colors = cfg["styles"]["colors"]
+
+    # ---- info table ----
+    info = t["info"]
+    sz = info.get("sz", 14)
+    t1 = doc.add_table(rows=2, cols=5)
+    table_center(t1)
+    table_grid(t1, info["cols_cm"])
+    table_outer_inner(t1, outer=info.get("outer", "double"), outer_sz=6,
+                      inner=info.get("inner", "single"), inner_sz=6, color="000000")
+    t1.cell(0, 0).merge(t1.cell(1, 0))
+    fill(t1.cell(0, 0), cover["company_line"], ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    labels = info.get("labels", {})
+    fill(t1.cell(0, 1), labels.get("title", "Project Name"), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    fill(t1.cell(0, 2), meta.get("title", ""), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    fill(t1.cell(0, 3), labels.get("secrecy", "Secrecy"), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    secrecy = meta.get("secrecy") or cover.get("secrecy_default", "")
+    # secrecy/classification color for the cover info cell; "secrecy" is the
+    # canonical key. A legacy alias is accepted for older configs.
+    _legacy_secrecy_key = "confiden" + "tial"
+    secrecy_color = (
+        colors.get("secrecy") or colors.get(_legacy_secrecy_key) or "4F81BD"
+    )
+    fill(t1.cell(0, 4), secrecy, bold=True, italic=True, color=secrecy_color,
+         align=ALIGN.CENTER, valign="center")
+    fill(t1.cell(1, 1), labels.get("doc_no", "Project Code"), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    fill(t1.cell(1, 2), meta.get("doc_no", ""), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    fill(t1.cell(1, 3), labels.get("pages", "Pages"), ascii="Arial", size=sz,
+         align=ALIGN.CENTER, valign="center")
+    if cover.get("page_count_field", True):
+        pg = t1.cell(1, 4).paragraphs[0]
+        pg.alignment = ALIGN.CENTER
+        cell_valign(t1.cell(1, 4), "center")
+        pgt = cover.get("page_text", ["", ""])
+        pg.add_run(pgt[0])
+        add_field(pg, " NUMPAGES ", placeholder="1")
+        pg.add_run(pgt[1])
+
+    # ---- big title block ----
+    bt = cover.get("big_title", {})
+    p = doc.add_paragraph()
+    p.alignment = ALIGN.CENTER
+    r = p.add_run(meta.get("title") or bt.get("placeholder", ""))
+    run_fmt(r, ascii="Arial", size=bt.get("size_pt", 24), bold=True, italic=True, color="000000")
+    if bt.get("subtitle"):
+        p = doc.add_paragraph()
+        p.alignment = ALIGN.CENTER
+        p.add_run(bt["subtitle"])
+    doc.add_paragraph()
+
+    # ---- logo + company name lines ----
+    logo_path = cfg["_logo_path"]
+    if logo_path and os.path.exists(logo_path):
+        lp = doc.add_paragraph()
+        lp.alignment = ALIGN.CENTER
+        lp.add_run().add_picture(logo_path, width=Cm(cover.get("logo_cm", 2.6)))
+    for line in cover.get("company_names", []):
+        p = doc.add_paragraph()
+        p.alignment = ALIGN.CENTER
+        r = p.add_run(line["text"])
+        run_fmt(r, ascii=line.get("ascii", "Arial"),
+                eastasia=line.get("eastAsia"), size=line.get("size_pt", 16))
+    doc.add_paragraph()
+
+    # ---- signature table ----
+    sig = t["signature"]
+    rows = sig["rows"]
+    t2 = doc.add_table(rows=len(rows), cols=5)
+    table_center(t2)
+    table_grid(t2, sig["cols_cm"])
+    sign_cols = sig.get("sign_cols", [1, 4])
+    for r_i, (lab, dat) in enumerate(rows):
+        fill(t2.cell(r_i, 0), lab, ascii="Arial", size=12, valign="bottom")
+        fill(t2.cell(r_i, 3), dat, ascii="Arial", size=12, valign="bottom")
+        if sig.get("sign_underline", True):
+            for sc in sign_cols:
+                cell_borders(t2.cell(r_i, sc), ["bottom"], val="single", sz=6, color="auto")
+                cell_valign(t2.cell(r_i, sc), "bottom")
+        for ci in range(5):
+            for p in t2.cell(r_i, ci).paragraphs:
+                pf = p.paragraph_format
+                pf.space_before = Pt(0)
+                pf.space_after = Pt(0)
+                pf.line_spacing = 1.0
+    # fill author / reviewers / approver values if present
+    sign_vals = [meta.get("author", "")] + list(meta.get("reviewers", [])) + [meta.get("approver", "")]
+    for r_i in range(len(rows)):
+        if r_i < len(sign_vals) and sign_vals[r_i]:
+            fill(t2.cell(r_i, 1), sign_vals[r_i], ascii="Arial", size=12, valign="bottom")
+    doc.add_page_break()
+
+    # ---- revision table ----
+    rev = t["revision"]
+    rev_title = rev.get("title", {})
+    p = doc.add_paragraph()
+    p.alignment = ALIGN.CENTER
+    r = p.add_run(rev_title.get("text", "Revision History"))
+    run_fmt(r, ascii=rev_title.get("ascii", "Arial"),
+            eastasia=rev_title.get("eastAsia"), size=rev_title.get("size_pt", 16))
+    doc.add_paragraph()
+    headers = rev["headers"]
+    revisions = meta.get("revisions", [])
+    t3 = doc.add_table(rows=1 + max(1, len(revisions)), cols=len(headers))
+    table_center(t3)
+    table_grid(t3, rev["cols_cm"])
+    table_all_single(t3, sz=6, color="auto")
+    hf = rev.get("header_font", {"ascii": "SimSun", "size_pt": 10.5})
+    for c, htxt in enumerate(headers):
+        fill(t3.cell(0, c), htxt, ascii=hf["ascii"], size=hf["size_pt"], bold=True,
+             align=ALIGN.CENTER)
+    # rows: header order is [date, version, note, author]
+    for ri, rv in enumerate(revisions, start=1):
+        fill(t3.cell(ri, 0), rv.get("date", ""), ascii="Arial", size=10.5)
+        fill(t3.cell(ri, 1), rv.get("ver", ""), ascii="Arial", size=10.5)
+        fill(t3.cell(ri, 2), rv.get("note", ""), ascii="Arial", size=10.5)
+        fill(t3.cell(ri, 3), rv.get("author", ""), ascii="Arial", size=10.5)
+    doc.add_page_break()
+
+
+def _build_toc(doc, cfg):
+    toc = cfg.get("toc", {})
+    p = doc.add_paragraph()
+    r = p.add_run(toc.get("title", "Contents"))
+    run_fmt(r, ascii="Arial", size=toc.get("size_pt", 24))
+    p = doc.add_paragraph()
+    add_field(p, toc.get("field", 'TOC \\o "1-3" \\h \\z \\u'),
+              placeholder=toc.get("placeholder", "(right-click -> update field)"))
+    doc.add_page_break()
+
+
+# ===========================================================================
+# Body: outline traversal + the four block types
+# ===========================================================================
+def _render_fixed_body(doc, fb, names):
+    style_name = fb.get("style", names["body_name"])
+    # map config style aliases to actual style names
+    if style_name in ("body", names["body_name"]):
+        style_name = names["body_name"]
+    elif style_name in ("mybody", names["mybody_name"]):
+        style_name = names["mybody_name"]
+    for para in fb["paragraphs"]:
+        p = doc.add_paragraph(style=style_name)
+        for run in para["runs"]:
+            r = p.add_run(run["t"])
+            run_fmt(r, ascii=run.get("ascii"), eastasia=run.get("eastAsia"),
+                    bold=run.get("b"), italic=run.get("i"), color=run.get("color"))
+
+
+def _render_para(doc, block, body_name):
+    lst = block.get("list")
+    if lst == "bullet":
+        p = doc.add_paragraph(style="List Bullet")
+    elif lst == "number":
+        p = doc.add_paragraph(style="List Number")
+    else:
+        p = doc.add_paragraph(style=body_name)
+    for run in block.get("runs", []):
+        r = p.add_run(run["t"])
+        run_fmt(r, bold=run.get("b"), italic=run.get("i"), color=run.get("color"))
+
+
+def _render_image(doc, block, project_dir, chap, seq, cfg):
+    fname = block.get("file", "")
+    width = block.get("width_cm", 12.0)
+    path = os.path.join(project_dir, fname.replace("/", os.sep)) if fname else ""
+    pic_p = doc.add_paragraph()
+    pic_p.alignment = ALIGN.CENTER
+    if path and os.path.exists(path):
+        try:
+            pic_p.add_run().add_picture(path, width=Cm(width))
+        except Exception as ex:
+            r = pic_p.add_run(f"[image: {fname}]")
+            run_fmt(r, color="C00000")
+            print("  ! image failed:", ex)
+    else:
+        r = pic_p.add_run(f"[image placeholder: {fname}]")
+        run_fmt(r, color="C00000")
+    caption = block.get("caption", "")
+    prefix = cfg.get("caption_prefix", {}).get("image", "Figure")
+    cp = doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
+
+
+def _render_caption(doc, text, cfg):
+    doc.add_paragraph(text, style="Caption")
+
+
+def _build_outline(doc, cfg, outline, names):
+    body_name = names["body_name"]
+    fixed_bodies = cfg.get("fixed_bodies", {})
+    comp_cfg = cfg["compliance"]
+    free_cfg = cfg.get("free_table", {})
+    cap_prefix = cfg.get("caption_prefix", {"image": "Figure", "table": "Table"})
+
+    # chapter-sequence counters: keyed by chapter number
+    state = {"chap": 0, "img_seq": {}, "tbl_seq": {}}
+
+    def walk(node, depth):
+        level = depth + 1
+        if level == 1:
+            state["chap"] += 1
+            state["img_seq"][state["chap"]] = 0
+            state["tbl_seq"][state["chap"]] = 0
+        chap = state["chap"]
+        doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
+
+        # fixed body wins over blocks
+        fb_key = node.get("fixed_body")
+        if fb_key and fb_key in fixed_bodies:
+            _render_fixed_body(doc, fixed_bodies[fb_key], names)
+        else:
+            for block in node.get("blocks", []):
+                btype = block.get("type")
+                if btype == "para":
+                    _render_para(doc, block, body_name)
+                elif btype == "image":
+                    state["img_seq"][chap] += 1
+                    _render_image(doc, block, cfg["_project_dir"], chap,
+                                  state["img_seq"][chap], cfg)
+                elif btype == "datatable":
+                    cap = block.get("caption", "")
+                    if cap:
+                        state["tbl_seq"][chap] += 1
+                        _render_caption(doc, f'{cap_prefix["table"]} {chap}-'
+                                             f'{state["tbl_seq"][chap]}  {cap}', cfg)
+                    tables.render_datatable(doc, block["data"], comp_cfg)
+                elif btype == "table":
+                    cap = block.get("caption", "")
+                    if cap:
+                        state["tbl_seq"][chap] += 1
+                        _render_caption(doc, f'{cap_prefix["table"]} {chap}-'
+                                             f'{state["tbl_seq"][chap]}  {cap}', cfg)
+                    tables.render_free_table(doc, block.get("rows", []), free_cfg,
+                                             header_rows=block.get("header_rows", 1),
+                                             merges=block.get("merges"),
+                                             col_w=block.get("col_w"))
+
+        for child in node.get("children", []):
+            walk(child, depth + 1)
+
+    for node in outline:
+        walk(node, 0)
+
+
+# ===========================================================================
+# Top-level render
+# ===========================================================================
+def render_report(project, cfg, project_dir, out_path):
+    if project.get("schema_version") != 1:
+        raise ValueError(f"unsupported schema_version: {project.get('schema_version')}")
+
+    cfg["_project_dir"] = project_dir
+    meta = project.get("meta", {})
+    styles = cfg["styles"]
+
+    doc = Document()
+    names = _apply_page_and_styles(doc, styles)
+
+    _build_header(doc, styles, meta, cfg["_logo_path"])
+    _build_footer(doc, styles)
+    _build_cover(doc, cfg, meta)
+    _build_toc(doc, cfg)
+    _build_outline(doc, cfg, project.get("outline", []), names)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    doc.save(out_path)
+    return out_path
+
+
+# ===========================================================================
+# Config resolution + CLI
+# ===========================================================================
+def _resolve_config_path(project, project_dir, explicit):
+    if explicit:
+        return explicit
+    env = os.environ.get("BUILDER_TEMPLATE_CONFIG")
+    if env:
+        return env
+    tid = project.get("template", "")
+    # look next to the project's parent folder
+    parent = os.path.dirname(os.path.abspath(project_dir.rstrip(os.sep)))
+    cand = os.path.join(parent, f"template_config_{tid}.json")
+    if os.path.exists(cand):
+        return cand
+    cand2 = os.path.join(os.path.dirname(parent), f"template_config_{tid}.json")
+    if os.path.exists(cand2):
+        return cand2
+    raise FileNotFoundError(
+        f"template config not found; pass --config or set BUILDER_TEMPLATE_CONFIG "
+        f"(looked for template_config_{tid}.json)")
+
+
+def _load_config(config_path):
+    with open(config_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    # resolve logo relative to the config file's folder
+    cfg_dir = os.path.dirname(os.path.abspath(config_path))
+    logo = cfg.get("logo", "")
+    cfg["_logo_path"] = os.path.join(cfg_dir, logo) if logo else ""
+    return cfg
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Render a structured document to .docx")
+    ap.add_argument("project_folder", help="folder containing project.json")
+    ap.add_argument("--config", help="template config json (else env / auto-resolve)")
+    ap.add_argument("--out", help="output directory (default <project_folder>/out)")
+    args = ap.parse_args(argv)
+
+    project_dir = os.path.abspath(args.project_folder)
+    proj_path = os.path.join(project_dir, "project.json")
+    if not os.path.exists(proj_path):
+        print(f"error: {proj_path} not found", file=sys.stderr)
+        return 2
+    with open(proj_path, encoding="utf-8") as f:
+        project = json.load(f)
+
+    config_path = _resolve_config_path(project, project_dir, args.config)
+    cfg = _load_config(config_path)
+
+    name = os.path.basename(project_dir.rstrip(os.sep)) or "report"
+    out_dir = os.path.abspath(args.out) if args.out else os.path.join(project_dir, "out")
+    out_path = os.path.join(out_dir, f"{name}.docx")
+
+    render_report(project, cfg, project_dir, out_path)
+    print("OK ->", out_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
