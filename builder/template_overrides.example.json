@@ -1,0 +1,83 @@
+{
+  "_README": [
+    "Local overrides for make_config.py. Copy this file, fill it in, and pass it",
+    "with --overrides. Every value here REPLACES the value the extractor derived",
+    "(deep_merge with overrides winning; lists are replaced wholesale).",
+    "Put document-specific or non-English content here, NOT in make_config.py.",
+    "Keys whose name starts with '_' (like this one and '_comment') are stripped",
+    "and never reach the produced config -- use them for notes only."
+  ],
+
+  "id": "my_template_v1",
+  "_comment_id": "Short slug; must match the project.json 'template' field used at render time.",
+
+  "fixed_body_sections": [[1, 1], [1, 3]],
+  "_comment_fixed_body_sections": "1-based [chapter, sub-section] pairs whose body paragraphs are captured verbatim as reusable fixed bodies (sec_<chap>_<sub>).",
+
+  "skeleton_marks": { "compliance_chapter": 4 },
+  "_comment_skeleton_marks": "compliance_chapter = 1-based index of the top-level chapter that should carry the data-table mark (its children are dropped).",
+
+  "caption_prefix": { "image": "Figure", "table": "Table" },
+
+  "toc": {
+    "title": "Contents",
+    "size_pt": 24,
+    "field": "TOC \\o \"1-3\" \\h \\z \\u",
+    "placeholder": "(right-click -> update field)"
+  },
+
+  "cover": {
+    "_comment_fields": "GUI field schema list (application schema, not document text).",
+    "fields": [
+      { "key": "title",     "label": "Title",          "table": "info",      "required": true },
+      { "key": "doc_no",    "label": "Document No.",    "table": "info",      "required": false },
+      { "key": "secrecy",   "label": "Classification",  "table": "info",      "required": false },
+      { "key": "author",    "label": "Author",          "table": "signature", "required": false },
+      { "key": "reviewers", "label": "Reviewers",       "table": "signature", "required": false },
+      { "key": "approver",  "label": "Approver",        "table": "signature", "required": false },
+      { "key": "version",   "label": "Version",         "table": "revision",  "required": false }
+    ]
+  },
+
+  "compliance": {
+    "_comment": "Data-table styling/judgment block. Defaults below match the renderer.",
+    "col_w_cm": { "cat": 1.7, "item": 4.0, "spec": 1.0, "axis": 0.88, "spacer": 0.2, "unit": 1.0 },
+    "font_pt": 7,
+    "row_h_pt": { "header": 12, "data": 10 },
+    "axis_labels": ["MIN", "TYP", "MAX", "NTWC"],
+    "fills": { "header": "FFFF00", "setting": "EEECE1", "result": "FFFFFF", "separator": "B8CCE4" },
+    "setting_kinds": ["common_setting", "module_setting", "tb"],
+    "default_limit": {
+      "le": "flag values above the upper bound",
+      "ge": "flag values below the target",
+      "range": "flag values outside the spec range"
+    },
+    "flag_color": "FF0000",
+    "borders": { "val": "single", "sz": 4, "color": "000000" }
+  },
+
+  "free_table": {
+    "header_fill": "D9D9D9",
+    "border": { "val": "single", "sz": 4, "color": "000000" }
+  },
+
+  "ui_strings": {
+    "_comment": "UI labels for the editor application. Replace with your locale.",
+    "toolbar.open": "Open Project",
+    "toolbar.save": "Save",
+    "toolbar.new": "New",
+    "toolbar.export_docx": "Export Word",
+    "toolbar.export_pdf": "Export PDF Preview",
+    "block.add.para": "Paragraph",
+    "block.add.image": "Image",
+    "block.add.datatable": "Data Table",
+    "block.add.table": "Table",
+    "status.autosaved": "Auto-saved",
+    "cover.node": "Cover",
+    "node.fixed": "Fixed",
+    "node.template": "Template",
+    "compliance.editor": "Data Table Editor",
+    "compliance.add_group": "Add Group",
+    "compliance.add_axis": "Add Axis"
+  }
+}
