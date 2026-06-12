@@ -156,6 +156,24 @@
   .sm-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 9px;font-size:13px}
   .sm-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
 
+  /* shared grid interaction (select vs edit) */
+  table.grid.gi-grid{user-select:none;}                 /* select mode: no native text drag-select */
+  table.grid.gi-grid .cell{cursor:cell;}
+  table.grid.gi-grid .cell.gi-editing{cursor:text;user-select:text;background:#fff;
+    box-shadow:inset 0 0 0 2px var(--accent);}
+  .cell.cell-selected{background:var(--accent-soft);}
+  .cell.cell-focus{box-shadow:inset 0 0 0 2px var(--accent);}
+  .cell.cell-invalid{background:#fff7ed;box-shadow:inset 0 0 0 1px var(--warn);}
+
+  /* structural drag-reorder (neutral accent; distinct from the red flag style) */
+  table.grid tr.dragging{opacity:.5}
+  table.grid tr.dragover td{box-shadow:inset 0 -2px 0 var(--accent)}
+  td.row-actions{white-space:nowrap;text-align:center}
+  td.row-actions .drag-handle{vertical-align:middle}
+  .sim-chip.dragging{opacity:.5}
+  .sim-chip.dragover{box-shadow:inset 0 0 0 2px var(--accent)}
+  .axis-chip.dragover{box-shadow:inset 0 0 0 2px var(--accent)}
+
   /* datatable / compliance */
   .dt-section{border:1px solid var(--line2);border-radius:6px;margin-bottom:10px}
   .dt-section>.dt-sh{padding:6px 10px;font-weight:600;font-size:13px;background:#fafbfc;
@@ -488,12 +506,28 @@ function blankComplianceData(){
   const cc = App.config.compliance || {};
   const axes = cc.axis_labels || ["MIN","TYP","MAX","NTWC"];
   const stage = (cc.stages && cc.stages[0]) || "";
-  return { spec_name:"", sims:[ { key:(stage||"g").toLowerCase(), title:"", stage, axes: axes.slice() } ], rows:[] };
+  const sims = [];
+  sims.push({ key:uniqueSimKey(sims, stage), title:"", stage, axes: axes.slice() });
+  return { spec_name:"", sims, rows:[] };
 }
 function newComplianceRow(){
   return { cat:"", item:"", unit:"", kind:"result",
            spec:null, spec_mtm:[null,null,null], sim_mtm:[null,null,null],
            spec_ntwc:null, sim_ntwc:null, limit:null, sim_span:false };
+}
+// MIN/TYP/MAX map onto sim_mtm[0..2]; every OTHER axis collapses to the single
+// scalar sim_ntwc. Until the model is migrated (see TODO at simAxisCell), a group
+// may carry at most ONE non-MTM axis or values silently overwrite each other.
+const MTM_AXES = {MIN:0,TYP:1,MAX:2};
+function isMtmAxis(label){ return MTM_AXES[String(label||"").toUpperCase()] != null; }
+function nonMtmAxisCount(sim){ return (sim.axes||[]).filter(a=>!isMtmAxis(a)).length; }
+// Assign a stable, unique key at group CREATION (kept stable across stage edits).
+function uniqueSimKey(sims, stage){
+  const base = String(stage||"g").toLowerCase() || "g";
+  const taken = new Set(sims.map(s=>s.key));
+  if (!taken.has(base)) return base;
+  let i=2; while(taken.has(base+i)) i++;
+  return base+i;
 }
 
 /* ============================================================================
@@ -852,7 +886,7 @@ function wireBlockDrag(card, node, idx){
 function buildAddBlock(node, atIndex){
   const wrap = el("div",{class:"add-block"});
   const picker = el("div",{class:"picker hidden"});
-  const trigger = el("button",{class:"add-trigger", html:"＋ "+T("block.add","Add block"),
+  const trigger = el("button",{class:"add-trigger", html:"+ "+T("block.add","Add block"),
     onclick:()=>picker.classList.toggle("hidden")});
   const defs = [
     ["para","¶","block.add.para","Paragraph"],
@@ -1068,8 +1102,10 @@ function editTable(host, block){
   tools.appendChild(mkBtn("− "+T("table.col","Col"), ()=>{ if(colCount(block)>1){ block.rows.forEach(r=>r.pop()); if(block.col_w) block.col_w.pop(); markDirty(); rebuild(); } }));
   tools.appendChild(el("span",{class:"mt-sep"}));
   tools.appendChild(el("label",{style:{color:"var(--muted)",fontSize:"13px"}, text:T("table.header_rows","Header rows:")}));
-  tools.appendChild(el("input",{class:"ti num", type:"number", min:"0", value:block.header_rows, style:{width:"64px"},
-    oninput:(e)=>{ block.header_rows=Math.max(0,parseInt(e.target.value)||0); markDirty(); rebuild(); }}));
+  const hdrInput = el("input",{class:"ti num", type:"number", min:"0", value:block.header_rows, style:{width:"64px"},
+    oninput:(e)=>{ block.header_rows=Math.max(0,parseInt(e.target.value)||0); markDirty();
+      restyleHeaderRows(ctx, block); }});
+  tools.appendChild(hdrInput);
 
   const wrap = el("div",{class:"grid-wrap"});
   const capRow = el("div",{class:"field-row"});
@@ -1080,63 +1116,43 @@ function editTable(host, block){
   const rebuild = ()=>{
     wrap.innerHTML="";
     const tbl = el("table",{class:"grid"});
+    ctx.reg.clear();
     block.rows.forEach((row, ri)=>{
       const tr = el("tr",{class: ri<block.header_rows?"hdr":""});
       row.forEach((val, ci)=>{
-        const cell = el("td",{},[
-          el("div",{class:"cell", contenteditable:"true", text:val,
-            oninput:(e)=>{ block.rows[ri][ci]=e.target.textContent; markDirty(); },
-            onblur:()=>saveProject(true),
-            onkeydown:(e)=>gridKeyNav(e, ri, ci, block, rebuild),
-            onpaste:(e)=>gridPaste(e, ri, ci, block, rebuild) })
-        ]);
-        tr.appendChild(cell);
+        const cellDiv = el("div",{class:"cell", text:val});   // NOTE: not contenteditable in select mode
+        const td = el("td",{},[cellDiv]);
+        regCell(ctx, {
+          r:ri, c:ci, type:"text", el:cellDiv,
+          read: ()=> block.rows[ri][ci] ?? "",
+          write:(s)=>{ block.rows[ri][ci] = s; cellDiv.textContent = s; },
+        });
+        tr.appendChild(td);
       });
       tbl.appendChild(tr);
     });
     wrap.appendChild(tbl);
+    ctx.table = tbl; tbl.classList.add("gi-grid");
+    restoreFocusAfterRender(ctx);
   };
+
+  const ctx = makeGridContext({
+    block, host:wrap,
+    rows:()=>block.rows.length, cols:()=>colCount(block),
+    rerender:()=>rebuild(), kind:"free",
+  });
   rebuild();
   host.appendChild(capRow);
   host.appendChild(tools);
   host.appendChild(wrap);
 }
 function colCount(block){ return block.rows.reduce((m,r)=>Math.max(m,r.length),0); }
-function gridKeyNav(e, ri, ci, block, rebuild){
-  const focusCell=(r,c)=>{
-    setTimeout(()=>{
-      const tbl = e.target.closest("table"); if(!tbl) return;
-      const tr = tbl.children[r]; if(!tr) return;
-      const td = tr.children[c]; if(!td) return;
-      const cell = td.querySelector(".cell"); if(cell){ cell.focus();
-        const sel=window.getSelection(), rng=document.createRange(); rng.selectNodeContents(cell); rng.collapse(false); sel.removeAllRanges(); sel.addRange(rng); }
-    },0);
-  };
-  if (e.key==="Tab"){ e.preventDefault();
-    let c=ci+1,r=ri; if(c>=colCount(block)){ c=0; r++; if(r>=block.rows.length){ block.rows.push(new Array(colCount(block)).fill("")); markDirty(); rebuild(); } }
-    focusCell(r,c);
-  } else if (e.key==="Enter" && !e.shiftKey){ e.preventDefault();
-    let r=ri+1; if(r>=block.rows.length){ block.rows.push(new Array(colCount(block)).fill("")); markDirty(); rebuild(); }
-    focusCell(r,ci);
-  }
-}
-function gridPaste(e, ri, ci, block, rebuild){
-  const txt = (e.clipboardData||window.clipboardData).getData("text/plain");
-  if (!txt || (txt.indexOf("\t")<0 && txt.indexOf("\n")<0)) return; // single value: default paste
-  e.preventDefault();
-  const matrix = parseTSV(txt);
-  matrix.forEach((rowVals, dr)=>{
-    const r = ri+dr;
-    while (block.rows.length<=r) block.rows.push(new Array(colCount(block)).fill(""));
-    rowVals.forEach((v, dc)=>{
-      const c = ci+dc;
-      while (block.rows[r].length<=c) block.rows[r].push("");
-      block.rows[r][c]=v;
-    });
+// toggle the .hdr class on existing rows without a full rebuild (preserves caret/selection)
+function restyleHeaderRows(ctx, block){
+  if (!ctx.table) return;
+  ctx.table.querySelectorAll("tr").forEach((tr, i)=>{
+    tr.classList.toggle("hdr", i < (block.header_rows||0));
   });
-  // normalize rectangular
-  const cc = colCount(block); block.rows.forEach(r=>{ while(r.length<cc) r.push(""); });
-  markDirty(); rebuild();
 }
 function parseTSV(txt){
   return txt.replace(/\r/g,"").replace(/\n$/,"").split("\n").map(l=>l.split("\t"));
@@ -1145,9 +1161,14 @@ function parseTSV(txt){
 /* ============================================================================
    BLOCK EDITOR ③  DATATABLE (compliance)
 ============================================================================ */
+// fixed (non-axis) column count of the compliance grid:
+// cat,item,unit,kind,limit,spec,spec_mtm[0..2]
+const DT_FIXED_COLS = 9;
 function editDatatable(host, block){
   block.data = block.data || blankComplianceData();
-  const data = block.data;
+  // `data` is re-synced from block.data on every rebuild because undo replaces
+  // the whole block.data object (gridUndo -> ctx.block.data = snap.data).
+  let data = block.data;
   const cfg = App.config.compliance || {};
   const defaultAxes = cfg.axis_labels || ["MIN","TYP","MAX","NTWC"];
   // stage presets are config-driven (neutral fallback); used for quick-add + the stage dropdown
@@ -1176,13 +1197,94 @@ function editDatatable(host, block){
   const simSec = el("div",{class:"dt-section"});
   simSec.appendChild(el("div",{class:"dt-sh"},[ document.createTextNode(T("datatable.groups","Simulation groups / axes")) ]));
   const simBd = el("div",{class:"dt-bd"});
+  // move an array element left/right (no-drag reorder fallback, decision 9)
+  const moveInArr = (arr, i, dir)=>{ const j=i+dir; if(j<0||j>=arr.length) return false;
+    const [m]=arr.splice(i,1); arr.splice(j,0,m); return true; };
+
+  // ---- drag-reorder wirers (mirror wireBlockDrag; snapshot BEFORE the reorder) ----
+  // Sim GROUP drag (reorders data.sims). Scoped to this block via the closure.
+  let simGroupDragSrc=null;
+  function wireSimGroupDrag(chip, si){
+    chip.addEventListener("dragstart",(e)=>{ simGroupDragSrc=si; chip.classList.add("dragging");
+      e.dataTransfer.effectAllowed="move"; });
+    chip.addEventListener("dragend",()=>{ chip.classList.remove("dragging"); simGroupDragSrc=null;
+      simBd.querySelectorAll(".sim-chip.dragover").forEach(c=>c.classList.remove("dragover")); });
+    chip.addEventListener("dragover",(e)=>{ if(simGroupDragSrc!=null && simGroupDragSrc!==si){ e.preventDefault();
+      chip.classList.add("dragover"); }});
+    chip.addEventListener("dragleave",()=>chip.classList.remove("dragover"));
+    chip.addEventListener("drop",(e)=>{
+      e.preventDefault(); chip.classList.remove("dragover");
+      if (simGroupDragSrc==null || simGroupDragSrc===si) return;
+      snapshot(ctx);
+      const [g]=data.sims.splice(simGroupDragSrc,1); data.sims.splice(si,0,g);
+      markDirty(); redrawSims(); rebuildMetrics();
+    });
+  }
+  // AXIS drag within a single group. stopPropagation keeps it from also firing the
+  // enclosing group drag; constrained to the same group (axisDragSrc.si===si).
+  let axisDragSrc=null; // {si, ai}
+  function wireAxisDrag(aChip, si, ai){
+    aChip.addEventListener("dragstart",(e)=>{ axisDragSrc={si,ai}; aChip.classList.add("dragging");
+      e.dataTransfer.effectAllowed="move"; e.stopPropagation(); });
+    aChip.addEventListener("dragend",()=>{ aChip.classList.remove("dragging"); axisDragSrc=null;
+      simBd.querySelectorAll(".axis-chip.dragover").forEach(c=>c.classList.remove("dragover")); });
+    aChip.addEventListener("dragover",(e)=>{ if(axisDragSrc && axisDragSrc.si===si && axisDragSrc.ai!==ai){
+      e.preventDefault(); e.stopPropagation(); aChip.classList.add("dragover"); }});
+    aChip.addEventListener("dragleave",()=>aChip.classList.remove("dragover"));
+    aChip.addEventListener("drop",(e)=>{
+      e.preventDefault(); e.stopPropagation(); aChip.classList.remove("dragover");
+      if (!axisDragSrc || axisDragSrc.si!==si || axisDragSrc.ai===ai) return;
+      snapshot(ctx);
+      const ax=data.sims[si].axes; const [m]=ax.splice(axisDragSrc.ai,1); ax.splice(ai,0,m);
+      markDirty(); redrawSims(); rebuildMetrics();
+    });
+  }
+  // metric ROW drag (reorders data.rows). Called per-<tr> in rebuildMetrics.
+  let metricDragSrc=null;
+  function wireMetricRowDrag(tr, ri){
+    tr.addEventListener("dragstart",(e)=>{ metricDragSrc=ri; tr.classList.add("dragging");
+      e.dataTransfer.effectAllowed="move"; });
+    tr.addEventListener("dragend",()=>{ tr.classList.remove("dragging"); metricDragSrc=null;
+      metricWrap.querySelectorAll("tr.dragover").forEach(t=>t.classList.remove("dragover")); });
+    tr.addEventListener("dragover",(e)=>{ if(metricDragSrc!=null && metricDragSrc!==ri){ e.preventDefault();
+      tr.classList.add("dragover"); }});
+    tr.addEventListener("dragleave",()=>tr.classList.remove("dragover"));
+    tr.addEventListener("drop",(e)=>{
+      e.preventDefault(); tr.classList.remove("dragover");
+      if (metricDragSrc==null || metricDragSrc===ri) return;
+      snapshot(ctx);
+      const [m]=data.rows.splice(metricDragSrc,1); data.rows.splice(ri,0,m);
+      markDirty(); rebuildMetrics(); validate(); focusCellAt(ctx, ri, 0);
+    });
+  }
+  const addGroup = (stage)=>{
+    const st = stage!=null ? stage : (stagePresets[0]||"");
+    snapshot(ctx);                                          // undo BEFORE adding a group (decision 7)
+    data.sims.push({ key:uniqueSimKey(data.sims, st), title:"", stage:st, axes:defaultAxes.slice() });
+    markDirty(); redrawSims(); rebuildMetrics();
+  };
   const redrawSims = ()=>{
     simBd.innerHTML="";
     const chips = el("div",{class:"chip-list"});
     data.sims.forEach((s, si)=>{
       const chip = el("div",{class:"sim-chip"});
+      // drag handle toggles draggable only while the handle is grabbed (matches block-card pattern)
+      const gHandle = el("span",{class:"drag-handle", title:T("block.drag","Drag to reorder"), text:"⠿"});
+      gHandle.addEventListener("mousedown",()=>chip.setAttribute("draggable","true"));
+      chip.addEventListener("dragend",()=>chip.setAttribute("draggable","false"));
+      chip.appendChild(gHandle);
+      wireSimGroupDrag(chip, si);
+      // group reorder (left/right) — no-drag fallback; snapshot BEFORE reorder (decision 7)
+      const gLeft = el("button",{class:"x-mini", title:T("grid.move_up","Move up"), text:"‹",
+        onclick:()=>{ snapshot(ctx); if(moveInArr(data.sims,si,-1)){ markDirty(); redrawSims(); rebuildMetrics(); } }});
+      const gRight = el("button",{class:"x-mini", title:T("grid.move_down","Move down"), text:"›",
+        onclick:()=>{ snapshot(ctx); if(moveInArr(data.sims,si,1)){ markDirty(); redrawSims(); rebuildMetrics(); } }});
+      if (si===0) gLeft.disabled=true;
+      if (si===data.sims.length-1) gRight.disabled=true;
+      chip.appendChild(gLeft); chip.appendChild(gRight);
+      // stage select — key is assigned ONCE at creation and kept stable (decision 10)
       const stageSel = el("select",{class:"ti", style:{padding:"2px 4px"},
-        onchange:(e)=>{ s.stage=e.target.value; s.key=e.target.value.toLowerCase(); markDirty(); }});
+        onchange:(e)=>{ s.stage=e.target.value; markDirty(); }});
       const stageOpts = stagePresets.slice();
       if (s.stage && stageOpts.indexOf(s.stage)<0) stageOpts.unshift(s.stage); // keep custom value
       stageOpts.forEach(st=>{
@@ -1191,30 +1293,59 @@ function editDatatable(host, block){
       chip.appendChild(stageSel);
       chip.appendChild(el("input",{class:"ti", value:s.title||"", placeholder:T("datatable.group_title","group title"),
         style:{width:"120px",padding:"2px 6px"}, oninput:(e)=>{ s.title=e.target.value; markDirty(); }}));
-      // axes
+      // axes (reorderable via left/right buttons)
       const axBox = el("span",{class:"chip-list"});
       (s.axes=s.axes||defaultAxes.slice()).forEach((ax, ai)=>{
-        axBox.appendChild(el("span",{class:"axis-chip"},[ document.createTextNode(ax),
-          el("button",{class:"x-mini", text:"×", onclick:()=>{ s.axes.splice(ai,1); markDirty(); redrawSims(); rebuildMetrics(); }}) ]));
+        const aChip = el("span",{class:"axis-chip", draggable:"false"});
+        const aHandle = el("span",{class:"drag-handle", style:{fontSize:"11px"}, text:"⠿",
+          title:T("block.drag","Drag to reorder")});
+        aHandle.addEventListener("mousedown",()=>aChip.setAttribute("draggable","true"));
+        aChip.addEventListener("dragend",()=>aChip.setAttribute("draggable","false"));
+        aChip.appendChild(aHandle);
+        aChip.appendChild(el("button",{class:"x-mini", title:T("grid.move_up","Move up"), text:"‹",
+          onclick:()=>{ snapshot(ctx); if(moveInArr(s.axes,ai,-1)){ markDirty(); redrawSims(); rebuildMetrics(); } }}));
+        aChip.appendChild(document.createTextNode(ax));
+        aChip.appendChild(el("button",{class:"x-mini", title:T("grid.move_down","Move down"), text:"›",
+          onclick:()=>{ snapshot(ctx); if(moveInArr(s.axes,ai,1)){ markDirty(); redrawSims(); rebuildMetrics(); } }}));
+        aChip.appendChild(el("button",{class:"x-mini", text:"×", title:T("action.delete","Delete"),
+          onclick:()=>{ snapshot(ctx); s.axes.splice(ai,1); markDirty(); redrawSims(); rebuildMetrics(); }}));
+        wireAxisDrag(aChip, si, ai);
+        axBox.appendChild(aChip);
       });
-      const addAx = el("button",{class:"x-mini", title:T("datatable.add_axis","Add axis"), text:"＋",
-        onclick:()=>{ const nm=prompt(T("datatable.axis_name","Axis label (e.g. NTWC)"),"NTWC"); if(nm){ s.axes.push(nm.trim()); markDirty(); redrawSims(); rebuildMetrics(); } }});
+      const addAx = el("button",{class:"x-mini", title:T("datatable.add_axis","Add axis"), text:"+",
+        onclick:()=> addAxisTo(s)});
       axBox.appendChild(addAx);
       chip.appendChild(axBox);
       chip.appendChild(el("button",{class:"x-mini", title:T("action.delete","Delete"), text:"🗑",
-        onclick:()=>{ data.sims.splice(si,1); markDirty(); redrawSims(); rebuildMetrics(); }}));
+        onclick:()=>{ snapshot(ctx); data.sims.splice(si,1); markDirty(); redrawSims(); rebuildMetrics(); }}));
       chips.appendChild(chip);
     });
     simBd.appendChild(chips);
     const addG = el("div",{class:"grid-tools"});
     // quick-add buttons: one per configured stage preset, plus a generic "group"
     stagePresets.forEach(st=>{
-      addG.appendChild(el("button",{class:"sm-btn", text:"+ "+st,
-        onclick:()=>{ data.sims.push({key:st.toLowerCase(),title:"",stage:st,axes:defaultAxes.slice()}); markDirty(); redrawSims(); rebuildMetrics(); }}));
+      addG.appendChild(el("button",{class:"sm-btn", text:"+ "+st, onclick:()=>addGroup(st)}));
     });
     addG.appendChild(el("button",{class:"sm-btn", text:"+ "+T("datatable.group","Group"),
-      onclick:()=>{ const st=stagePresets[0]||""; data.sims.push({key:(st||"g").toLowerCase(),title:"",stage:st,axes:defaultAxes.slice()}); markDirty(); redrawSims(); rebuildMetrics(); }}));
+      onclick:()=>addGroup(null)}));
     simBd.appendChild(addG);
+  };
+  // add an axis via modalPrompt (replaces native prompt, decision 12), guarding the
+  // 2nd non-MTM axis that would silently overwrite sim_ntwc (decision 11).
+  const addAxisTo = (s)=>{
+    modalPrompt(T("datatable.add_axis","Add axis"),
+      T("datatable.axis_name","Axis label (e.g. NTWC)"), "", (nm)=>{
+        if (nm==null) return;
+        nm = nm.trim(); if (!nm) return;
+        if (!isMtmAxis(nm) && nonMtmAxisCount(s) >= 1){
+          // TODO: real fix is a model migration (sim_ntwc -> per-axis scalar map)
+          // coordinated with engine.py/tables.py; until then block to avoid data loss.
+          toast(T("grid.one_extra_axis","Only one extra axis per group is supported"), true);
+          return;
+        }
+        snapshot(ctx);
+        s.axes.push(nm); markDirty(); redrawSims(); rebuildMetrics();
+      });
   };
   simSec.appendChild(simBd);
   host.appendChild(simSec);
@@ -1227,10 +1358,21 @@ function editDatatable(host, block){
   const metricWrap = el("div",{class:"grid-wrap"});
   host.appendChild(metricWrap);
 
+  // shared select/copy/paste/fill/undo context for the metric grid.
+  // rows() = metric row count; cols() = fixed cols + flat sim-axis count.
+  const ctx = makeGridContext({
+    block, host:metricWrap, kind:"compliance",
+    rows:()=> data.rows.length,
+    cols:()=> DT_FIXED_COLS + data.sims.reduce((n,s)=>n+(s.axes||[]).length,0),
+    // re-sync `data` after an undo swaps block.data, then rebuild BOTH layers so the
+    // group/axis chip strip and its index-bound handlers match the restored data.
+    rerender:()=>{ data = block.data; redrawSims(); rebuildMetrics(); },
+  });
+
   // add-row controls
   const rowTools = el("div",{class:"grid-tools"});
   rowTools.appendChild(el("button",{class:"sm-btn", text:"+ "+T("datatable.metric","Metric row"),
-    onclick:()=>{ data.rows.push(newComplianceRow()); markDirty(); rebuildMetrics(); }}));
+    onclick:()=>{ snapshot(ctx); data.rows.push(newComplianceRow()); markDirty(); rebuildMetrics(); }}));
   host.appendChild(rowTools);
 
   let flags = {}; // rowIndex -> [axisIndex...] (flat index across sims)
@@ -1251,14 +1393,29 @@ function editDatatable(host, block){
     });
   }
 
+  // structural ops on metric rows (mirror block-card actions). Each snapshots
+  // BEFORE mutating so a mis-op is undoable, then rebuilds + restores focus.
+  function rowStruct(ri, op){
+    snapshot(ctx);
+    if (op==="delete"){ data.rows.splice(ri,1); }
+    else if (op==="above"){ data.rows.splice(ri,0,newComplianceRow()); }
+    else if (op==="below"){ data.rows.splice(ri+1,0,newComplianceRow()); }
+    else if (op==="up"){ if(ri<=0) return; const [m]=data.rows.splice(ri,1); data.rows.splice(ri-1,0,m); }
+    else if (op==="down"){ if(ri>=data.rows.length-1) return; const [m]=data.rows.splice(ri,1); data.rows.splice(ri+1,0,m); }
+    markDirty(); rebuildMetrics(); validate();
+  }
+
   function rebuildMetrics(){
+    data = block.data;                       // re-sync after a possible undo swap
     metricWrap.innerHTML="";
+    ctx.reg.clear();
     const tbl = el("table",{class:"grid"});
     // header rows: group titles, then axis labels
     const flatAxes = []; // {si, ai, label}
     data.sims.forEach((s, si)=> (s.axes||[]).forEach((ax, ai)=> flatAxes.push({si, ai, label:ax})));
 
     const hr1 = el("tr",{class:"hdr"});
+    hr1.appendChild(el("th",{}));                                  // row-actions column
     hr1.appendChild(el("th",{html:T("datatable.col.cat","Category")}));
     hr1.appendChild(el("th",{html:T("datatable.col.item","Item")}));
     hr1.appendChild(el("th",{html:T("datatable.col.unit","Unit")}));
@@ -1270,46 +1427,45 @@ function editDatatable(host, block){
     tbl.appendChild(hr1);
 
     const hr2 = el("tr",{class:"hdr"});
-    ["","","","","",""].forEach(()=>hr2.appendChild(el("th",{})));
+    ["","","","","","",""].forEach(()=>hr2.appendChild(el("th",{})));   // actions + 6 fixed
     ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
     flatAxes.forEach(fa=> hr2.appendChild(el("th",{text:fa.label})));
     tbl.appendChild(hr2);
 
     data.rows.forEach((row, ri)=>{
       const tr = el("tr",{});
-      tr.appendChild(textCell(row,"cat",ri,rebuildMetrics));
-      tr.appendChild(textCell(row,"item",ri,rebuildMetrics));
-      tr.appendChild(textCell(row,"unit",ri,rebuildMetrics));
-      // kind
-      const kindTd = el("td",{});
-      const ksel = el("select",{class:"cell", style:{border:"0",width:"100%"},
-        onchange:(e)=>{ row.kind=e.target.value; markDirty(); validate(); }});
-      ["common_setting","module_setting","tb","result"].forEach(k=>{
-        const o=el("option",{value:k,text:k}); if(row.kind===k)o.selected=true; ksel.appendChild(o); });
-      kindTd.appendChild(ksel); tr.appendChild(kindTd);
-      // limit
-      const limTd = el("td",{});
-      const lsel = el("select",{class:"cell", style:{border:"0",width:"100%"},
-        onchange:(e)=>{ row.limit = e.target.value||null; markDirty(); validate(); }});
-      [["","—"],["le","le"],["ge","ge"],["range","range"]].forEach(([v,t])=>{
-        const o=el("option",{value:v,text:t}); if((row.limit||"")===v)o.selected=true; lsel.appendChild(o); });
-      limTd.appendChild(lsel); tr.appendChild(limTd);
-      // spec scalar
-      tr.appendChild(numCell(row,"spec",ri,()=>validate()));
-      // spec_mtm 3
-      [0,1,2].forEach(k=> tr.appendChild(numArrCell(row,"spec_mtm",k,()=>validate())));
+      const actTd = rowActionsCell(ri, data.rows.length, rowStruct);     // not a grid cell
+      // row drag handle (toggles draggable only while grabbed; mirrors block-card)
+      const rowHandle = el("span",{class:"drag-handle", title:T("block.drag","Drag to reorder"), text:"⠿"});
+      rowHandle.addEventListener("mousedown",()=>tr.setAttribute("draggable","true"));
+      tr.addEventListener("dragend",()=>tr.setAttribute("draggable","false"));
+      actTd.insertBefore(rowHandle, actTd.firstChild);
+      tr.appendChild(actTd);
+      wireMetricRowDrag(tr, ri);
+      // fixed columns 0..8 (column index = factory arg `c`)
+      tr.appendChild(textCell(ctx, row,"cat",  ri, 0));
+      tr.appendChild(textCell(ctx, row,"item", ri, 1));
+      tr.appendChild(textCell(ctx, row,"unit", ri, 2));
+      tr.appendChild(selectCell(ctx, row, ri, 3, "kind", false,
+        ["common_setting","module_setting","tb","result"], "result", ()=>validate()));
+      tr.appendChild(selectCell(ctx, row, ri, 4, "limit", true,
+        ["le","ge","range"], null, ()=>validate()));
+      tr.appendChild(numCell(ctx, row,"spec", ri, 5, ()=>validate()));
+      [0,1,2].forEach(k=> tr.appendChild(numArrCell(ctx, row,"spec_mtm", k, ri, DT_FIXED_COLS-3+k, ()=>validate())));
       // sim axes (flat) — map axis label to sim_mtm[0..2] or sim_ntwc
       let flat=0;
       data.sims.forEach((s, si)=>{
         (s.axes||[]).forEach((ax, ai)=>{
-          const td = simAxisCell(row, ax, ri, flat, ()=>validate());
-          tr.appendChild(td); flat++;
+          tr.appendChild(simAxisCell(ctx, row, ax, ri, flat, DT_FIXED_COLS+flat, ()=>validate()));
+          flat++;
         });
       });
       tbl.appendChild(tr);
     });
     metricWrap.appendChild(tbl);
+    ctx.table = tbl; tbl.classList.add("gi-grid");
     paintFlags();
+    restoreFocusAfterRender(ctx);
   }
 
   redrawSims();
@@ -1317,29 +1473,99 @@ function editDatatable(host, block){
   validate();
 }
 
-// generic editable text cell bound to row[key]
-function textCell(row, key, ri, rebuild){
-  return el("td",{},[ el("div",{class:"cell", contenteditable:"true", text:row[key]||"",
-    oninput:(e)=>{ row[key]=e.target.textContent; markDirty(); }, onblur:()=>saveProject(true) }) ]);
+// per-row structural actions (delete / insert above-below / move up-down).
+// This is a chrome column, NOT a grid cell — no adapter is registered for it.
+function rowActionsCell(ri, total, rowStruct){
+  const td = el("td",{class:"row-actions", style:{padding:"2px"}});
+  const b = (txt, key, k, disabled)=> el("button",{class:"icon-btn"+(key==="delete"?" danger":""),
+    title:T(k, txt), text:txt, disabled:disabled?"":null, onclick:()=>rowStruct(ri,key)});
+  td.appendChild(b("↑","up","grid.move_up", ri===0));
+  td.appendChild(b("↓","down","grid.move_down", ri===total-1));
+  td.appendChild(b("⊕","below","grid.insert_row_below", false));
+  td.appendChild(b("⊝","above","grid.insert_row_above", false));
+  td.appendChild(b("✕","delete","grid.delete_row", false));
+  return td;
 }
-function numCell(row, key, ri, after){
-  return el("td",{},[ el("div",{class:"cell", contenteditable:"true", text: fmtNum(row[key]),
-    oninput:(e)=>{ row[key]=parseNum(e.target.textContent); markDirty(); after&&after(); }, onblur:()=>saveProject(true) }) ]);
+
+/* ---- compliance typed cell factories (register shared-layer adapters) ------ */
+// Each returns a <td> and registers a {r,c,type,el,read,write} adapter so the
+// shared select/copy/paste/fill layer can drive it via read()/write(str).
+
+// plain text cell bound to row[key]
+function textCell(ctx, row, key, ri, c){
+  const cell = el("div",{class:"cell", text:row[key]||""});
+  const td = el("td",{},[cell]);
+  regCell(ctx, { r:ri, c, type:"text", el:cell,
+    read:()=> row[key] || "",
+    write:(s)=>{ row[key]=s; cell.textContent=s; markDirty(); } });
+  return td;
 }
-function numArrCell(row, key, idx, after){
+// numeric cell bound to row[key]; flags non-numeric input but keeps the raw text
+function numCell(ctx, row, key, ri, c, after){
+  const cell = el("div",{class:"cell", text:fmtNum(row[key])});
+  const td = el("td",{},[cell]);
+  regCell(ctx, { r:ri, c, type:"number", el:cell,
+    read:()=> fmtNum(row[key]),
+    write:(s)=>{ const v=parseNum(s); row[key]=v; cell.textContent = s==="" ? "" : s; flagNumber(cell, v); markDirty(); after&&after(); } });
+  return td;
+}
+// numeric cell bound to row[key][idx] (e.g. spec_mtm)
+function numArrCell(ctx, row, key, idx, ri, c, after){
   row[key] = row[key] || [null,null,null];
-  return el("td",{},[ el("div",{class:"cell", contenteditable:"true", text: fmtNum(row[key][idx]),
-    oninput:(e)=>{ row[key][idx]=parseNum(e.target.textContent); markDirty(); after&&after(); }, onblur:()=>saveProject(true) }) ]);
+  const cell = el("div",{class:"cell", text:fmtNum(row[key][idx])});
+  const td = el("td",{},[cell]);
+  regCell(ctx, { r:ri, c, type:"number", el:cell,
+    read:()=> fmtNum(row[key][idx]),
+    write:(s)=>{ row[key]=row[key]||[null,null,null]; const v=parseNum(s); row[key][idx]=v; cell.textContent = s==="" ? "" : s; flagNumber(cell, v); markDirty(); after&&after(); } });
+  return td;
 }
-// a sim axis cell: for MIN/TYP/MAX -> sim_mtm[0..2]; otherwise (e.g. NTWC) -> sim_ntwc
-function simAxisCell(row, axisLabel, ri, flatIdx, after){
-  const mtmIdx = {MIN:0,TYP:1,MAX:2}[axisLabel.toUpperCase()];
+// a sim axis cell: MIN/TYP/MAX -> sim_mtm[0..2]; every OTHER axis -> sim_ntwc.
+// TODO: sim_ntwc is a single scalar, so 2+ non-MTM axes would overwrite each
+// other. Real fix is a model migration (sim_ntwc -> per-axis scalar map) in
+// engine.py/tables.py; until then addAxisTo()/paste block a 2nd non-MTM axis.
+function simAxisCell(ctx, row, axisLabel, ri, flatIdx, c, after){
+  const mtmIdx = MTM_AXES[String(axisLabel).toUpperCase()];
   const get = ()=> (mtmIdx!=null) ? (row.sim_mtm||[])[mtmIdx] : row.sim_ntwc;
   const set = (v)=>{ if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v; };
-  const td = el("td",{class:"axis-val", "data-r":ri, "data-flatax":flatIdx});
-  td.appendChild(el("div",{class:"cell", contenteditable:"true", text: fmtAxis(get()),
-    oninput:(e)=>{ set(parseAxis(e.target.textContent)); markDirty(); after&&after(); }, onblur:()=>saveProject(true) }));
+  const cell = el("div",{class:"cell", text:fmtAxis(get())});
+  const td = el("td",{class:"axis-val", "data-r":ri, "data-flatax":flatIdx},[cell]);
+  regCell(ctx, { r:ri, c, type:"axis", el:cell,
+    read:()=> fmtAxis(get()),
+    write:(s)=>{ const v=parseAxis(s); set(v); cell.textContent = s==="" ? "" : s;
+      // an axis value is valid if empty, a number, or a value(CORNER) tuple
+      cell.classList.toggle("cell-invalid", !(v===null || typeof v==="number" || Array.isArray(v)));
+      if (typeof v==="string") cell.title=T("cell.invalid_number","Not a valid number"); else cell.removeAttribute("title");
+      markDirty(); after&&after(); } });
   return td;
+}
+// select cell bound to row[key]; the typed write() matches the pasted string
+// against the allowed option values and refuses to store garbage (decision 5).
+function selectCell(ctx, row, ri, c, key, allowEmpty, options, fallback, after){
+  const sel = el("select",{class:"cell", style:{border:"0",width:"100%"},
+    onchange:(e)=>{ row[key] = e.target.value || (allowEmpty?null:fallback); markDirty(); after&&after(); }});
+  if (allowEmpty) sel.appendChild(el("option",{value:"",text:"—"}));
+  options.forEach(v=>{ const o=el("option",{value:v,text:v}); if((row[key]||"")===v) o.selected=true; sel.appendChild(o); });
+  const td = el("td",{},[sel]);
+  regCell(ctx, { r:ri, c, type:"select", el:sel,
+    read:()=> row[key]==null ? "" : String(row[key]),
+    write:(s)=>{
+      const t=(s||"").trim();
+      if (t==="" && allowEmpty){ row[key]=null; sel.value=""; cell_flag(sel,false); }
+      else if (options.indexOf(t)>=0){ row[key]=t; sel.value=t; cell_flag(sel,false); }
+      else { cell_flag(sel,true); return; }      // no match: leave unchanged, flag
+      markDirty(); after&&after();
+    } });
+  return td;
+}
+function cell_flag(elm, bad){
+  elm.classList.toggle("cell-invalid", bad);
+  if (bad) elm.title=T("cell.invalid_number","Value not allowed"); else elm.removeAttribute("title");
+}
+// flag a numeric cell whose parsed value is non-numeric (kept raw so user can fix)
+function flagNumber(cell, v){
+  const bad = (typeof v==="string");   // parseNum returns the raw string on failure
+  cell.classList.toggle("cell-invalid", bad);
+  if (bad) cell.title=T("cell.invalid_number","Not a valid number"); else cell.removeAttribute("title");
 }
 function fmtNum(v){ return (v===null||v===undefined||v==="") ? "" : String(v); }
 function parseNum(t){ t=(t||"").trim(); if(t==="") return null; const n=Number(t); return isNaN(n)?t:n; }
@@ -1361,8 +1587,379 @@ async function importXlsxCompliance(file, block){
   try{
     const b64 = await fileToB64(file);
     const r = await api("POST","/api/import-xlsx",{json:{xlsx_b64:b64, mode:"compliance"}});
-    if (r.data){ block.data = r.data; markDirty(); renderEditor(); toast(T("toast.imported","Imported")); }
+    if (r.data){
+      block.data = r.data;
+      // GUARD: the model stores a single scalar (sim_ntwc) per row for non-MTM axes,
+      // so a group with >1 non-MTM axis would silently clobber. Trim extras on import.
+      // TODO: real fix is a model migration (sim_ntwc -> per-axis) in engine.py/tables.py.
+      let trimmed=false;
+      (block.data.sims||[]).forEach(s=>{
+        let seenExtra=false;
+        s.axes=(s.axes||[]).filter(a=>{
+          if (isMtmAxis(a)) return true;
+          if (seenExtra){ trimmed=true; return false; }
+          seenExtra=true; return true;
+        });
+      });
+      if (trimmed) toast(T("grid.one_extra_axis","Only one extra axis per group is supported"), true);
+      markDirty(); renderEditor(); toast(T("toast.imported","Imported"));
+    }
   }catch(e){ toast("Import failed: "+e.message, true); }
+}
+
+/* ============================================================================
+   GRID INTERACTION LAYER (shared)
+   A generic select-vs-edit / copy-paste-fill / undo layer that both grids opt
+   into via a small per-grid registry of typed cell adapters. The layer touches
+   the data model ONLY through adapter.read()/adapter.write(str); this is what
+   lets the SAME code serve the free table (string cells) and (later) the
+   compliance grid (typed number/axis/select cells).
+============================================================================ */
+const RC = (r,c)=> r+","+c;
+const GI_MAX_ROWS = 2000, GI_MAX_COLS = 64;
+// drag-select state shared via the active ctx so ONE global mouseup serves every
+// grid (grids are rebuilt on each editor render; a per-grid window listener would leak).
+let GI_ACTIVE_CTX = null;
+window.addEventListener("mouseup",()=>{ if(GI_ACTIVE_CTX){ GI_ACTIVE_CTX._mouseDown=false; GI_ACTIVE_CTX=null; } });
+
+function makeGridContext({block, host, rows, cols, rerender, kind}){
+  // kind: "free" | "compliance"  (drives paste column behavior)
+  const ctx = {
+    block, kind,
+    host,                       // stable element events are delegated to (not replaced on render)
+    table:null,                 // the <table class="grid"> element (reset each render)
+    rows, cols,                 // () => integer current dimensions
+    rerender,                   // () => void  (existing rebuild / rebuildMetrics)
+    reg:new Map(),              // "r,c" -> adapter
+    anchor:null, focus:null,    // {r,c}
+    selected:new Set(),         // "r,c"
+    editing:null,               // adapter currently in edit mode, or null
+    _undo:[],                   // stack of snapshots (small N)
+    _clip:"",                   // local clipboard fallback (TSV)
+  };
+  host.__giCtx = ctx;            // lets a global key handler resolve the ctx from the focused host
+  wireGridEvents(ctx);
+  return ctx;
+}
+function regCell(ctx, adapter){
+  ctx.reg.set(RC(adapter.r,adapter.c), adapter);
+  adapter.el.__gi = ctx; adapter.el.__rc = [adapter.r,adapter.c];
+}
+function adapterAt(ctx, r, c){ return ctx.reg.get(RC(r,c)) || null; }
+
+/* ---- event wiring (one delegated set per grid) ---------------------------- */
+function wireGridEvents(ctx){
+  const host = ctx.host;
+  ctx._mouseDown = false;
+
+  host.addEventListener("mousedown",(e)=>{
+    const cell = e.target.closest(".cell"); if(!cell || cell.__gi!==ctx) return;
+    const [r,c]=cell.__rc;
+    const ad = adapterAt(ctx,r,c); if(!ad) return;
+    if (ctx.editing && ctx.editing!==ad) commitEdit(ctx);   // leaving an edited cell commits
+    if (ad.type==="select"){ setFocus(ctx,r,c,false); return; } // let native dropdown work
+    if (ctx.editing===ad) return;                           // already editing this cell: native caret
+    e.preventDefault();                                     // select mode: suppress native caret/drag
+    ctx._mouseDown=true; GI_ACTIVE_CTX=ctx;
+    if (e.shiftKey){ extendTo(ctx,r,c); }                   // shift-click extends from anchor
+    else { setAnchor(ctx,r,c); }                            // new anchor + collapse
+  });
+  host.addEventListener("mouseover",(e)=>{
+    if(!ctx._mouseDown) return;
+    const cell=e.target.closest(".cell"); if(!cell||cell.__gi!==ctx) return;
+    const [r,c]=cell.__rc; extendTo(ctx,r,c);               // drag-select extends focus
+  });
+
+  host.addEventListener("dblclick",(e)=>{
+    const cell=e.target.closest(".cell"); if(!cell||cell.__gi!==ctx) return;
+    const ad=adapterAt(ctx, cell.__rc[0], cell.__rc[1]);
+    if (ad && ad.type!=="select") enterEdit(ctx, ad, /*keepText*/true);
+  });
+
+  host.addEventListener("paste",(e)=>{
+    if (ctx.editing) return;                  // editing a single cell: cell-level handler does plain text
+    e.preventDefault();
+    const txt=(e.clipboardData||window.clipboardData).getData("text/plain") || ctx._clip || "";
+    gridPasteTSV(ctx, txt);
+  });
+
+  host.tabIndex = -1;                          // focusable so it receives keys in select mode
+  host.addEventListener("keydown",(e)=> onGridKey(ctx,e));
+}
+
+/* ---- focus / anchor / selection primitives -------------------------------- */
+function clampRC(ctx,r,c){
+  return [Math.max(0,Math.min(r,ctx.rows()-1)), Math.max(0,Math.min(c,ctx.cols()-1))];
+}
+function setAnchor(ctx,r,c){ [r,c]=clampRC(ctx,r,c); ctx.anchor={r,c}; ctx.focus={r,c}; recomputeSelection(ctx); }
+function setFocus(ctx,r,c,keepAnchor){ [r,c]=clampRC(ctx,r,c); ctx.focus={r,c}; if(!keepAnchor) ctx.anchor={r,c}; recomputeSelection(ctx); }
+function extendTo(ctx,r,c){ [r,c]=clampRC(ctx,r,c); if(!ctx.anchor) ctx.anchor={r,c}; ctx.focus={r,c}; recomputeSelection(ctx); }
+
+function selRect(ctx){
+  const a=ctx.anchor, f=ctx.focus; if(!a||!f) return null;
+  return { r0:Math.min(a.r,f.r), r1:Math.max(a.r,f.r), c0:Math.min(a.c,f.c), c1:Math.max(a.c,f.c) };
+}
+function recomputeSelection(ctx){
+  ctx.selected.clear();
+  const R=selRect(ctx);
+  if(R){ for(let r=R.r0;r<=R.r1;r++) for(let c=R.c0;c<=R.c1;c++) ctx.selected.add(RC(r,c)); }
+  paintSelection(ctx);
+}
+function paintSelection(ctx){
+  ctx.reg.forEach((ad,key)=>{
+    ad.el.classList.toggle("cell-selected", ctx.selected.has(key) && ctx.selected.size>1);
+    ad.el.classList.toggle("cell-focus", !!ctx.focus && ad.r===ctx.focus.r && ad.c===ctx.focus.c);
+  });
+  // keep host focused so keystrokes route here while in select mode — but never
+  // STEAL focus on the initial render (no selection yet), while editing a cell,
+  // or when the focused cell is a native <select> (let its dropdown keep focus).
+  if (!ctx.editing && ctx.focus){
+    const fad = adapterAt(ctx, ctx.focus.r, ctx.focus.c);
+    if (!(fad && fad.type==="select")) ctx.host.focus({preventScroll:true});
+  }
+}
+function selectAll(ctx){ setAnchor(ctx,0,0); ctx.focus={r:ctx.rows()-1,c:ctx.cols()-1}; recomputeSelection(ctx); }
+
+/* ---- edit-mode transitions ------------------------------------------------ */
+function enterEdit(ctx, ad, keepText){
+  if (ad.type==="select") return;
+  ctx.editing = ad;
+  ad._pre = ad.read();                                   // for Esc revert
+  ad.el.setAttribute("contenteditable","true");
+  ad.el.classList.add("gi-editing");
+  if (!keepText) ad.el.textContent="";                   // "type to replace"
+  // plain-text paste interceptor while editing this cell (decision 14)
+  if (!ad.el.__giPaste){
+    ad.el.addEventListener("paste",(e)=>{
+      if (!ad.el.classList.contains("gi-editing")) return;
+      e.preventDefault();
+      const t=(e.clipboardData||window.clipboardData).getData("text/plain");
+      if (t.indexOf("\t")>=0 || t.indexOf("\n")>=0){     // multi-cell paste while editing: route to grid
+        commitEdit(ctx); gridPasteTSV(ctx, t); return;
+      }
+      document.execCommand("insertText", false, t);
+    });
+    ad.el.__giPaste = true;
+  }
+  ad.el.focus();
+  const sel=getSelection(), rng=document.createRange();
+  rng.selectNodeContents(ad.el); rng.collapse(false); sel.removeAllRanges(); sel.addRange(rng);
+}
+function commitEdit(ctx){
+  const ad=ctx.editing; if(!ad) return;
+  ad.write(ad.el.textContent);                           // canonical typed write (re-validates)
+  markDirty();
+  ad.el.removeAttribute("contenteditable");
+  ad.el.classList.remove("gi-editing");
+  ctx.editing=null; saveProject(true);
+}
+function cancelEdit(ctx){
+  const ad=ctx.editing; if(!ad) return;
+  ad.write(ad._pre);                                     // REVERT to pre-edit value (decision 1)
+  ad.el.removeAttribute("contenteditable");
+  ad.el.classList.remove("gi-editing");
+  ctx.editing=null;
+}
+
+/* ---- keyboard handler ----------------------------------------------------- */
+function onGridKey(ctx, e){
+  // EDIT MODE keys
+  if (ctx.editing){
+    if (e.key==="Escape"){ e.preventDefault(); cancelEdit(ctx); paintSelection(ctx); ctx.host.focus(); }
+    else if (e.key==="Enter" && !e.shiftKey){ e.preventDefault(); commitEdit(ctx);
+      const f=ctx.focus; setAnchor(ctx,f.r+1,f.c); ctx.host.focus(); }
+    else if (e.key==="Tab"){ e.preventDefault(); commitEdit(ctx);
+      const f=ctx.focus; setAnchor(ctx,f.r,f.c+(e.shiftKey?-1:1)); ctx.host.focus(); }
+    return; // let other keys reach the contenteditable
+  }
+  // SELECT MODE keys
+  const f=ctx.focus || {r:0,c:0};
+  const move=(dr,dc,extend)=>{ e.preventDefault();
+    if(extend) extendTo(ctx,f.r+dr,f.c+dc); else setAnchor(ctx,f.r+dr,f.c+dc); };
+  const ctrl = e.ctrlKey||e.metaKey;
+
+  if (ctrl && e.key.toLowerCase()==="a"){ e.preventDefault(); selectAll(ctx); return; }
+  if (ctrl && e.key.toLowerCase()==="c"){ e.preventDefault(); gridCopy(ctx,false); return; }
+  if (ctrl && e.key.toLowerCase()==="x"){ e.preventDefault(); gridCopy(ctx,true); return; }
+  if (ctrl && e.key.toLowerCase()==="v"){ /* paste handled by paste event */ return; }
+  if (ctrl && e.key.toLowerCase()==="d"){ e.preventDefault(); gridFillDown(ctx); return; }
+  if (ctrl && e.key.toLowerCase()==="z"){ e.preventDefault(); e.stopPropagation(); gridUndo(ctx); return; }
+
+  switch(e.key){
+    case "ArrowUp":    return move(-1,0,e.shiftKey);
+    case "ArrowDown":  return move(1,0,e.shiftKey);
+    case "ArrowLeft":  return move(0,-1,e.shiftKey);
+    case "ArrowRight": return move(0,1,e.shiftKey);
+    case "Enter":      e.preventDefault(); return setAnchor(ctx,f.r+1,f.c);
+    case "Tab":        e.preventDefault(); return setAnchor(ctx,f.r,f.c+(e.shiftKey?-1:1));
+    case "F2":{ e.preventDefault(); const ad=adapterAt(ctx,f.r,f.c); if(ad) enterEdit(ctx,ad,true); return; }
+    case "Delete":
+    case "Backspace": e.preventDefault(); return clearSelection(ctx);
+    case "Escape":    ctx.selected.clear(); paintSelection(ctx); return;
+    default:
+      // "type a character" -> enter edit, replacing content (decision 1)
+      if (e.key.length===1 && !ctrl && !e.altKey){
+        const ad=adapterAt(ctx,f.r,f.c);
+        if (ad && ad.type!=="select"){
+          e.preventDefault();
+          enterEdit(ctx,ad,/*keepText*/false);
+          ad.el.textContent=e.key;                          // seed the char deterministically
+          const sel=getSelection(), rng=document.createRange();
+          rng.selectNodeContents(ad.el); rng.collapse(false); sel.removeAllRanges(); sel.addRange(rng);
+        }
+      }
+  }
+}
+
+/* ---- copy / cut ----------------------------------------------------------- */
+function gridCopy(ctx, isCut){
+  const R=selRect(ctx); if(!R) return;
+  const lines=[];
+  for(let r=R.r0;r<=R.r1;r++){
+    const cells=[];
+    for(let c=R.c0;c<=R.c1;c++){ const ad=adapterAt(ctx,r,c); cells.push(ad?ad.read():""); }
+    lines.push(cells.join("\t"));
+  }
+  const tsv=lines.join("\n");
+  ctx._clip = tsv;                                         // local fallback (paste event prefers system clipboard)
+  try{ navigator.clipboard && navigator.clipboard.writeText(tsv).catch(()=>{}); }catch(_){}
+  if (isCut){
+    snapshot(ctx);                                         // undo BEFORE destructive op
+    for(let r=R.r0;r<=R.r1;r++) for(let c=R.c0;c<=R.c1;c++){ const ad=adapterAt(ctx,r,c); if(ad) ad.write(""); }
+    markDirty(); saveProject(true);
+  }
+}
+
+/* ---- paste ---------------------------------------------------------------- */
+function gridPasteTSV(ctx, txt){
+  if (!txt) return;
+  const f = ctx.focus || {r:0,c:0};
+  const matrix = parseTSV(txt);                            // reuse parseTSV
+  const isSingle = matrix.length===1 && matrix[0].length===1;
+
+  if (isSingle){                                           // single value -> write focus cell (plain text)
+    snapshot(ctx);
+    const ad=adapterAt(ctx,f.r,f.c); if(ad) ad.write(matrix[0][0]);
+    markDirty(); saveProject(true); return;
+  }
+
+  if (ctx.kind==="free") pasteFree(ctx, f, matrix);
+  else                   pasteCompliance(ctx, f, matrix);
+}
+
+function pasteFree(ctx, f, matrix){
+  const block=ctx.block;
+  const needRows = f.r + matrix.length;
+  const maxLen = matrix.reduce((m,r)=>Math.max(m,r.length),0);
+  const needCols = f.c + maxLen;
+  const addRows = Math.max(0, needRows - block.rows.length);
+
+  const apply=()=>{
+    snapshot(ctx);
+    // grow rows (clamped)
+    while(block.rows.length < Math.min(needRows, GI_MAX_ROWS))
+      block.rows.push(new Array(colCount(block)).fill(""));
+    // grow cols (clamped)
+    const targetCols = Math.min(needCols, GI_MAX_COLS);
+    block.rows.forEach(r=>{ while(r.length<targetCols) r.push(""); });
+    if (block.col_w) while(block.col_w.length<targetCols) block.col_w.push(2);
+    // write
+    matrix.forEach((rowVals,dr)=>{ const r=f.r+dr; if(r>=GI_MAX_ROWS) return;
+      rowVals.forEach((v,dc)=>{ const c=f.c+dc; if(c>=GI_MAX_COLS) return; block.rows[r][c]=v; }); });
+    markDirty(); ctx.rerender(); saveProject(true);
+    if (needRows>GI_MAX_ROWS || needCols>GI_MAX_COLS)
+      toast(T("grid.paste_too_large","Paste was clamped to the maximum size"), true);
+  };
+
+  if (addRows > 20)
+    modalConfirm(T("grid.paste_too_large","Large paste"),
+      T("grid.paste_too_large","This will add many rows. Continue?"), apply);
+  else apply();
+}
+
+function pasteCompliance(ctx, f, matrix){
+  // map pasted columns onto fixed typed columns (no col auto-grow); append rows only.
+  const data=ctx.block.data;
+  const totalCols = ctx.cols();
+  let overflow=false;
+  const apply=()=>{
+    snapshot(ctx);
+    const needRows = f.r + matrix.length;
+    while(data.rows.length < needRows) data.rows.push(newComplianceRow());  // append-only
+    ctx.rerender();                       // rebuild so new rows have adapters registered
+    matrix.forEach((rowVals,dr)=>{
+      const r=f.r+dr;
+      rowVals.forEach((v,dc)=>{
+        const c=f.c+dc;
+        if (c>=totalCols){ overflow=true; return; }      // drop overflow columns
+        const ad=adapterAt(ctx,r,c);
+        if (ad) ad.write(v);                              // typed write; select/number/axis validate internally
+      });
+    });
+    markDirty(); ctx.rerender(); saveProject(true);
+    if (overflow) toast(T("grid.paste_too_large","Some pasted columns did not fit and were dropped"), true);
+  };
+  const addRows = (f.r + matrix.length) - data.rows.length;
+  if (addRows > 20)
+    modalConfirm(T("grid.paste_too_large","Large paste"),
+      T("grid.paste_too_large","This will add many rows. Continue?"), apply);
+  else apply();
+}
+
+/* ---- fill-down / clear ---------------------------------------------------- */
+function gridFillDown(ctx){
+  const R=selRect(ctx); if(!R || R.r1===R.r0) return;
+  snapshot(ctx);
+  for(let c=R.c0;c<=R.c1;c++){
+    const src=adapterAt(ctx,R.r0,c); if(!src) continue;
+    const v=src.read();
+    for(let r=R.r0+1;r<=R.r1;r++){ const ad=adapterAt(ctx,r,c); if(ad) ad.write(v); }
+  }
+  markDirty(); ctx.rerender(); saveProject(true);
+}
+function clearSelection(ctx){               // Delete/Backspace
+  const R=selRect(ctx); if(!R) return;
+  snapshot(ctx);
+  for(let r=R.r0;r<=R.r1;r++) for(let c=R.c0;c<=R.c1;c++){ const ad=adapterAt(ctx,r,c); if(ad) ad.write(""); }
+  markDirty(); saveProject(true);
+}
+
+/* ---- undo (per-block, small N ring) --------------------------------------- */
+function snapshotPayload(ctx){
+  return ctx.kind==="free"
+    ? { rows: JSON.parse(JSON.stringify(ctx.block.rows)) }
+    : { data: JSON.parse(JSON.stringify(ctx.block.data)) };
+}
+function snapshot(ctx){
+  ctx._undo.push(snapshotPayload(ctx));
+  if (ctx._undo.length>20) ctx._undo.shift();
+}
+function gridUndo(ctx){
+  const snap = ctx._undo.pop();
+  if (!snap){ toast(T("action.undo","Undo")); return; }
+  if (ctx.kind==="free") ctx.block.rows = snap.rows;
+  else                   ctx.block.data = snap.data;
+  markDirty();
+  ctx.rerender();                          // re-resolves adapters; repaints via restoreFocusAfterRender
+  toast(T("action.undo","Undo"));
+  saveProject(true);
+}
+
+/* ---- focus re-resolution after structural rebuild ------------------------- */
+function focusCellAt(ctx, r, c){
+  [r,c]=clampRC(ctx,r,c);
+  ctx.anchor={r,c}; ctx.focus={r,c};
+  recomputeSelection(ctx);
+  const ad=adapterAt(ctx,r,c);
+  if (ad){ ctx.host.focus({preventScroll:true}); ad.el.scrollIntoView({block:"nearest",inline:"nearest"}); }
+}
+function restoreFocusAfterRender(ctx){
+  // registry was just rebuilt; clamp stale focus/anchor into new bounds and repaint
+  if (ctx.rows()<=0 || ctx.cols()<=0){ ctx.focus=null; ctx.anchor=null; ctx.selected.clear(); ctx.editing=null; return; }
+  if (ctx.focus){ const [r,c]=clampRC(ctx,ctx.focus.r,ctx.focus.c); ctx.focus={r,c}; }
+  if (ctx.anchor){ const [r,c]=clampRC(ctx,ctx.anchor.r,ctx.anchor.c); ctx.anchor={r,c}; }
+  recomputeSelection(ctx);                 // rebuilds ctx.selected from the (clamped) rect, repaints
+  ctx.editing=null;                        // any in-flight edit is dropped on structural rebuild
 }
 
 /* ============================================================================
@@ -1409,9 +2006,16 @@ function wireGlobal(){
   document.addEventListener("click",(e)=>{ if(!$("#ctx").contains(e.target)) closeCtx(); });
   document.addEventListener("scroll",closeCtx,true);
   $("#overlay").addEventListener("click",(e)=>{ if(e.target.id==="overlay") closeOverlay(); });
-  // Ctrl+S manual save
+  // Ctrl+S manual save; Ctrl+Z routes to the focused grid's undo (grids also bind it
+  // on their own host; this global guard keeps native browser undo from firing when a
+  // grid cell is the active element but its host keydown did not consume the event).
   window.addEventListener("keydown",(e)=>{
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="s"){ e.preventDefault(); saveProject(false); }
+    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){
+      const ae = document.activeElement;
+      const giCtx = (ae && ae.__giCtx) || (ae && ae.closest && (()=>{ const h=ae.closest("[tabindex]"); return h && h.__giCtx; })());
+      if (giCtx && !giCtx.editing){ e.preventDefault(); gridUndo(giCtx); }
+    }
   });
   // warn on unload if dirty
   window.addEventListener("beforeunload",(e)=>{ if(App.dirty){ e.preventDefault(); e.returnValue=""; } });
