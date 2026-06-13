@@ -14,17 +14,24 @@ Run:
 
 import argparse
 import base64
+import contextlib
+import copy
 import io
 import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import templates_store as tstore  # builder/ is on sys.path via HERE  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Server configuration (populated in main()).
@@ -68,9 +75,17 @@ def load_template_config(path=None):
 def config_slice(template_query=None):
     """Frontend-facing slice of the template config (API #3).
 
-    Returns only what the GUI needs; never leaks engine-only style numbers.
+    Returns only what the GUI needs; never leaks engine-only style numbers. When
+    a library template id is given and exists, slice THAT template's config;
+    otherwise fall back to the global template config.
     """
-    tc = load_template_config()
+    tc = None
+    if template_query:
+        p = tstore.template_config_path(CFG.reports_root, template_query)
+        if p:
+            tc = load_template_config(p)
+    if tc is None:
+        tc = load_template_config()
     return {
         "template": tc.get("id"),
         "skeleton": tc.get("skeleton", []),
@@ -493,9 +508,11 @@ def run_export(project_dir, fmt, save_first=False):
         project = json.load(fh)
 
     # Resolve and load the template config (engine resolves the logo path).
-    config_path = engine._resolve_config_path(
-        project, project_dir, CFG.template_config_path
-    )
+    # A project bound to a library template wins over the global --config.
+    tid = project.get("template")
+    tpl_cfg = tstore.template_config_path(CFG.reports_root, tid) if tid else None
+    explicit = tpl_cfg or CFG.template_config_path
+    config_path = engine._resolve_config_path(project, project_dir, explicit)
     cfg = engine._load_config(config_path)
 
     name = os.path.basename(project_dir.rstrip(os.sep)) or "report"
@@ -540,6 +557,90 @@ def _word_export_pdf(docx_abs, pdf_abs):
         if doc is not None:
             doc.Close(False)  # never call a method on doc after this
         word.Quit()
+
+
+# ---------------------------------------------------------------------------
+# Helpers: docx import (templates + report seeds).
+# ---------------------------------------------------------------------------
+
+
+def _import_docx_module():
+    """Lazily import the docx_import parser (mirrors _import_engine).
+
+    Raises ImportError/ModuleNotFoundError if python-docx is unavailable so the
+    route can degrade to a clean 503 rather than failing server import.
+    """
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import docx_import  # type: ignore
+    return docx_import
+
+
+@contextlib.contextmanager
+def _temp_docx(docx_bytes):
+    """Materialize uploaded bytes to a temp .docx (docx_import takes a path).
+
+    The temp file is always removed on exit; any images / logo extracted out of
+    it are written to their destination dirs before the context closes.
+    """
+    fd, path = tempfile.mkstemp(suffix=".docx", prefix="import_docx_")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(docx_bytes)
+        yield path
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _rewrite_image_paths(outline):
+    """Guarantee every image block's "file" is project-relative "images/<base>".
+
+    Keeps "src". Idempotent for already-correct parser output; self-heals if a
+    future parser change emits an absolute or bare-basename path.
+    """
+    def walk(nodes):
+        for n in nodes:
+            for b in n.get("blocks", []):
+                if b.get("type") == "image":
+                    src = b.get("file") or b.get("src") or ""
+                    base = os.path.basename(src.replace("\\", "/"))
+                    if base:
+                        b["file"] = "images/" + base
+                        b.setdefault("src", b["file"])
+            walk(n.get("children", []))
+
+    walk(outline or [])
+    return outline
+
+
+def _instantiate_skeleton(skeleton):
+    """Clone a skeleton tree into a project outline.
+
+    FIXED nodes carry their blocks verbatim; FILLABLE nodes get an empty blocks
+    list (a clean placeholder for the editor). The ``fixed`` marker is dropped --
+    a project node is just ``{title, level, blocks, children}``.
+    """
+    out = []
+    for node in skeleton or []:
+        is_fixed = bool(node.get("fixed"))
+        out.append({
+            "title": node.get("title", ""),
+            "level": node.get("level", 1),
+            "blocks": copy.deepcopy(node.get("blocks", [])) if is_fixed else [],
+            "children": _instantiate_skeleton(node.get("children", [])),
+        })
+    return out
+
+
+def _empty_meta():
+    """Default empty project meta (mirrors parse_docx_report's meta dict)."""
+    return {
+        "title": "", "secrecy": "", "doc_no": "", "page_count": "",
+        "author": "", "reviewers": [], "approver": "", "revisions": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +706,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(config_slice(template))
             if path == "/api/project":
                 return self._api_project_get(qs)
+            if path == "/api/projects":
+                return self._api_projects_list()
+            if path == "/api/templates":
+                return self._api_templates_list()
+            if path == "/api/template":
+                return self._api_template_get(qs)
             if path == "/api/health":
                 return self._send_json({"ok": True})
 
@@ -619,6 +726,19 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             if path == "/api/project":
                 return self._api_project_put(qs)
+            if path == "/api/template":
+                return self._api_template_put(qs)
+            return self._send_error_json("not found: %s" % path, status=404)
+        except Exception as exc:
+            self._handle_exc(exc)
+
+    def do_DELETE(self):
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            qs = parse_qs(parsed.query)
+            if path == "/api/template":
+                return self._api_template_delete(qs)
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
@@ -637,6 +757,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_validate_compliance()
             if path == "/api/export":
                 return self._api_export(qs)
+            if path == "/api/import-docx":
+                return self._api_import_docx()
+            if path == "/api/new-from-template":
+                return self._api_new_from_template()
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -718,6 +842,42 @@ class Handler(BaseHTTPRequestHandler):
         with open(full_abs, "rb") as fh:
             body = fh.read()
         return self._send_bytes(body, ctype)
+
+    def _api_projects_list(self):
+        """List projects: immediate subdirs of reports_root holding project.json.
+
+        Returns {"projects":[{"dir","title","template","mtime"}, ...]} sorted by
+        most-recently-modified first. The "templates" folder is skipped. Returns
+        an empty list (not an error) when no reports_root is configured.
+        """
+        root = CFG.reports_root
+        out = []
+        if root and os.path.isdir(root):
+            for name in os.listdir(root):
+                if name == "templates":
+                    continue
+                pj = os.path.join(root, name, "project.json")
+                if not os.path.isfile(pj):
+                    continue
+                title = ""
+                template = ""
+                try:
+                    with open(pj, "r", encoding="utf-8") as fh:
+                        proj = json.load(fh)
+                    title = (proj.get("meta") or {}).get("title", "") or ""
+                    template = proj.get("template", "") or ""
+                except Exception:
+                    pass
+                out.append(
+                    {
+                        "dir": name,
+                        "title": title,
+                        "template": template,
+                        "mtime": os.path.getmtime(pj),
+                    }
+                )
+        out.sort(key=lambda p: p["mtime"], reverse=True)
+        return self._send_json({"projects": out})
 
     def _api_project_get(self, qs):
         dir_arg = (qs.get("dir") or [None])[0]
@@ -832,6 +992,149 @@ class Handler(BaseHTTPRequestHandler):
                 "engine not available: %s" % exc, status=503
             )
         return self._send_json(result)
+
+    # --- template library ---
+
+    def _api_templates_list(self):
+        return self._send_json(
+            {"templates": tstore.list_templates(CFG.reports_root)}
+        )
+
+    def _api_template_get(self, qs):
+        tid = (qs.get("id") or [None])[0]
+        return self._send_json(tstore.get_template(CFG.reports_root, tid))
+
+    def _api_template_put(self, qs):
+        tid = (qs.get("id") or [None])[0]
+        body = self._read_json()
+        if not isinstance(body, dict):
+            return self._send_error_json("body must be a JSON object")
+        config = body.get("config")
+        if not isinstance(config, dict):
+            return self._send_error_json("missing 'config'")
+        name = body.get("name") or tid
+        skeleton = body.get("skeleton", [])
+        rid = tstore.save_template(
+            CFG.reports_root, tid, name, config, skeleton, atomic_write
+        )
+        return self._send_json({"ok": True, "id": rid})
+
+    def _api_template_delete(self, qs):
+        tid = (qs.get("id") or [None])[0]
+        tstore.delete_template(CFG.reports_root, tid)
+        return self._send_json({"ok": True})
+
+    def _api_import_docx(self):
+        payload = self._read_json()
+        b64 = payload.get("docx_b64")
+        mode = payload.get("mode", "report")
+        if not b64:
+            return self._send_error_json("missing 'docx_b64'")
+        if "," in b64 and b64.lstrip().lower().startswith("data:"):
+            b64 = b64.split(",", 1)[1]
+        docx_bytes = base64.b64decode(b64)
+        try:
+            di = _import_docx_module()
+        except (ImportError, ModuleNotFoundError) as exc:
+            return self._send_error_json(
+                "docx parser not available: %s" % exc, status=503
+            )
+        with _temp_docx(docx_bytes) as tmp_path:
+            if mode == "template":
+                return self._import_docx_template(di, tmp_path, payload)
+            if mode == "report":
+                return self._import_docx_report(di, tmp_path, payload)
+        return self._send_error_json("unknown mode: %r" % mode)
+
+    def _import_docx_template(self, di, tmp_path, payload):
+        warnings = []
+        logo_dir = tempfile.mkdtemp(prefix="docx_logo_")
+        try:
+            derived = di.derive_template(
+                tmp_path, logo_dir=logo_dir, warn=warnings.append
+            )
+            tid, rname = tstore.save_derived_template(
+                CFG.reports_root, payload.get("name"), derived,
+                atomic_write, _sanitize_name,
+                logo_dir=logo_dir, warn=warnings.append,
+            )
+        finally:
+            _rmtree_quiet(logo_dir)
+        return self._send_json(
+            {"id": tid, "name": rname, "warnings": warnings or None}
+        )
+
+    def _import_docx_report(self, di, tmp_path, payload):
+        warnings = []
+        dir_arg = payload.get("dir")
+        if not dir_arg:
+            return self._send_error_json("missing 'dir' for report import")
+        project_dir = resolve_project_dir(dir_arg, create=True)
+        images_dir = os.path.join(project_dir, "images")
+        parsed = di.parse_docx_report(
+            tmp_path, images_dir=images_dir, warn=warnings.append
+        )
+        meta = parsed.get("meta", {})
+        outline = parsed.get("outline", [])
+        _rewrite_image_paths(outline)
+
+        # Determine the bound template id -- import MUST NOT dead-end.
+        tid = payload.get("template")
+        if not (tid and tstore.template_config_path(CFG.reports_root, tid)):
+            logo_dir = tempfile.mkdtemp(prefix="docx_logo_")
+            try:
+                derived = di.derive_template(
+                    tmp_path, logo_dir=logo_dir, warn=warnings.append
+                )
+                name = meta.get("title") or os.path.basename(
+                    project_dir.rstrip(os.sep)
+                )
+                tid, _ = tstore.save_derived_template(
+                    CFG.reports_root, name, derived,
+                    atomic_write, _sanitize_name,
+                    logo_dir=logo_dir, warn=warnings.append,
+                )
+            finally:
+                _rmtree_quiet(logo_dir)
+
+        project_seed = {
+            "schema_version": 1, "template": tid,
+            "meta": meta, "outline": outline,
+        }
+        return self._send_json(
+            {
+                "project": project_seed,
+                "template_id": tid,
+                "warnings": warnings or None,
+            }
+        )
+
+    def _api_new_from_template(self):
+        payload = self._read_json()
+        dir_arg = payload.get("dir")
+        tid = payload.get("template")
+        if not dir_arg:
+            return self._send_error_json("missing 'dir'")
+        tpl = tstore.get_template(CFG.reports_root, tid)  # 404 if absent
+        outline = _instantiate_skeleton(tpl.get("skeleton", []))
+        project = {
+            "schema_version": 1, "template": tid,
+            "meta": _empty_meta(), "outline": outline,
+        }
+        project_dir = resolve_project_dir(dir_arg, create=True)
+        pj = os.path.join(project_dir, "project.json")
+        atomic_write(
+            pj, json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
+        )
+        return self._send_json({"ok": True, "project": project})
+
+
+def _rmtree_quiet(path):
+    import shutil
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
 
 
 def _guess_content_type(path):

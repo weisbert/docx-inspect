@@ -45,6 +45,8 @@
   .tb-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
   .tb-btn.primary:hover{filter:brightness(1.06)}
   .tb-btn:disabled{opacity:.5;cursor:not-allowed}
+  .tb-title{font-weight:650;cursor:pointer;padding:0 6px;color:var(--ink)}
+  .tb-title:hover{color:var(--accent)}
   #status{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
   .dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1}
   .dot.saved{background:var(--ok)} .dot.dirty{background:var(--warn)} .dot.saving{background:var(--accent)}
@@ -128,6 +130,16 @@
   }
   .rich:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
   .rich ul,.rich ol{margin:.2em 0 .2em 1.4em;padding:0}
+  /* continuous prose editor: one box, real paragraphs */
+  .prose-card .card-bar{opacity:.6}
+  .rich.multi{min-height:60px}
+  .rich.multi p.pp{margin:0 0 .55em 0}
+  .rich.multi p.pp:last-child{margin-bottom:0}
+  .rich.multi{counter-reset:linum}
+  .rich.multi p.li-bullet{list-style:none;padding-left:1.5em;position:relative}
+  .rich.multi p.li-bullet::before{content:"\2022";position:absolute;left:.45em;color:var(--muted)}
+  .rich.multi p.li-number{list-style:none;padding-left:1.9em;position:relative;counter-increment:linum}
+  .rich.multi p.li-number::before{content:counter(linum) ".";position:absolute;left:.3em;color:var(--muted)}
 
   /* image block */
   .img-drop{
@@ -143,6 +155,21 @@
   .ti:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
   .ti.grow{flex:1 1 220px}
   .ti.num{width:90px}
+  /* image size presets + image grid */
+  .img-presets{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .preset-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 10px;font-size:13px}
+  .preset-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
+  .preset-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .chk{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px}
+  .imgrid{display:grid;gap:8px;margin-bottom:4px}
+  .imgrid .cellimg{border:1px solid var(--line);border-radius:6px;position:relative;background:#fafbfc;
+    display:flex;align-items:center;justify-content:center;min-height:90px;overflow:hidden;padding:4px}
+  .imgrid .cellimg img{max-width:100%;max-height:170px;display:block}
+  .imgrid .cellimg .rm{position:absolute;top:3px;right:3px;background:rgba(255,255,255,.85)}
+  .imgrid-add{border:2px dashed var(--line);border-radius:6px;min-height:90px;display:flex;
+    align-items:center;justify-content:center;text-align:center;padding:8px;color:var(--muted);
+    cursor:pointer;outline:none;font-size:13px}
+  .imgrid-add:focus,.imgrid-add.focused{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
 
   /* free table grid */
   .grid-wrap{overflow:auto;border:1px solid var(--line);border-radius:6px}
@@ -239,11 +266,28 @@
   .fixed-preview{border:1px dashed var(--line);border-radius:6px;padding:12px;color:#475569;
     background:#fbfcfd;white-space:pre-wrap}
   .hidden{display:none !important}
+
+  /* home view */
+  .home{max-width:840px;margin:0 auto;padding:6px 2px}
+  .home-sec{margin-bottom:28px}
+  .home-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .home-head h2{font-size:16px;margin:0;font-weight:650}
+  .home-head .spacer{margin-left:auto}
+  .tpl-card,.proj-row{display:flex;align-items:center;gap:10px;border:1px solid var(--line);
+    border-radius:8px;padding:10px 12px;margin-bottom:8px;background:var(--panel);box-shadow:var(--shadow)}
+  .tpl-card .name,.proj-row .title{font-weight:600}
+  .proj-row .meta{color:var(--muted);font-size:12px}
+  .home-row-main{flex:1 1 auto;min-width:0;overflow:hidden}
+  .home-row-main .sub{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .home-actions{margin-left:auto;display:flex;gap:6px;flex-shrink:0}
 </style>
 </head>
 <body>
 <div id="app">
   <div id="toolbar">
+    <button class="tb-btn" id="btn-home" data-ui="toolbar.home">Home</button>
+    <span class="tb-title" id="app-home" title="Home">Document Builder</span>
+    <span class="tb-sep"></span>
     <button class="tb-btn" id="btn-open"   data-ui="toolbar.open">Open</button>
     <button class="tb-btn" id="btn-new"    data-ui="toolbar.new">New</button>
     <button class="tb-btn primary" id="btn-save" data-ui="toolbar.save">Save</button>
@@ -286,6 +330,10 @@ const App = {
   project: null,         // project.json (schema v1)
   dir: null,             // current project folder (server-side path)
   selId: "__cover__",    // selected outline node id, or special cover id
+  view: "home",          // "home" | "editor" | "template"
+  templates: [],         // cached GET /api/templates result
+  projects: [],          // cached GET /api/projects result
+  tplView: null,         // {id,name,config,skeleton,sel,dirty,settingsOpen} when view==="template"
   dirty: false,
   saving: false,
   autosaveTimer: null,
@@ -294,6 +342,9 @@ const App = {
   template: new URLSearchParams(location.search).get("template") || null,
 };
 const COVER_ID = "__cover__";
+// Twisty glyphs for the template skeleton tree. Kept ASCII in source (no new
+// non-ASCII bytes); the project outline uses its own inline glyphs unchanged.
+const TW_OPEN = "v", TW_CLOSED = ">", TW_LEAF = "-";
 
 /* ---- tiny helpers --------------------------------------------------------- */
 const $ = (s, r=document) => r.querySelector(s);
@@ -379,9 +430,18 @@ async function boot(){
   setStatus("", T("status.no_project","No project open"));
   wireToolbar();
   wireGlobal();
-  // Try to auto-open a project dir passed via ?dir= for convenience.
+  // Route: ?dir= opens directly into the editor; otherwise render the home view.
   const qd = new URLSearchParams(location.search).get("dir");
-  if (qd){ openProject(qd).catch(()=>{}); }
+  if (qd){
+    App.view = "editor";
+    await openProject(qd);
+    // openProject swallows its own errors; if nothing loaded, fall back to home.
+    if (!App.project){ App.view="home"; render(); await refreshHome(); }
+  } else {
+    App.view = "home";
+    render();
+    await refreshHome();
+  }
 }
 
 function applyUiStrings(){
@@ -391,6 +451,8 @@ function applyUiStrings(){
   });
   $("#outline-head").textContent = T("outline.title","Outline");
   $("#welcome").textContent = T("status.welcome","Open or create a project to begin.");
+  $("#app-home").textContent = T("app.title","Document Builder");
+  $("#app-home").title = T("toolbar.home","Home");
   document.title = T("app.title","Document Builder");
 }
 
@@ -433,10 +495,27 @@ async function newProject(){
       App.project = newProjectObject();
       App.dir = dir.trim();
       App.selId = COVER_ID;
-      renderAll();
+      App.view = "editor";
+      render();
       await saveProject(false);
       toast(T("toast.created","Project created"));
   });
+}
+
+// Imported / freshly-instantiated projects arrive without per-node ids (server
+// seeds carry only {title,level,blocks,children}). The editor keys selection,
+// numbering and drag on node.id, so backfill any missing id and guarantee
+// blocks/children are arrays before the tree is rendered. Without this, every
+// node shares id===undefined: selection cannot disambiguate and nodePath()
+// collapses to the last sibling (the "12" instead of "1" symptom).
+function ensureProjectIds(nodes){
+  (nodes||[]).forEach(n=>{
+    if (!n.id) n.id = uid();
+    if (!Array.isArray(n.blocks)) n.blocks = [];
+    if (!Array.isArray(n.children)) n.children = [];
+    ensureProjectIds(n.children);
+  });
+  return nodes;
 }
 
 async function openProject(dir){
@@ -450,8 +529,12 @@ async function openProject(dir){
     const r = await api("GET","/api/project",{query:{dir}});
     if (!r.project || r.project.schema_version !== 1)
       throw new Error("Unsupported or missing project (schema_version must be 1)");
-    App.project = r.project; App.dir = dir; App.selId = COVER_ID; App.dirty=false;
-    renderAll();
+    App.project = r.project;
+    App.project.outline = App.project.outline || [];
+    ensureProjectIds(App.project.outline);
+    App.dir = dir; App.selId = COVER_ID; App.dirty=false;
+    App.view = "editor";
+    render();
     setStatus("saved", T("status.opened","Project opened"));
   }catch(e){
     setStatus("err","open failed"); toast("Open failed: "+e.message, true);
@@ -491,10 +574,20 @@ async function exportProject(fmt){
 /* ============================================================================
    BLOCK FACTORY
 ============================================================================ */
+// Image intent presets (cm). "full" ~ usable text width; the engine also caps
+// height so tall portrait screenshots cannot overflow a page.
+const IMG_PRESETS = { full:15.5, half:7.5, small:5.0 };
+function imgPresetOf(width){
+  const w = +width;
+  for (const k in IMG_PRESETS){ if (Math.abs(IMG_PRESETS[k]-w) < 0.05) return k; }
+  return "custom";
+}
 function newBlock(type){
   switch(type){
     case "para":  return { type:"para", list:null, runs:[{t:""}] };
-    case "image": return { type:"image", file:"", caption:"", width_cm: 12.0 };
+    case "image": return { type:"image", file:"", caption:"", width_cm: IMG_PRESETS.full, size:"full" };
+    case "imagegrid": return { type:"imagegrid", cols:2, caption:"", width_cm: IMG_PRESETS.full,
+                               sub_captions:false, items:[] };
     case "table": return { type:"table", caption:"", header_rows:1,
                            rows:[["","",""],["","",""]], merges:[], col_w:null };
     case "datatable": return { type:"datatable", kind:"compliance",
@@ -547,6 +640,7 @@ function findNode(id, nodes=App.project.outline, parent=null){
 }
 
 function renderTree(){
+  $("#outline-head").textContent = T("outline.title","Outline");
   const root = $("#tree"); root.innerHTML = "";
   // cover special node
   const coverRow = el("div", {class:"node-row cover"+(App.selId===COVER_ID?" sel":""),
@@ -809,7 +903,13 @@ function renderNodeEditor(host, node){
 
   node.blocks = node.blocks || [];
   const listHost = el("div",{class:"block-list"});
-  node.blocks.forEach((b, i)=> listHost.appendChild(renderBlockCard(node, b, i)));
+  // Consecutive paragraphs render as ONE continuous rich-text editor; media
+  // blocks (image/grid/table/datatable) stay standalone and split the prose
+  // into separate editing regions.
+  groupBlocks(node.blocks).forEach(seg=>{
+    if (seg.kind==="prose") listHost.appendChild(renderProseCard(node, seg));
+    else listHost.appendChild(renderBlockCard(node, seg.block, seg.idx));
+  });
   host.appendChild(listHost);
   host.appendChild(buildAddBlock(node, node.blocks.length));
 }
@@ -828,11 +928,56 @@ function nodePath(id){
   return result;
 }
 
+/* ---- block grouping (consecutive paragraphs -> one prose region) ---------- */
+function groupBlocks(blocks){
+  const segs = []; let cur = null;
+  (blocks||[]).forEach((b, i)=>{
+    if (b && b.type==="para"){
+      if (!cur){ cur = { kind:"prose", start:i, blocks:[] }; segs.push(cur); }
+      cur.blocks.push(b);
+    } else {
+      cur = null;
+      segs.push({ kind:"block", idx:i, block:b });
+    }
+  });
+  return segs;
+}
+
+/* ---- prose region card (continuous multi-paragraph editor) --------------- */
+function renderProseCard(node, seg){
+  const card = el("div",{class:"card prose-card"});
+  // A media block dragged onto a prose run lands just before that run.
+  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node){ e.preventDefault(); card.classList.add("dragover"); }});
+  card.addEventListener("dragleave",()=>card.classList.remove("dragover"));
+  card.addEventListener("drop",(e)=>{
+    e.preventDefault(); card.classList.remove("dragover");
+    if (!blockDragSrc||blockDragSrc.node!==node) return;
+    const from = node.blocks.indexOf(blockDragSrc.block); if (from<0) return;
+    const [b] = node.blocks.splice(from,1);
+    const at = node.blocks.indexOf(seg.blocks[0]);
+    node.blocks.splice(at<0?node.blocks.length:at, 0, b);
+    markDirty(); renderEditor();
+  });
+
+  const bar = el("div",{class:"card-bar"});
+  bar.appendChild(el("span",{class:"card-kind", text:T("block.prose","Text")}));
+  card.appendChild(bar);
+
+  const body = el("div",{class:"card-body"});
+  buildProseEditor(body, node, seg);
+  card.appendChild(body);
+  return card;
+}
+
 /* ---- generic block card chrome ------------------------------------------- */
 function renderBlockCard(node, block, idx){
-  const card = el("div",{class:"card", draggable:"false", "data-idx":idx});
+  // Resolve the live index at action time: prose edits add/remove paragraphs and
+  // shift this block's position, so a captured idx would go stale.
+  const cur = ()=> node.blocks.indexOf(block);
+  const card = el("div",{class:"card", draggable:"false"});
   const kindLabel = {
     para:T("block.add.para","Paragraph"), image:T("block.add.image","Image"),
+    imagegrid:T("block.add.imagegrid","Image grid"),
     datatable:T("block.add.datatable","Data table"), table:T("block.add.table","Table")
   }[block.type] || block.type;
 
@@ -843,33 +988,33 @@ function renderBlockCard(node, block, idx){
   bar.appendChild(handle);
   bar.appendChild(el("span",{class:"card-kind", text:kindLabel}));
   const actions = el("div",{class:"card-actions"});
-  const up = el("button",{class:"icon-btn", title:T("action.up","Move up"), text:"↑", onclick:()=>moveBlock(node,idx,-1)});
-  const dn = el("button",{class:"icon-btn", title:T("action.down","Move down"), text:"↓", onclick:()=>moveBlock(node,idx,1)});
+  const up = el("button",{class:"icon-btn", title:T("action.up","Move up"), text:"↑", onclick:()=>moveBlock(node,cur(),-1)});
+  const dn = el("button",{class:"icon-btn", title:T("action.down","Move down"), text:"↓", onclick:()=>moveBlock(node,cur(),1)});
   if (idx===0) up.disabled=true;
   if (idx===node.blocks.length-1) dn.disabled=true;
   actions.appendChild(up); actions.appendChild(dn);
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
-    onclick:()=>{ node.blocks.splice(idx,1); markDirty(); renderEditor(); }}));
+    onclick:()=>{ const i=cur(); if(i>=0){ node.blocks.splice(i,1); markDirty(); renderEditor(); } }}));
   bar.appendChild(actions);
   card.appendChild(bar);
 
   const body = el("div",{class:"card-body"});
-  if (block.type==="para")      editPara(body, block);
-  else if (block.type==="image") editImage(body, block, node);
+  if (block.type==="image") editImage(body, block, node);
+  else if (block.type==="imagegrid") editImageGrid(body, block, node);
   else if (block.type==="table") editTable(body, block);
   else if (block.type==="datatable") editDatatable(body, block);
   card.appendChild(body);
 
-  wireBlockDrag(card, node, idx);
+  wireBlockDrag(card, node, block);
   return card;
 }
 function moveBlock(node, idx, dir){
-  const j=idx+dir; if (j<0||j>=node.blocks.length) return;
+  const j=idx+dir; if (idx<0||j<0||j>=node.blocks.length) return;
   const [b]=node.blocks.splice(idx,1); node.blocks.splice(j,0,b); markDirty(); renderEditor();
 }
 let blockDragSrc=null;
-function wireBlockDrag(card, node, idx){
-  card.addEventListener("dragstart",(e)=>{ blockDragSrc={node,idx}; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; });
+function wireBlockDrag(card, node, block){
+  card.addEventListener("dragstart",(e)=>{ blockDragSrc={node,block}; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; });
   card.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null;
     document.querySelectorAll(".card.dragover").forEach(c=>c.classList.remove("dragover")); });
   card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node){ e.preventDefault(); card.classList.add("dragover"); }});
@@ -877,8 +1022,13 @@ function wireBlockDrag(card, node, idx){
   card.addEventListener("drop",(e)=>{
     e.preventDefault(); card.classList.remove("dragover");
     if (!blockDragSrc||blockDragSrc.node!==node) return;
-    const from=blockDragSrc.idx; if (from===idx) return;
-    const [b]=node.blocks.splice(from,1); node.blocks.splice(idx,0,b); markDirty(); renderEditor();
+    const from=node.blocks.indexOf(blockDragSrc.block);
+    if (from<0 || blockDragSrc.block===block) return;
+    // remove first, then resolve the target's live index -> always insert BEFORE
+    // the drop target (consistent for forward and backward drags).
+    const [b]=node.blocks.splice(from,1);
+    let to=node.blocks.indexOf(block); if (to<0) to=node.blocks.length;
+    node.blocks.splice(to,0,b); markDirty(); renderEditor();
   });
 }
 
@@ -891,6 +1041,7 @@ function buildAddBlock(node, atIndex){
   const defs = [
     ["para","¶","block.add.para","Paragraph"],
     ["image","🖼","block.add.image","Image"],
+    ["imagegrid","▤","block.add.imagegrid","Image grid"],
     ["datatable","▦","block.add.datatable","Data table"],
     ["table","⊞","block.add.table","Table"],
   ];
@@ -907,67 +1058,149 @@ function buildAddBlock(node, atIndex){
    BLOCK EDITOR ①  PARA
 ============================================================================ */
 const SPOT_COLORS = [null,"FF0000","00B0F0","16A34A","D97706","7C3AED"];
+// "Default color" resets the run color WITHOUT touching bold/italic. (removeFormat
+// would strip b/i too, so we re-apply the body text color instead.)
+const BODY_DEFAULT_COLOR = "000000";
 
-function editPara(host, block){
-  const tb = el("div",{class:"mini-toolbar"});
-  const rich = el("div",{class:"rich", contenteditable:"true", spellcheck:"false"});
-  rich.innerHTML = runsToHtml(block.runs);
+// One contenteditable holding several <p> paragraphs. Enter -> a new <p> (a new
+// para block, a real <w:p> on export); Shift+Enter -> <br> (soft line break).
+// Both go through the browser so native Ctrl+Z undo keeps working. A single
+// toolbar above reflects the formatting at the caret.
+const BULLET_GLYPH = String.fromCharCode(0x2022);  // bullet dot; source stays ASCII
+function makeProseP(b){
+  const p = el("p",{class:"pp"});
+  const html = runsToHtml(b.runs);
+  p.innerHTML = html || "<br>";   // an empty <p> needs a <br> to stay focusable
+  if (b.list){ p.dataset.list = b.list; p.classList.add(b.list==="bullet"?"li-bullet":"li-number"); }
+  return p;
+}
+function elToBlock(pEl){
+  const runs = htmlToRuns(pEl);
+  // a lone browser-inserted "bogus" <br> in an empty paragraph -> empty run
+  if (runs.length===1 && runs[0].t==="\n" && !(pEl.textContent||"").trim()) runs[0].t="";
+  const list = (pEl.dataset && pEl.dataset.list) ? pEl.dataset.list : null;
+  return { type:"para", runs, list };
+}
+function proseToBlocks(editor){
+  const blocks = []; let buf = null;
+  const flush = ()=>{ if (buf){ blocks.push(elToBlock(buf)); buf=null; } };
+  editor.childNodes.forEach(ch=>{
+    if (ch.nodeType===1 && (ch.tagName==="P"||ch.tagName==="DIV")){
+      flush(); blocks.push(elToBlock(ch));
+    } else {                       // stray top-level text/inline -> own paragraph
+      if (!buf) buf = document.createElement("p");
+      buf.appendChild(ch.cloneNode(true));
+    }
+  });
+  flush();
+  if (!blocks.length) blocks.push({ type:"para", runs:[{t:""}], list:null });
+  return blocks;
+}
+
+function buildProseEditor(host, node, seg){
+  const tb = el("div",{class:"mini-toolbar prose-toolbar"});
+  const editor = el("div",{class:"rich multi", contenteditable:"true", spellcheck:"false"});
+  seg.blocks.forEach(b=> editor.appendChild(makeProseP(b)));
+  if (!editor.childNodes.length) editor.appendChild(makeProseP({runs:[{t:""}]}));
+
+  // `owned` = the exact contiguous run of blocks this editor represents, so
+  // serialize replaces just that slice of node.blocks (length may change).
+  let owned = seg.blocks.slice();
+  const serialize = ()=>{
+    const blocks = proseToBlocks(editor);
+    let start = node.blocks.indexOf(owned[0]);
+    if (start < 0) start = Math.min(seg.start, node.blocks.length);
+    node.blocks.splice(start, owned.length, ...blocks);
+    owned = blocks;
+    seg.blocks = blocks;   // keep seg live so renderProseCard's drop target stays valid
+    markDirty();
+  };
 
   const mk = (label, title, cmd) => el("button",{class:"mt-btn", title, html:label,
-    onmousedown:(e)=>{ e.preventDefault(); document.execCommand(cmd,false,null); rich.focus(); syncPara(); refreshToolbar(); }});
+    onmousedown:(e)=>{ e.preventDefault(); document.execCommand(cmd,false,null); editor.focus(); serialize(); refresh(); }});
   const bBtn = mk("<b>B</b>", T("para.bold","Bold"), "bold");
   const iBtn = mk("<i>I</i>", T("para.italic","Italic"), "italic");
   tb.appendChild(bBtn); tb.appendChild(iBtn);
   tb.appendChild(el("span",{class:"mt-sep"}));
-  // list toggles operate on block.list (a paragraph-level form per schema)
-  const bulletBtn = el("button",{class:"mt-btn", title:T("para.bullet","Bullet list"), html:"•",
-    onmousedown:(e)=>{ e.preventDefault(); block.list = block.list==="bullet"?null:"bullet"; markDirty(); refreshToolbar(); }});
+  const bulletBtn = el("button",{class:"mt-btn", title:T("para.bullet","Bullet list"), html:BULLET_GLYPH,
+    onmousedown:(e)=>{ e.preventDefault(); toggleList("bullet"); }});
   const numBtn = el("button",{class:"mt-btn", title:T("para.number","Numbered list"), html:"1.",
-    onmousedown:(e)=>{ e.preventDefault(); block.list = block.list==="number"?null:"number"; markDirty(); refreshToolbar(); }});
+    onmousedown:(e)=>{ e.preventDefault(); toggleList("number"); }});
   tb.appendChild(bulletBtn); tb.appendChild(numBtn);
   tb.appendChild(el("span",{class:"mt-sep"}));
-  // spot colors
   SPOT_COLORS.forEach(c=>{
     const sw = el("span",{class:"swatch", title: c?("#"+c):T("para.color_default","Default color"),
       style:{background: c?("#"+c):"linear-gradient(135deg,#fff 45%,#cbd5e1 50%,#fff 55%)"},
       onmousedown:(e)=>{ e.preventDefault();
-        if (c) document.execCommand("foreColor",false,"#"+c);
-        else document.execCommand("removeFormat",false,null);
-        rich.focus(); syncPara(); }});
+        document.execCommand("foreColor", false, "#"+(c||BODY_DEFAULT_COLOR));
+        editor.focus(); serialize(); refresh(); }});
     tb.appendChild(sw);
   });
 
-  const syncPara = ()=>{ block.runs = htmlToRuns(rich); markDirty(); };
-  const refreshToolbar = ()=>{
+  // top-level <p> containing the caret (for list state + list toggling)
+  const currentP = ()=>{
+    const sel = window.getSelection(); if (!sel||!sel.rangeCount) return null;
+    let n = sel.anchorNode;
+    while (n && n!==editor){ if (n.parentNode===editor) return n; n = n.parentNode; }
+    return null;
+  };
+  const selInEditor = ()=>{
+    const sel = window.getSelection(); if (!sel||!sel.rangeCount) return false;
+    let n = sel.anchorNode; while (n){ if (n===editor) return true; n = n.parentNode; }
+    return false;
+  };
+  const toggleList = (kind)=>{
+    const p = currentP(); if (!p) return;
+    const next = p.dataset.list===kind ? "" : kind;
+    p.dataset.list = next;
+    p.classList.toggle("li-bullet", next==="bullet");
+    p.classList.toggle("li-number", next==="number");
+    editor.focus(); serialize(); refresh();
+  };
+  const refresh = ()=>{
+    if (!selInEditor()) return;
     bBtn.classList.toggle("on", document.queryCommandState("bold"));
     iBtn.classList.toggle("on", document.queryCommandState("italic"));
-    bulletBtn.classList.toggle("on", block.list==="bullet");
-    numBtn.classList.toggle("on", block.list==="number");
+    const lst = (currentP()||{dataset:{}}).dataset.list || "";
+    bulletBtn.classList.toggle("on", lst==="bullet");
+    numBtn.classList.toggle("on", lst==="number");
   };
 
-  rich.addEventListener("input", syncPara);
-  rich.addEventListener("keyup", refreshToolbar);
-  rich.addEventListener("mouseup", refreshToolbar);
-  rich.addEventListener("focus", refreshToolbar);
-  rich.addEventListener("blur", ()=>{ syncPara(); saveProject(true); });
-  // sanitize paste -> plain text + light marks (strip foreign styles/structure)
-  rich.addEventListener("paste",(e)=>{
+  editor.addEventListener("input", serialize);
+  editor.addEventListener("keyup", refresh);
+  editor.addEventListener("mouseup", refresh);
+  editor.addEventListener("focus", ()=>{
+    try{ document.execCommand("defaultParagraphSeparator", false, "p"); }catch(_){}
+    refresh();
+  });
+  editor.addEventListener("blur", ()=>{ serialize(); saveProject(true); });
+  // sanitize paste -> plain text (strip foreign styles/structure)
+  editor.addEventListener("paste",(e)=>{
     e.preventDefault();
     const txt = (e.clipboardData||window.clipboardData).getData("text/plain");
     document.execCommand("insertText", false, txt);
-    syncPara();
+    serialize();
   });
 
-  host.appendChild(tb); host.appendChild(rich);
-  refreshToolbar();
+  host.appendChild(tb); host.appendChild(editor);
 }
 
-// runs[] -> HTML (b/i/color marks)
+// runs[] -> plain text (concatenate run text; drops marks). Tolerates a legacy
+// `text` block by accepting either shape via blockPlainText().
+function runsToPlain(runs){ return (runs||[]).map(r=>r&&r.t||"").join(""); }
+function blockPlainText(b){
+  if (!b) return "";
+  if (Array.isArray(b.runs)) return runsToPlain(b.runs);
+  return b.text!=null ? String(b.text) : "";
+}
+// runs[] -> HTML (b/i/color marks). A soft break (\n) inside a run renders as
+// <br> so it survives the contenteditable round-trip (a bare \n would collapse).
 function runsToHtml(runs){
   if (!runs || !runs.length) return "";
   return runs.map(r=>{
     let t = escapeHtml(r.t||"");
     if (!t) return "";
+    t = t.replace(/\n/g,"<br>");
     if (r.color) t = `<span style="color:#${r.color}">${t}</span>`;
     if (r.i) t = `<i>${t}</i>`;
     if (r.b) t = `<b>${t}</b>`;
@@ -1048,12 +1281,50 @@ function editImage(host, block, node){
   row.appendChild(el("label",{text:T("image.caption","Caption")}));
   row.appendChild(el("input",{class:"ti grow", value:block.caption||"", placeholder:T("image.caption_ph","Caption (number added automatically)"),
     oninput:(e)=>{ block.caption=e.target.value; markDirty(); }, onblur:()=>saveProject(true)}));
-  row.appendChild(el("label",{text:T("image.width","Width (cm)")}));
-  row.appendChild(el("input",{class:"ti num", type:"number", step:"0.5", min:"1", value: block.width_cm!=null?block.width_cm:12,
-    oninput:(e)=>{ block.width_cm = parseFloat(e.target.value)||12; markDirty(); }, onblur:()=>saveProject(true)}));
   host.appendChild(row);
+  host.appendChild(buildSizePresets(block));
 }
 function imgUrl(file){ return file + "?dir=" + encodeURIComponent(App.dir||"") + "&_t=" + Date.now(); }
+
+// Intent presets (full/half/small) that set block.width_cm; an Advanced toggle
+// exposes the exact cm. The engine caps height automatically, so there is no
+// height field. Reused by both image and image-grid blocks (width_cm is the
+// grid's total width there).
+function buildSizePresets(block){
+  const outer = el("div",{});
+  const row = el("div",{class:"field-row"});
+  row.appendChild(el("label",{text:T("image.size","Size")}));
+  const group = el("div",{class:"img-presets"});
+  const adv = el("div",{class:"img-presets", style:{display:"none", marginTop:"6px"}});
+  const btns = {};
+  const setActive = (key)=>{ for (const k in btns) btns[k].classList.toggle("on", k===key); };
+
+  [["full","image.size.full","Full width"],["half","image.size.half","Half"],
+   ["small","image.size.small","Small"]].forEach(([key,uik,fb])=>{
+    const b = el("button",{class:"preset-btn", text:T(uik,fb), onclick:()=>{
+      block.width_cm = IMG_PRESETS[key]; block.size = key;
+      setActive(key); advInput.value = block.width_cm; adv.style.display="none";
+      markDirty(); saveProject(true);
+    }});
+    btns[key] = b; group.appendChild(b);
+  });
+  const advBtn = el("button",{class:"preset-btn", text:T("image.size.custom","Custom"),
+    onclick:()=>{ adv.style.display = adv.style.display==="none"?"flex":"none"; }});
+  group.appendChild(advBtn);
+  row.appendChild(group);
+
+  const advInput = el("input",{class:"ti num", type:"number", step:"0.5", min:"1",
+    value: block.width_cm!=null?block.width_cm:IMG_PRESETS.full,
+    oninput:(e)=>{ block.width_cm = parseFloat(e.target.value)||IMG_PRESETS.full; block.size="custom"; setActive(null); markDirty(); },
+    onblur:()=>saveProject(true)});
+  adv.appendChild(el("label",{text:T("image.width","Width (cm)")}));
+  adv.appendChild(advInput);
+
+  outer.appendChild(row); outer.appendChild(adv);
+  const cur = imgPresetOf(block.width_cm);
+  if (cur==="custom"){ setActive(null); adv.style.display="flex"; } else setActive(cur);
+  return outer;
+}
 
 async function handleImagePaste(e, block, node, renderPrev){
   const items = (e.clipboardData||{}).items || [];
@@ -1081,6 +1352,81 @@ function fileToB64(file){
     fr.onload=()=>res(String(fr.result).split(",")[1]||"");
     fr.onerror=rej; fr.readAsDataURL(file);
   });
+}
+
+/* ============================================================================
+   BLOCK EDITOR ⑤  IMAGE GRID  (several images in a borderless grid, one number)
+============================================================================ */
+function editImageGrid(host, block, node){
+  block.items = Array.isArray(block.items) ? block.items : [];
+  block.cols = block.cols || 2;
+
+  const grid = el("div",{class:"imgrid"});
+  const renderGrid = ()=>{
+    grid.style.gridTemplateColumns = "repeat("+(block.cols||2)+", 1fr)";
+    grid.innerHTML="";
+    block.items.forEach((it, i)=>{
+      const cell = el("div",{class:"cellimg"});
+      const img = el("img",{src: imgUrl(it.file), alt:""});
+      img.onerror = ()=>{ cell.innerHTML=""; cell.appendChild(el("div",{style:{fontSize:"11px"}, text:it.file})); };
+      cell.appendChild(img);
+      cell.appendChild(el("button",{class:"icon-btn danger rm", text:"✕", title:T("action.delete","Delete"),
+        onclick:()=>{ block.items.splice(i,1); markDirty(); renderGrid(); saveProject(true); }}));
+      grid.appendChild(cell);
+    });
+    const add = el("div",{class:"imgrid-add", tabindex:"0", text:T("imagegrid.add","Click, then Ctrl+V an image")});
+    add.addEventListener("focus",()=>add.classList.add("focused"));
+    add.addEventListener("blur",()=>add.classList.remove("focused"));
+    add.addEventListener("click",()=>add.focus());
+    add.addEventListener("paste",(e)=>handleGridPaste(e, block, node, renderGrid));
+    grid.appendChild(add);
+  };
+  renderGrid();
+  host.appendChild(grid);
+
+  const ctl = el("div",{class:"field-row"});
+  ctl.appendChild(el("label",{text:T("imagegrid.cols","Columns")}));
+  const colsSel = el("select",{class:"ti", style:{width:"70px"},
+    onchange:(e)=>{ block.cols = parseInt(e.target.value)||2; markDirty(); renderGrid(); saveProject(true); }});
+  [2,3].forEach(c=>{ const o = el("option",{value:c, text:String(c)}); if ((block.cols||2)===c) o.selected=true; colsSel.appendChild(o); });
+  ctl.appendChild(colsSel);
+  const subWrap = el("label",{class:"chk"});
+  const subCb = el("input",{type:"checkbox",
+    onchange:(e)=>{ block.sub_captions = e.target.checked; markDirty(); saveProject(true); }});
+  if (block.sub_captions) subCb.checked = true;
+  subWrap.appendChild(subCb);
+  subWrap.appendChild(el("span",{text:T("imagegrid.sub","Sub-labels (a)(b)(c)")}));
+  ctl.appendChild(subWrap);
+  host.appendChild(ctl);
+
+  const cap = el("div",{class:"field-row"});
+  cap.appendChild(el("label",{text:T("image.caption","Caption")}));
+  cap.appendChild(el("input",{class:"ti grow", value:block.caption||"", placeholder:T("image.caption_ph","Caption (number added automatically)"),
+    oninput:(e)=>{ block.caption=e.target.value; markDirty(); }, onblur:()=>saveProject(true)}));
+  host.appendChild(cap);
+  host.appendChild(buildSizePresets(block));
+}
+
+async function handleGridPaste(e, block, node, renderGrid){
+  const items = (e.clipboardData||{}).items || [];
+  for (const it of items){
+    if (it.type && it.type.indexOf("image")===0){
+      const file = it.getAsFile();
+      if (!file) continue;
+      e.preventDefault();
+      const section = sectionOf(node.id);
+      try{
+        setStatus("saving", T("status.uploading","Uploading image..."));
+        const b64 = await fileToB64(file);
+        const r = await api("POST","/api/image",{query:{dir:App.dir, section},
+          json:{ png_b64:b64, section }});
+        block.items.push({ file:r.file }); markDirty(); renderGrid();
+        setStatus("saved", T("status.image_added","Image added"));
+        saveProject(true);
+      }catch(err){ setStatus("err","image failed"); toast(T("toast.image_failed","Image upload failed: ")+err.message, true); }
+      return;
+    }
+  }
 }
 // owning chapter number ("4") for image filename section
 function sectionOf(id){
@@ -1963,6 +2309,670 @@ function restoreFocusAfterRender(ctx){
 }
 
 /* ============================================================================
+   HOME VIEW + create/import/open flows
+============================================================================ */
+function render(){
+  syncChrome();
+  if (App.view === "home"){ renderHome(); return; }
+  if (App.view === "template"){ renderTemplate(); return; }
+  renderAll();
+}
+
+function syncChrome(){
+  const inEditor   = App.view === "editor";
+  const inTemplate = App.view === "template";
+  // project-only toolbar buttons: usable only in the project editor
+  ["#btn-save","#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !inEditor; });
+  $("#btn-open").disabled = inTemplate;
+  $("#btn-new").disabled  = inTemplate;
+  // left pane hosts the project outline OR the skeleton tree
+  $("#outline").classList.toggle("hidden", !(inEditor || inTemplate));
+  $("#btn-home").classList.toggle("hidden", App.view === "home");
+  if (App.view === "home") setStatus("", T("status.no_project","No project open"));
+  if (inTemplate) setStatus("", T("status.template_mode","Editing template"));
+}
+
+async function goHome(){
+  // preserve an unsaved template before leaving via the toolbar Home button
+  if (App.view === "template" && App.tplView && App.tplView.dirty){ return tplBack(); }
+  if (App.dirty) await saveProject(false);
+  App.view = "home";
+  App.tplView = null;
+  render();
+  await refreshHome();
+}
+
+async function refreshHome(){
+  try{
+    const [t, p] = await Promise.all([
+      api("GET","/api/templates"),
+      api("GET","/api/projects"),
+    ]);
+    App.templates = (t && t.templates) || [];
+    App.projects  = (p && p.projects)  || [];
+  }catch(e){
+    App.templates = App.templates||[]; App.projects = App.projects||[];
+    toast(T("toast.home_load_failed","Could not load home lists: ")+e.message, true);
+  }
+  if (App.view === "home") renderHome();
+}
+
+function renderHome(){
+  const host = $("#editor-inner"); host.innerHTML = "";
+  const root = el("div",{class:"home"});
+  root.appendChild(renderTemplatesSection());
+  root.appendChild(renderProjectsSection());
+  host.appendChild(root);
+}
+
+function renderTemplatesSection(){
+  const sec = el("div",{class:"home-sec"});
+  sec.appendChild(el("div",{class:"home-head"},[
+    el("h2",{text:T("home.templates","Templates")}),
+    el("div",{class:"spacer"}),
+    el("button",{class:"tb-btn primary", text:"+ "+T("home.import_master","Import master"),
+      onclick:importMaster}),
+  ]));
+  if (!App.templates.length){
+    sec.appendChild(el("div",{class:"empty", text:T("home.templates_empty",
+      "No templates yet. Import a master document to create one.")}));
+    return sec;
+  }
+  App.templates.forEach(tpl=>{
+    sec.appendChild(el("div",{class:"tpl-card"},[
+      el("div",{class:"home-row-main"},[ el("div",{class:"name", text: tpl.name || tpl.id}) ]),
+      el("div",{class:"home-actions"},[
+        el("button",{class:"sm-btn", text:T("home.edit","Edit"), onclick:()=>openTemplate(tpl)}),
+        el("button",{class:"sm-btn", style:{color:"var(--danger)"},
+          text:T("home.delete","Delete"), onclick:()=>deleteTemplate(tpl)}),
+      ]),
+    ]));
+  });
+  return sec;
+}
+
+function renderProjectsSection(){
+  const sec = el("div",{class:"home-sec"});
+  sec.appendChild(el("div",{class:"home-head"},[
+    el("h2",{text:T("home.projects","Projects")}),
+    el("div",{class:"spacer"}),
+    el("button",{class:"tb-btn primary", text:T("home.new_from_template","New from template"),
+      onclick:newFromTemplate}),
+    el("button",{class:"tb-btn", text:T("home.import_word","Import Word"),
+      onclick:importWord}),
+  ]));
+  if (!App.projects.length){
+    sec.appendChild(el("div",{class:"empty", text:T("home.projects_empty",
+      "No projects yet. Create one from a template or import a Word file.")}));
+    return sec;
+  }
+  App.projects.forEach(p=>{
+    sec.appendChild(el("div",{class:"proj-row"},[
+      el("div",{class:"home-row-main"},[
+        el("div",{class:"title", text: p.title || T("home.untitled_project","(untitled)")}),
+        el("div",{class:"sub", text: p.dir + " - " + relTime(p.mtime)}),
+      ]),
+      el("div",{class:"home-actions"},[
+        el("button",{class:"sm-btn", text:T("home.open","Open"), onclick:()=>openFromHome(p.dir)}),
+      ]),
+    ]));
+  });
+  return sec;
+}
+
+function relTime(mtime){
+  if (mtime==null) return "";
+  let ms = (typeof mtime==="number") ? (mtime>2e10?mtime:mtime*1000) : Date.parse(mtime);
+  if (isNaN(ms)) return String(mtime);
+  const s = Math.max(0,(Date.now()-ms)/1000);
+  if (s<60)      return T("time.just_now","just now");
+  if (s<3600)    return Math.floor(s/60)+T("time.m","m ago");
+  if (s<86400)   return Math.floor(s/3600)+T("time.h","h ago");
+  if (s<2592000) return Math.floor(s/86400)+T("time.d","d ago");
+  try{ return new Date(ms).toLocaleDateString(); }catch(_){ return String(mtime); }
+}
+
+/* ============================================================================
+   TEMPLATE EDITOR (Phase 3b)
+   Left: skeleton outline tree. Right: collapsible settings form + the selected
+   node's body editor. Loads GET /api/template, saves PUT /api/template. The
+   loaded full config is mutated in place via setPath so unknown keys round-trip
+   untouched; only the curated paths below are exposed as a form.
+============================================================================ */
+
+/* ---- load flow ------------------------------------------------------------ */
+async function openTemplate(tpl){
+  setStatus("saving", T("status.loading","Loading..."));
+  try{
+    const r = await api("GET","/api/template",{query:{id: tpl.id}});
+    App.view = "template";
+    App.tplView = {
+      id: r.id || tpl.id,
+      name: r.name || tpl.name || tpl.id,
+      config: r.config || {},
+      skeleton: normalizeSkeleton(r.skeleton || []),
+      sel: null,
+      dirty: false,
+      settingsOpen: true,
+    };
+    if (App.tplView.skeleton.length) App.tplView.sel = App.tplView.skeleton[0]._id;
+    render();
+    setStatus("", T("status.template_mode","Editing template"));
+  }catch(e){
+    setStatus("err","load failed");
+    toast(T("toast.template_load_failed","Could not load template: ")+e.message, true);
+  }
+}
+
+// Stamp template-local ids and normalize node shape. Unmodeled node keys are
+// stashed on _passthru so a config-derived template round-trips losslessly.
+function normalizeSkeleton(nodes){
+  return (nodes||[]).map(n=>{
+    const node = {
+      _id: uid(),
+      title: n.title || "",
+      fixed: !!n.fixed,
+      blocks: Array.isArray(n.blocks) ? n.blocks : [],
+      children: normalizeSkeleton(n.children || []),
+    };
+    if (n.level != null) node.level = n.level;
+    const passthru = {};
+    Object.keys(n).forEach(k=>{
+      if (!["title","fixed","blocks","children","level"].includes(k)) passthru[k]=n[k];
+    });
+    if (Object.keys(passthru).length) node._passthru = passthru;
+    return node;
+  });
+}
+
+/* ---- template-local dirty (does NOT call the project markDirty) ----------- */
+function tplMarkDirty(){
+  if (!App.tplView) return;
+  App.tplView.dirty = true;
+  setStatus("dirty", T("status.unsaved","Unsaved changes"));
+  // do NOT re-render here: that would blur the input being typed in.
+}
+
+/* ---- path get/set on the config object ------------------------------------ */
+// supports dotted segments and quoted keys: styles.headings.levels."1".size_pt
+function splitPath(path){
+  const out=[]; const re=/"([^"]+)"|([^.]+)/g; let m;
+  while((m=re.exec(path))) out.push(m[1]!=null?m[1]:m[2]);
+  return out;
+}
+function getPath(obj, path){
+  const parts = splitPath(path);
+  let cur = obj;
+  for (const p of parts){
+    if (cur==null || typeof cur!=="object") return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+function setPath(obj, path, val){
+  const parts = splitPath(path);
+  let cur = obj;
+  for (let i=0;i<parts.length-1;i++){
+    const p = parts[i];
+    if (cur[p]==null || typeof cur[p]!=="object") cur[p] = {};
+    cur = cur[p];
+  }
+  cur[parts[parts.length-1]] = val;
+}
+
+/* ---- field coercion adapters ---------------------------------------------- */
+const cv = {
+  text:  { get:v=> v==null?"":String(v),                          set:s=> s },
+  num:   { get:v=> v==null||v===""?"":String(v),
+           set:s=>{ const t=String(s).trim(); if(t==="") return undefined;
+                    const n=Number(t); return isNaN(n)?undefined:n; } },
+  // config stores 6-hex WITHOUT '#'; <input type=color> needs '#RRGGBB'
+  color: { get:v=> v?("#"+String(v).replace(/^#/,"")):"#000000",
+           set:s=> String(s).replace(/^#/,"").toUpperCase() },
+  csv:   { get:v=> Array.isArray(v)?v.join(", "):(v==null?"":String(v)),
+           set:s=> String(s).split(",").map(x=>x.trim()).filter(x=>x.length>0) },
+};
+
+// key, labelKey, fallback label, config path (@name = tplView.name), kind, input type.
+// NOTE: compliance.row_h_pt is an OBJECT {header,data} in the real config, so we
+// bind "row height" to compliance.row_h_pt.data to avoid clobbering header.
+const TPL_FIELDS = [
+  ["name",        "tpl.f.name",        "Template name",            "@name",                              "text",  "text"],
+  ["flag_color",  "tpl.f.flag_color",  "Flag color (over-spec)",   "compliance.flag_color",              "color", "color"],
+  ["hdr_fill",    "tpl.f.header_fill", "Compliance header fill",   "compliance.fills.header",            "color", "color"],
+  ["comp_font",   "tpl.f.comp_font",   "Compliance font size pt",  "compliance.font_pt",                 "num",   "number"],
+  ["comp_rowh",   "tpl.f.comp_rowh",   "Compliance row height pt", "compliance.row_h_pt.data",           "num",   "number"],
+  ["axis_labels", "tpl.f.axis_labels", "Axis labels",              "compliance.axis_labels",             "csv",   "text"],
+  ["cap_table",   "tpl.f.cap_table",   "Table caption prefix",     "caption_prefix.table",               "text",  "text"],
+  ["cap_fig",     "tpl.f.cap_fig",     "Figure caption prefix",    "caption_prefix.image",               "text",  "text"],
+  ["body_ascii",  "tpl.f.body_ascii",  "Body font (ascii)",        "styles.normal.ascii",                "text",  "text"],
+  ["body_ea",     "tpl.f.body_ea",     "Body font (East Asian)",   "styles.normal.eastAsia",             "text",  "text"],
+  ["body_size",   "tpl.f.body_size",   "Body size pt",             "styles.normal.size_pt",              "num",   "number"],
+  ["h1_size",     "tpl.f.h1_size",     "Heading 1 size pt",        "styles.headings.levels.\"1\".size_pt","num",  "number"],
+  ["h2_size",     "tpl.f.h2_size",     "Heading 2 size pt",        "styles.headings.levels.\"2\".size_pt","num",  "number"],
+  ["secrecy",     "tpl.f.secrecy",     "Default secrecy",          "cover.secrecy_default",              "text",  "text"],
+  ["toc_title",   "tpl.f.toc_title",   "TOC title",                "toc.title",                          "text",  "text"],
+];
+
+/* ---- top-level render ----------------------------------------------------- */
+function renderTemplate(){
+  renderSkeletonTree();
+  renderTemplateRight();
+}
+
+function renderTemplateRight(){
+  const host = $("#editor-inner"); host.innerHTML="";
+  host.appendChild(buildTemplateToolbar());
+  host.appendChild(buildSettingsPane());
+  host.appendChild(buildNodeBodyPane());
+}
+
+function buildTemplateToolbar(){
+  const bar = el("div",{class:"ed-header"});
+  bar.appendChild(el("div",{},[
+    el("h2",{class:"ed-title", text: T("template.editor","Template editor")}),
+    el("div",{class:"ed-sub", text: App.tplView.id}),
+  ]));
+  const tools = el("div",{class:"ed-tools"});
+  if (App.tplView.dirty)
+    tools.appendChild(el("span",{class:"ed-sub", text:T("status.unsaved","Unsaved changes")}));
+  tools.appendChild(el("button",{class:"tb-btn primary", text:T("template.save","Save"), onclick:saveTemplate}));
+  tools.appendChild(el("button",{class:"tb-btn", text:T("home.back","Back to home"), onclick:tplBack}));
+  bar.appendChild(tools);
+  return bar;
+}
+
+/* ---- settings form -------------------------------------------------------- */
+function buildSettingsPane(){
+  const wrap = el("div",{class:"card"});
+  const bar  = el("div",{class:"card-bar", style:{cursor:"pointer"},
+    onclick:()=>{ App.tplView.settingsOpen=!App.tplView.settingsOpen; renderTemplateRight(); }});
+  bar.appendChild(el("span",{class:"twisty", text: App.tplView.settingsOpen?TW_OPEN:TW_CLOSED}));
+  bar.appendChild(el("span",{class:"card-kind", text:T("template.settings","Template settings")}));
+  wrap.appendChild(bar);
+  if (!App.tplView.settingsOpen) return wrap;
+
+  const body = el("div",{class:"card-body"});
+  const grid = el("div",{class:"form-grid"});
+  TPL_FIELDS.forEach(f=> grid.appendChild(buildTplField(f)));
+  body.appendChild(grid);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+function buildTplField(f){
+  const key=f[0], labelKey=f[1], fb=f[2], path=f[3], kind=f[4], inputType=f[5];
+  const conv = cv[kind];
+  const cur  = (path==="@name") ? App.tplView.name : getPath(App.tplView.config, path);
+  const wrap = el("div",{class:"ffield"});
+  wrap.appendChild(el("label",{text:T(labelKey, fb)}));
+  const input = el("input",{class:"ti", type:inputType, value: conv.get(cur)});
+  input.addEventListener("input",(e)=>{
+    const v = conv.set(e.target.value);
+    if (path==="@name"){ App.tplView.name = (v==null?"":v); }
+    else if (v===undefined && kind==="num"){ /* leave existing; never write NaN */ }
+    else setPath(App.tplView.config, path, v);
+    tplMarkDirty();
+  });
+  wrap.appendChild(input);
+  return wrap;
+}
+
+/* ---- skeleton outline tree ------------------------------------------------ */
+function renderSkeletonTree(){
+  $("#outline-head").textContent = T("template.skeleton","Skeleton");
+  const root = $("#tree"); root.innerHTML="";
+  if (!App.tplView.skeleton.length){
+    root.appendChild(el("div",{class:"empty", text:T("template.skeleton_empty","No chapters. Add one below.")}));
+  }
+  const frag = document.createDocumentFragment();
+  buildSkelNodes(App.tplView.skeleton, frag, [], 0);
+  root.appendChild(frag);
+  root.appendChild(el("button",{class:"sm-btn", style:{margin:"8px"},
+    text:"+ "+T("template.add_chapter","Add chapter"), onclick:()=>tplAddNode(null,"root")}));
+}
+
+function buildSkelNodes(nodes, parentEl, numPath, depth){
+  nodes.forEach((n,i)=>{
+    const num = numPath.concat(i+1).join(".");
+    const hasKids = (n.children && n.children.length);
+    if (n._collapsed===undefined) n._collapsed=false;
+    const row = el("div",{ class:"node-row"+(App.tplView.sel===n._id?" sel":""), draggable:"true",
+      "data-id":n._id,
+      onclick:(e)=>{ e.stopPropagation(); tplSelect(n._id); },
+      oncontextmenu:(e)=>{ e.preventDefault(); tplSelect(n._id); openSkelCtx(e, n._id); } });
+    const tw = el("span",{class:"twisty"+(hasKids?"":" leaf"),
+      text: hasKids ? (n._collapsed?TW_CLOSED:TW_OPEN) : TW_LEAF,
+      onclick:(e)=>{ if(hasKids){ e.stopPropagation(); n._collapsed=!n._collapsed; renderSkeletonTree(); } }});
+    row.appendChild(tw);
+    row.appendChild(el("span",{class:"node-num", text:num}));
+    row.appendChild(el("span",{class:"node-title", text:n.title||T("node.untitled","(untitled)")}));
+    row.appendChild(el("span",{class:"badge "+(n.fixed?"fixed":"user"),
+      text: n.fixed?T("template.fixed","fixed"):T("template.fillable","fillable")}));
+    wireSkelDrag(row, n._id);
+    parentEl.appendChild(row);
+    if (hasKids && !n._collapsed){
+      const kids = el("div",{class:"children"});
+      buildSkelNodes(n.children, kids, numPath.concat(i+1), depth+1);
+      parentEl.appendChild(kids);
+    }
+  });
+}
+
+function tplFind(id, nodes, parent){
+  nodes = nodes || App.tplView.skeleton; parent = parent || null;
+  for (let i=0;i<nodes.length;i++){
+    const n=nodes[i];
+    if (n._id===id) return {node:n, list:nodes, idx:i, parent};
+    const r=tplFind(id, n.children||[], n); if(r) return r;
+  }
+  return null;
+}
+function tplSelect(id){ App.tplView.sel=id; renderSkeletonTree(); renderTemplateRight(); }
+
+function tplAddNode(id, where){
+  const fresh = { _id:uid(), title:T("template.new_chapter","New chapter"), fixed:false, blocks:[], children:[] };
+  if (where==="root"){ App.tplView.skeleton.push(fresh); }
+  else {
+    const r=tplFind(id); if(!r) return;
+    if (where==="child"){ (r.node.children=r.node.children||[]).push(fresh); r.node._collapsed=false; }
+    else r.list.splice(r.idx+1,0,fresh);
+  }
+  tplMarkDirty(); App.tplView.sel=fresh._id; renderSkeletonTree(); renderTemplateRight();
+}
+function tplRenameNode(id){
+  const r=tplFind(id); if(!r) return;
+  modalPrompt(T("ctx.rename","Rename"), T("dialog.rename.msg","Section title"), r.node.title||"", (v)=>{
+    if (v==null) return; r.node.title=v; tplMarkDirty(); renderSkeletonTree();
+    if (App.tplView.sel===id) renderTemplateRight();
+  });
+}
+function tplMoveNode(id, dir){
+  const r=tplFind(id); if(!r) return;
+  const j=r.idx+dir; if(j<0||j>=r.list.length) return;
+  const [m]=r.list.splice(r.idx,1); r.list.splice(j,0,m);
+  tplMarkDirty(); renderSkeletonTree();
+}
+function tplDeleteNode(id){
+  const r=tplFind(id); if(!r) return;
+  modalConfirm(T("template.del.title","Delete chapter?"),
+    T("template.del.msg","This removes the chapter and its children from the template skeleton."), ()=>{
+      r.list.splice(r.idx,1);
+      if (App.tplView.sel===id) App.tplView.sel = App.tplView.skeleton.length?App.tplView.skeleton[0]._id:null;
+      tplMarkDirty(); renderSkeletonTree(); renderTemplateRight();
+  });
+}
+function tplToggleFixed(id){
+  const r=tplFind(id); if(!r) return;
+  r.node.fixed = !r.node.fixed;
+  if (r.node.fixed && !Array.isArray(r.node.blocks)) r.node.blocks=[];
+  tplMarkDirty(); renderSkeletonTree(); renderTemplateRight();
+}
+
+/* drag-reorder (siblings only, mirrors the project outline) */
+let tplDragSrc=null;
+function wireSkelDrag(row, id){
+  row.addEventListener("dragstart",(e)=>{ tplDragSrc=id; e.dataTransfer.effectAllowed="move"; row.style.opacity=".4"; });
+  row.addEventListener("dragend",()=>{ row.style.opacity=""; tplDragSrc=null; });
+  row.addEventListener("dragover",(e)=>{ if(tplDragSrc&&tplDragSrc!==id){ e.preventDefault(); row.style.boxShadow="inset 0 -2px 0 var(--accent)"; }});
+  row.addEventListener("dragleave",()=>{ row.style.boxShadow=""; });
+  row.addEventListener("drop",(e)=>{
+    e.preventDefault(); row.style.boxShadow="";
+    if (!tplDragSrc||tplDragSrc===id) return;
+    const src=tplFind(tplDragSrc), dst=tplFind(id);
+    if (!src||!dst||src.list!==dst.list) return;     // same-parent reorder only
+    src.list.splice(src.idx,1);
+    const ni=dst.list.indexOf(dst.node);
+    dst.list.splice(ni+(src.idx<ni?0:1),0,src.node);
+    tplMarkDirty(); renderSkeletonTree();
+  });
+}
+
+/* context menu (reuses #ctx + closeCtx + the global click-to-close handler) */
+function openSkelCtx(e, id){
+  const r=tplFind(id); if(!r) return;
+  const ctx=$("#ctx"); ctx.innerHTML="";
+  const item=(label,fn,danger)=>el("button",{class:danger?"danger":"", onclick:()=>{ closeCtx(); fn(); }}, label);
+  const canUp=r.idx>0, canDown=r.idx<r.list.length-1;
+  ctx.appendChild(item(T("ctx.add_child","Add child"), ()=>tplAddNode(id,"child")));
+  ctx.appendChild(item(T("ctx.add_sibling","Add sibling"), ()=>tplAddNode(id,"sibling")));
+  ctx.appendChild(el("div",{class:"ctx-sep"}));
+  ctx.appendChild(item(T("ctx.rename","Rename"), ()=>tplRenameNode(id)));
+  ctx.appendChild(item(r.node.fixed?T("template.make_fillable","Make fillable"):T("template.make_fixed","Make fixed"),
+    ()=>tplToggleFixed(id)));
+  ctx.appendChild(el("div",{class:"ctx-sep"}));
+  const up=item(T("ctx.move_up","Move up"), ()=>tplMoveNode(id,-1)); if(!canUp) up.disabled=true;
+  const dn=item(T("ctx.move_down","Move down"), ()=>tplMoveNode(id,1)); if(!canDown) dn.disabled=true;
+  ctx.appendChild(up); ctx.appendChild(dn);
+  ctx.appendChild(el("div",{class:"ctx-sep"}));
+  ctx.appendChild(item(T("ctx.delete","Delete"), ()=>tplDeleteNode(id), true));
+  ctx.style.display="block";
+  const vw=window.innerWidth, vh=window.innerHeight, w=ctx.offsetWidth, h=ctx.offsetHeight;
+  ctx.style.left=Math.min(e.clientX, vw-w-6)+"px";
+  ctx.style.top =Math.min(e.clientY, vh-h-6)+"px";
+}
+
+/* ---- selected-node body editor -------------------------------------------- */
+function buildNodeBodyPane(){
+  const card = el("div",{class:"card"});
+  const sel = App.tplView.sel ? tplFind(App.tplView.sel) : null;
+  if (!sel){
+    card.appendChild(el("div",{class:"card-body"},[
+      el("div",{class:"empty", text:T("template.pick_node","Select a chapter to edit its body.")})]));
+    return card;
+  }
+  const node = sel.node;
+
+  const bar = el("div",{class:"card-bar"});
+  bar.appendChild(el("span",{class:"card-kind", text: node.title || T("node.untitled","(untitled)")}));
+  const tog = el("div",{class:"card-actions", style:{opacity:1}});
+  tog.appendChild(el("button",{class:"sm-btn", text:T("ctx.rename","Rename"), onclick:()=>tplRenameNode(node._id)}));
+  tog.appendChild(el("button",{class:"sm-btn",
+    text: node.fixed?T("template.make_fillable","Make fillable"):T("template.make_fixed","Make fixed"),
+    onclick:()=>tplToggleFixed(node._id)}));
+  bar.appendChild(tog);
+  card.appendChild(bar);
+
+  const body = el("div",{class:"card-body"});
+  if (node.fixed) buildFixedBodyEditor(body, node);
+  else body.appendChild(el("div",{class:"ro-note"},[
+        el("span",{text:T("template.fillable_note","Filled per project")})]));
+  card.appendChild(body);
+  return card;
+}
+
+function buildFixedBodyEditor(host, node){
+  node.blocks = Array.isArray(node.blocks) ? node.blocks : [];
+  node.blocks.forEach((b, i)=>{
+    if (b && b.type==="para"){
+      const wrap = el("div",{class:"ffield", style:{marginBottom:"8px"}});
+      const ta = el("textarea",{class:"ti", style:{width:"100%",minHeight:"60px"}});
+      // Canonical block model is runs[]; show their plain text, tolerate legacy
+      // `text`. Editing flattens to a single unformatted run (b/i/color on an
+      // edited paragraph is intentionally not preserved by this plain editor).
+      ta.value = blockPlainText(b);
+      ta.addEventListener("input",(e)=>{ b.runs=[{t:e.target.value}]; delete b.text; tplMarkDirty(); });
+      const rm = el("button",{class:"sm-btn", style:{color:"var(--danger)",marginTop:"4px"},
+        text:T("template.remove_para","Remove paragraph"),
+        onclick:()=>{ node.blocks.splice(i,1); tplMarkDirty(); renderTemplateRight(); }});
+      wrap.appendChild(ta); wrap.appendChild(rm);
+      host.appendChild(wrap);
+    } else {
+      host.appendChild(el("div",{class:"ro-note"},[
+        el("span",{text:T("template.readonly_block","This block type is not editable here: ")+((b&&b.type)||"?")})]));
+    }
+  });
+  host.appendChild(el("button",{class:"add-trigger", text:"+ "+T("template.add_para","Add paragraph"),
+    onclick:()=>{ node.blocks.push({type:"para", runs:[]}); tplMarkDirty(); renderTemplateRight(); }}));
+}
+
+/* ---- save / back ---------------------------------------------------------- */
+function tplBack(){
+  const go = ()=>{ App.tplView=null; App.view="home"; render(); refreshHome(); };
+  if (App.tplView && App.tplView.dirty){
+    modalConfirm(T("template.discard.title","Discard changes?"),
+      T("template.discard.msg","You have unsaved template changes. Leave without saving?"), go);
+  } else go();
+}
+
+// Strip editor-local keys (_id/_collapsed) and re-emit any unmodeled keys.
+function serializeSkeleton(nodes){
+  return (nodes||[]).map(n=>{
+    const out = { title:n.title||"", fixed:!!n.fixed,
+                  blocks: Array.isArray(n.blocks)?n.blocks:[],
+                  children: serializeSkeleton(n.children||[]) };
+    if (n.level!=null) out.level = n.level;
+    if (n._passthru) Object.assign(out, n._passthru);
+    return out;
+  });
+}
+
+async function saveTemplate(){
+  const tv = App.tplView; if (!tv) return;
+  setStatus("saving", T("status.saving","Saving..."));
+  try{
+    const body = {
+      name: tv.name,
+      config: tv.config,                       // full object, unknown keys untouched
+      skeleton: serializeSkeleton(tv.skeleton),
+    };
+    await api("PUT","/api/template",{query:{id:tv.id}, json:body});
+    tv.dirty = false;
+    toast(T("toast.template_saved","Template saved"));
+    App.tplView=null; App.view="home"; render(); await refreshHome();
+  }catch(e){
+    setStatus("err","save failed");
+    toast(T("toast.template_save_failed","Save failed: ")+e.message, true);
+  }
+}
+
+// options: [{id,name}]; allowBlank adds a leading "auto-derive" choice (value="").
+// cb receives the chosen id, "" for auto-derive, or null on cancel.
+function modalSelect(title, msg, options, allowBlank, blankLabel, cb){
+  const m = $("#modal"); m.innerHTML="";
+  const sel = el("select",{class:"ti", style:{width:"100%"}});
+  if (allowBlank) sel.appendChild(el("option",{value:"", text:blankLabel}));
+  (options||[]).forEach(o=> sel.appendChild(el("option",{value:o.id, text:o.name||o.id})));
+  const ok = ()=>{ closeOverlay(); cb(sel.value); };
+  m.appendChild(el("h3",{text:title}));
+  m.appendChild(el("p",{text:msg}));
+  m.appendChild(sel);
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn", text:T("action.cancel","Cancel"),
+      onclick:()=>{ closeOverlay(); cb(null); }}),
+    el("button",{class:"tb-btn primary", text:T("action.ok","OK"), onclick:ok}),
+  ]));
+  showOverlay(); setTimeout(()=>sel.focus(),30);
+}
+
+// Open a native file picker for one accept type; resolve the chosen File (or null).
+function pickFile(accept){
+  return new Promise(res=>{
+    const inp = el("input",{type:"file", accept, style:{display:"none"},
+      onchange:(e)=>{ const f=e.target.files[0]||null; inp.remove(); res(f); }});
+    document.body.appendChild(inp); inp.click();
+  });
+}
+
+/* ---- flow: import master -------------------------------------------------- */
+async function importMaster(){
+  const file = await pickFile(".docx"); if (!file) return;
+  const b64 = await fileToB64(file);
+  const def = file.name.replace(/\.docx$/i,"");
+  modalPrompt(T("dialog.tpl_name.title","Template name"),
+    T("dialog.tpl_name.msg","Enter a name for this template."), def, async (name)=>{
+      if (name==null) return; name=name.trim(); if(!name) return;
+      setStatus("saving", T("status.importing","Importing..."));
+      try{
+        await api("POST","/api/import-docx",{json:{docx_b64:b64, mode:"template", name}});
+        toast(T("toast.template_created","Template created"));
+        await refreshHome();
+        setStatus("", T("status.no_project","No project open"));
+      }catch(e){
+        setStatus("err", T("status.import_failed","import failed"));
+        toast(T("toast.import_failed","Import failed: ")+e.message, true);
+      }
+  });
+}
+
+/* ---- flow: delete template ------------------------------------------------ */
+function deleteTemplate(tpl){
+  modalConfirm(T("dialog.del_tpl.title","Delete template?"),
+    T("dialog.del_tpl.msg","This removes the template permanently. Existing projects are not affected."),
+    async ()=>{
+      try{
+        await api("DELETE","/api/template",{query:{id:tpl.id}});
+        toast(T("toast.template_deleted","Template deleted"));
+        await refreshHome();
+      }catch(e){
+        toast(T("toast.delete_failed","Delete failed: ")+e.message, true);
+      }
+  });
+}
+
+/* ---- flow: new from template ---------------------------------------------- */
+function newFromTemplate(){
+  if (!App.templates.length){
+    toast(T("toast.import_master_first","Import a master document first"), true); return;
+  }
+  const askDir = (tplId)=>{
+    modalPrompt(T("dialog.new.title","New project"),
+      T("dialog.new.msg","Enter the project folder path (absolute or under reports root)."),
+      "", async (dir)=>{
+        if (!dir) return; dir=dir.trim(); if(!dir) return;
+        try{
+          await api("POST","/api/new-from-template",{json:{dir, template:tplId}});
+          await openProject(dir);
+        }catch(e){
+          toast(T("toast.create_failed","Create failed: ")+e.message, true);
+        }
+    });
+  };
+  if (App.templates.length === 1){ askDir(App.templates[0].id); return; }
+  modalSelect(T("dialog.pick_tpl.title","Choose a template"),
+    T("dialog.pick_tpl.msg","Select the template to base this project on."),
+    App.templates, false, "", (tplId)=>{ if(tplId==null) return; askDir(tplId); });
+}
+
+/* ---- flow: import Word (report) ------------------------------------------- */
+async function importWord(){
+  const file = await pickFile(".docx"); if (!file) return;
+  const b64 = await fileToB64(file);
+  const def = file.name.replace(/\.docx$/i,"");
+  modalPrompt(T("dialog.import_word.title","Import Word report"),
+    T("dialog.import_word.msg","Enter the project folder path for the imported report."),
+    def, (dir)=>{
+      if (!dir) return; dir=dir.trim(); if(!dir) return;
+      const doImport = async (tplId)=>{
+        setStatus("saving", T("status.importing","Importing..."));
+        try{
+          const body = {docx_b64:b64, mode:"report", dir};
+          if (tplId) body.template = tplId;
+          const resp = await api("POST","/api/import-docx",{json:body});
+          const seed = (resp && resp.project) ? resp.project : resp;
+          await api("PUT","/api/project",{query:{dir}, json:seed});
+          toast(T("toast.imported","Imported"));
+          await openProject(dir);
+        }catch(e){
+          setStatus("err", T("status.import_failed","import failed"));
+          toast(T("toast.import_failed","Import failed: ")+e.message, true);
+        }
+      };
+      if (App.templates.length){
+        modalSelect(T("dialog.bind_tpl.title","Bind a template"),
+          T("dialog.bind_tpl.msg","Choose a template for styling, or auto-derive one from this document."),
+          App.templates, true, T("dialog.bind_tpl.auto","Auto-derive from document"),
+          (tplId)=>{ if(tplId==null) return; doImport(tplId||null); });
+      } else {
+        doImport(null);
+      }
+  });
+}
+
+/* ---- flow: open ----------------------------------------------------------- */
+function openFromHome(dir){ openProject(dir); }
+
+/* ============================================================================
    MODALS
 ============================================================================ */
 function modalPrompt(title, msg, value, cb){
@@ -1996,6 +3006,8 @@ function closeOverlay(){ $("#overlay").classList.remove("show"); }
    WIRING
 ============================================================================ */
 function wireToolbar(){
+  $("#btn-home").onclick = goHome;
+  $("#app-home").onclick = goHome;
   $("#btn-open").onclick = ()=>openProject(null);
   $("#btn-new").onclick  = newProject;
   $("#btn-save").onclick = ()=>saveProject(false);
@@ -2018,7 +3030,7 @@ function wireGlobal(){
     }
   });
   // warn on unload if dirty
-  window.addEventListener("beforeunload",(e)=>{ if(App.dirty){ e.preventDefault(); e.returnValue=""; } });
+  window.addEventListener("beforeunload",(e)=>{ if(App.dirty || (App.tplView && App.tplView.dirty)){ e.preventDefault(); e.returnValue=""; } });
 }
 
 boot();

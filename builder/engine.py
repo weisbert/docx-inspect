@@ -592,9 +592,51 @@ def _render_fixed_body(doc, fb, names):
     for para in fb["paragraphs"]:
         p = doc.add_paragraph(style=style_name)
         for run in para["runs"]:
-            r = p.add_run(run["t"])
+            r = p.add_run(run.get("t", ""))
             run_fmt(r, ascii=run.get("ascii"), eastasia=run.get("eastAsia"),
                     bold=run.get("b"), italic=run.get("i"), color=run.get("color"))
+
+
+def _as_int(v, default):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _grid_sub_label(i):
+    """Spreadsheet-style (a)..(z),(aa),(ab)... so a grid with >26 panels stays
+    clean instead of running off the end of the alphabet into punctuation."""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(97 + r) + s
+    return f"({s})"
+
+
+def _add_formatted_run(p, text, bold=None, italic=None, color=None):
+    """Add text as run(s), turning each embedded newline into an explicit soft
+    line break (<w:br/>). Feature A maps Shift+Enter -> "\\n"; emitting the break
+    ourselves keeps the soft break independent of python-docx version behavior."""
+    parts = (text or "").split("\n")
+    r = None
+    for i, part in enumerate(parts):
+        if i:
+            if r is None:
+                r = p.add_run()
+                run_fmt(r, bold=bold, italic=italic, color=color)
+            r.add_break()
+        if part:
+            r = p.add_run(part)
+            run_fmt(r, bold=bold, italic=italic, color=color)
 
 
 def _render_para(doc, block, body_name):
@@ -606,29 +648,106 @@ def _render_para(doc, block, body_name):
     else:
         p = doc.add_paragraph(style=body_name)
     for run in block.get("runs", []):
-        r = p.add_run(run["t"])
-        run_fmt(r, bold=run.get("b"), italic=run.get("i"), color=run.get("color"))
+        _add_formatted_run(p, run.get("t", ""), bold=run.get("b"),
+                           italic=run.get("i"), color=run.get("color"))
+
+
+def _image_settings(cfg):
+    ic = cfg.get("image")
+    return ic if isinstance(ic, dict) else {}
+
+
+def _fit_height(pic, max_height_cm):
+    """Scale an inline picture down proportionally when it is taller than the cap.
+
+    A width-set portrait screenshot can be tall enough to push itself (and the
+    text after it) onto the next page, leaving a big gap. Capping the height keeps
+    such figures on the page; images already shorter than the cap are untouched."""
+    if not max_height_cm:
+        return
+    cap = Cm(float(max_height_cm))
+    if pic.height and pic.height > cap:
+        ratio = cap / pic.height
+        pic.height = int(pic.height * ratio)
+        pic.width = int(pic.width * ratio)
+
+
+def _place_picture(p, path, fname, width_cm, max_height_cm):
+    """Add one centered picture (or a red placeholder) into paragraph ``p``."""
+    if path and os.path.exists(path):
+        try:
+            pic = p.add_run().add_picture(path, width=Cm(width_cm))
+            _fit_height(pic, max_height_cm)
+            return
+        except Exception as ex:
+            r = p.add_run(f"[image: {fname}]")
+            run_fmt(r, color="C00000")
+            print("  ! image failed:", ex)
+            return
+    r = p.add_run(f"[image placeholder: {fname}]")
+    run_fmt(r, color="C00000")
 
 
 def _render_image(doc, block, project_dir, chap, seq, cfg):
     fname = block.get("file", "")
-    width = block.get("width_cm", 12.0)
+    width = _as_float(block.get("width_cm", 12.0), 12.0)
     path = os.path.join(project_dir, fname.replace("/", os.sep)) if fname else ""
     pic_p = doc.add_paragraph()
     pic_p.alignment = ALIGN.CENTER
-    if path and os.path.exists(path):
-        try:
-            pic_p.add_run().add_picture(path, width=Cm(width))
-        except Exception as ex:
-            r = pic_p.add_run(f"[image: {fname}]")
-            run_fmt(r, color="C00000")
-            print("  ! image failed:", ex)
-    else:
-        r = pic_p.add_run(f"[image placeholder: {fname}]")
-        run_fmt(r, color="C00000")
+    _place_picture(pic_p, path, fname, width,
+                   _image_settings(cfg).get("max_height_cm", 18.0))
     caption = block.get("caption", "")
     prefix = cfg.get("caption_prefix", {}).get("image", "Figure")
-    cp = doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
+    doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
+
+
+def _render_image_grid(doc, block, project_dir, chap, seq, cfg):
+    """A borderless table laying images out in a grid; the whole group shares one
+    figure number. Each cell scales its image to the column width (and the height
+    cap), with optional (a)(b)(c) sub-captions below each image."""
+    items = [it for it in (block.get("items") or []) if isinstance(it, dict)]
+    cols = max(1, _as_int(block.get("cols", 2), 2))
+    total_w = _as_float(block.get("width_cm", 15.5), 15.5)
+    show_sub = bool(block.get("sub_captions"))
+    isettings = _image_settings(cfg)
+    gap = _as_float(isettings.get("grid_gap_cm", 0.3), 0.3)
+    max_h = _as_float(isettings.get("grid_max_height_cm",
+                                   isettings.get("max_height_cm", 8.0)), 8.0)
+    cell_w = (total_w - gap * (cols - 1)) / cols if cols else total_w
+    if cell_w <= 0:
+        cell_w = total_w
+
+    n = len(items)
+    if n:
+        rows = (n + cols - 1) // cols
+        table = doc.add_table(rows=rows, cols=cols)
+        tables._table_fixed_layout(table)
+        tables._table_borders(table, val="none")
+        tables._cell_margins(table, top=14, bottom=14, left=28, right=28)
+        idx = 0
+        for r in range(rows):
+            for c in range(cols):
+                cell = table.cell(r, c)
+                cell.width = Cm(cell_w)
+                cell.text = ""
+                p = cell.paragraphs[0]
+                p.alignment = ALIGN.CENTER
+                if idx < n:
+                    it = items[idx]
+                    fn = it.get("file", "")
+                    pth = (os.path.join(project_dir, fn.replace("/", os.sep))
+                           if fn else "")
+                    _place_picture(p, pth, fn, cell_w, max_h)
+                    if show_sub:
+                        sp = cell.add_paragraph()
+                        sp.alignment = ALIGN.CENTER
+                        lab = it.get("sub") or _grid_sub_label(idx)
+                        run_fmt(sp.add_run(lab), size=9)
+                idx += 1
+
+    caption = block.get("caption", "")
+    prefix = cfg.get("caption_prefix", {}).get("image", "Figure")
+    doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
 
 
 def _render_caption(doc, text, cfg):
@@ -667,6 +786,10 @@ def _build_outline(doc, cfg, outline, names):
                     state["img_seq"][chap] += 1
                     _render_image(doc, block, cfg["_project_dir"], chap,
                                   state["img_seq"][chap], cfg)
+                elif btype == "imagegrid":
+                    state["img_seq"][chap] += 1
+                    _render_image_grid(doc, block, cfg["_project_dir"], chap,
+                                       state["img_seq"][chap], cfg)
                 elif btype == "datatable":
                     cap = block.get("caption", "")
                     if cap:
