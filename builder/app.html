@@ -235,6 +235,8 @@
   .flagcell{outline:2px solid var(--danger) !important;outline-offset:-2px;background:#fef2f2}
   .legend{display:flex;gap:14px;color:var(--muted);font-size:12px;margin:6px 0;align-items:center;flex-wrap:wrap}
   .legend .sw{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid rgba(0,0,0,.1);vertical-align:-1px;margin-right:4px}
+  .legend .val-badge{display:inline-flex;align-items:center;gap:4px;color:var(--danger);font-weight:600;border:1px solid var(--danger);border-radius:3px;padding:0 6px;background:#fef2f2}
+  .legend .val-badge::before{content:"!";display:inline-block;width:13px;height:13px;line-height:13px;text-align:center;border-radius:50%;background:var(--danger);color:#fff;font-size:10px}
 
   /* add-block picker */
   .add-block{margin-top:6px}
@@ -357,6 +359,8 @@ const App = {
   dirty: false,
   saving: false,
   autosaveTimer: null,
+  tplAutosaveTimer: null,   // debounce timer for template autosave
+  tplSaving: false,        // re-entrancy guard for template saves
   // template id is not hardcoded here; it is taken from ?template= (if supplied) or
   // resolved from the server's /api/config response (config.template).
   template: new URLSearchParams(location.search).get("template") || null,
@@ -811,6 +815,7 @@ function unlockNode(id){
 function renderAll(){ renderTree(); renderEditor(); }
 
 function renderEditor(){
+  flushActiveGrid();   // M39: commit any in-flight grid edit before host.innerHTML wipes the cell
   const host = $("#editor-inner"); host.innerHTML="";
   host.classList.remove("wide");          // prose reads best narrow; widened only for data tables
   if (!App.project){ host.appendChild(el("div",{class:"empty",text:T("status.welcome","Open or create a project to begin.")})); return; }
@@ -1784,11 +1789,36 @@ function editDatatable(host, block){
   host.appendChild(rowTools);
 
   let flags = {}; // rowIndex -> [axisIndex...] (flat index across sims)
+  // Auto red-flag availability indicator: a badge appended once to the legend
+  // (legend is built once, outside rebuildMetrics, so it survives grid rebuilds).
+  // It MUST be impossible to confuse "validator could not run" with "all in spec".
+  const valBadge = el("span",{class:"val-badge",
+    title:T("datatable.validation_unavailable_hint","Auto red-flag could not run; verify out-of-spec values manually."),
+    text:T("datatable.validation_unavailable","validation unavailable")});
+  valBadge.style.display = "none";
+  legend.appendChild(valBadge);
+  let valToastShown = false;
+  const setValAvailable = (ok)=>{
+    valBadge.style.display = ok ? "none" : "";
+    if (ok) valToastShown = false;   // re-arm the one-shot toast for the next outage
+  };
   const validate = debounce(async ()=>{
     try{
       const r = await api("POST","/api/validate-compliance",{json:{data}});
       flags = r.flags || {}; paintFlags();
-    }catch(_){ /* preview best-effort */ }
+      setValAvailable(true);
+    }catch(err){
+      // Failure modes all mean the same thing: the auto red-flag did NOT run
+      // (server unreachable / 503 'engine not available' / 500). Never swallow:
+      // clear flags so no stale red boxes mislead, and surface the outage loudly.
+      flags = {}; paintFlags();
+      setValAvailable(false);
+      setStatus("err", T("status.validation_unavailable","auto red-flag unavailable"));
+      if (!valToastShown){
+        valToastShown = true;   // debounce fires per keystroke; toast only once per outage
+        toast(T("toast.validation_unavailable","Auto red-flag unavailable; verify out-of-spec values manually."), true);
+      }
+    }
   }, 400);
 
   function paintFlags(){
@@ -2074,6 +2104,19 @@ const GI_MAX_ROWS = 2000, GI_MAX_COLS = 64;
 let GI_ACTIVE_CTX = null;
 window.addEventListener("mouseup",()=>{ if(GI_ACTIVE_CTX){ GI_ACTIVE_CTX._mouseDown=false; GI_ACTIVE_CTX=null; } });
 
+// Live grid contexts, so a teardown can flush an in-flight cell edit no matter
+// which view-switch path is destroying the editor DOM. Grids commit only on their
+// own mousedown/Enter/Tab; clearing #editor-inner (selectNode, goHome, block ops)
+// would otherwise drop the typed text before commitEdit runs.
+const GI_LIVE = new Set();
+function flushActiveGrid(){
+  if (!GI_LIVE.size) return;
+  GI_LIVE.forEach(ctx=>{
+    if (!ctx.host || !document.contains(ctx.host)){ GI_LIVE.delete(ctx); return; } // detached: prune
+    if (ctx.editing) commitEdit(ctx);                                            // write + markDirty + save
+  });
+}
+
 function makeGridContext({block, host, rows, cols, rerender, kind}){
   // kind: "free" | "compliance"  (drives paste column behavior)
   const ctx = {
@@ -2090,6 +2133,7 @@ function makeGridContext({block, host, rows, cols, rerender, kind}){
     _clip:"",                   // local clipboard fallback (TSV)
   };
   host.__giCtx = ctx;            // lets a global key handler resolve the ctx from the focused host
+  GI_LIVE.add(ctx);             // track for flushActiveGrid() on editor teardown
   wireGridEvents(ctx);
   return ctx;
 }
@@ -2211,6 +2255,19 @@ function cancelEdit(ctx){
   ad.el.removeAttribute("contenteditable");
   ad.el.classList.remove("gi-editing");
   ctx.editing=null;
+}
+// M15: persist an in-flight cell before a structural rebuild (no-op when not editing).
+function flushGridEdit(ctx){
+  if (ctx && ctx.editing) commitEdit(ctx);
+}
+// M15: discard an in-flight cell WITHOUT writing it back. Used only by undo, which
+// replaces ctx.block.data wholesale -- committing here would write a stray value
+// and re-dirty the model that is about to be swapped out.
+function dropGridEdit(ctx){
+  const ad = ctx && ctx.editing; if(!ad) return;
+  ad.el.removeAttribute("contenteditable");
+  ad.el.classList.remove("gi-editing");
+  ctx.editing = null;
 }
 
 /* ---- keyboard handler ----------------------------------------------------- */
@@ -2383,10 +2440,18 @@ function snapshotPayload(ctx){
     : { data: JSON.parse(JSON.stringify(ctx.block.data)) };
 }
 function snapshot(ctx){
+  // M15: commit any in-flight cell BEFORE serializing, so the just-typed value is not
+  // dropped by the structural rebuild that follows. Because the flush happens first, the
+  // snapshot's pre-state already contains that value: one Ctrl+Z reverts the structural
+  // change but KEEPS the typed value (the opposite order -- structural op, then type, then
+  // undo -- is handled by dropGridEdit in gridUndo, which discards the in-flight edit).
+  flushGridEdit(ctx);
   ctx._undo.push(snapshotPayload(ctx));
   if (ctx._undo.length>20) ctx._undo.shift();
 }
 function gridUndo(ctx){
+  dropGridEdit(ctx);                        // M15: discard (do NOT commit) an in-flight edit;
+                                           // the model is about to be replaced by the snapshot.
   const snap = ctx._undo.pop();
   if (!snap){ toast(T("action.undo","Undo")); return; }
   if (ctx.kind==="free") ctx.block.rows = snap.rows;
@@ -2418,6 +2483,7 @@ function restoreFocusAfterRender(ctx){
    HOME VIEW + create/import/open flows
 ============================================================================ */
 function render(){
+  flushActiveGrid();   // M39: commit any in-flight grid edit before a view switch destroys the editor DOM
   syncChrome();
   if (App.view === "home"){ renderHome(); return; }
   if (App.view === "template"){ renderTemplate(); return; }
@@ -2427,8 +2493,9 @@ function render(){
 function syncChrome(){
   const inEditor   = App.view === "editor";
   const inTemplate = App.view === "template";
-  // project-only toolbar buttons: usable only in the project editor
-  ["#btn-save","#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !inEditor; });
+  // export buttons are project-only; Save works in both editors (project save vs template save)
+  ["#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !inEditor; });
+  $("#btn-save").disabled = !(inEditor || inTemplate);
   $("#btn-open").disabled = inTemplate;
   $("#btn-new").disabled  = inTemplate;
   // left pane hosts the project outline OR the skeleton tree
@@ -2596,6 +2663,7 @@ function tplMarkDirty(){
   if (!App.tplView) return;
   App.tplView.dirty = true;
   setStatus("dirty", T("status.unsaved","Unsaved changes"));
+  scheduleTplAutosave();
   // do NOT re-render here: that would blur the input being typed in.
 }
 
@@ -2933,9 +3001,19 @@ function serializeSkeleton(nodes){
   });
 }
 
-async function saveTemplate(){
-  const tv = App.tplView; if (!tv) return;
-  setStatus("saving", T("status.saving","Saving..."));
+function scheduleTplAutosave(){
+  clearTimeout(App.tplAutosaveTimer);
+  App.tplAutosaveTimer = setTimeout(()=>persistTemplate({silent:true, stay:true}), 1500);
+}
+// Persist the active template via the atomic PUT /api/template, WITHOUT navigating.
+// opts.silent: suppress "saving" status + failure toast (used by autosave).
+// Returns true on success; callers that want the navigate-home UX do that after.
+async function persistTemplate(opts){
+  opts = opts || {};
+  const tv = App.tplView; if (!tv) return false;
+  if (App.tplSaving){ if (!opts.silent) scheduleTplAutosave(); return false; }
+  App.tplSaving = true;
+  if (!opts.silent) setStatus("saving", T("status.saving","Saving..."));
   try{
     const body = {
       name: tv.name,
@@ -2944,12 +3022,22 @@ async function saveTemplate(){
     };
     await api("PUT","/api/template",{query:{id:tv.id}, json:body});
     tv.dirty = false;
-    toast(T("toast.template_saved","Template saved"));
-    App.tplView=null; App.view="home"; render(); await refreshHome();
+    setStatus("saved", T("status.template_saved","Template saved"));
+    return true;
   }catch(e){
     setStatus("err","save failed");
-    toast(T("toast.template_save_failed","Save failed: ")+e.message, true);
+    if (!opts.silent) toast(T("toast.template_save_failed","Save failed: ")+e.message, true);
+    return false;
+  }finally{
+    App.tplSaving = false;
   }
+}
+async function saveTemplate(){
+  if (!App.tplView) return;
+  const ok = await persistTemplate({stay:true});
+  if (!ok) return;
+  toast(T("toast.template_saved","Template saved"));
+  App.tplView=null; App.view="home"; render(); await refreshHome();
 }
 
 // options: [{id,name}]; allowBlank adds a leading "auto-derive" choice (value="").
@@ -3123,7 +3211,8 @@ function wireToolbar(){
   $("#app-home").onclick = goHome;
   $("#btn-open").onclick = ()=>openProject(null);
   $("#btn-new").onclick  = newProject;
-  $("#btn-save").onclick = ()=>saveProject(false);
+  // route Save by current view: project editor -> saveProject, template editor -> persistTemplate (save in place)
+  $("#btn-save").onclick = ()=>{ flushActiveGrid(); if (App.view === "template") persistTemplate({stay:true}); else saveProject(false); };
   $("#btn-docx").onclick = ()=>exportProject("docx");
   $("#btn-pdf").onclick   = ()=>exportProject("pdf");
 }
@@ -3135,7 +3224,11 @@ function wireGlobal(){
   // on their own host; this global guard keeps native browser undo from firing when a
   // grid cell is the active element but its host keydown did not consume the event).
   window.addEventListener("keydown",(e)=>{
-    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="s"){ e.preventDefault(); saveProject(false); }
+    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="s"){
+      e.preventDefault();
+      flushActiveGrid();   // commit any in-flight grid cell so a manual save persists it
+      if (App.view === "template") persistTemplate({stay:true}); else saveProject(false);
+    }
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){
       const ae = document.activeElement;
       const giCtx = (ae && ae.__giCtx) || (ae && ae.closest && (()=>{ const h=ae.closest("[tabindex]"); return h && h.__giCtx; })());
