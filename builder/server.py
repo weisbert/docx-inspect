@@ -276,7 +276,7 @@ def parse_xlsx_compliance(xlsx_bytes):
     for row in ws.iter_rows(values_only=True):
         grid.append(list(row))
     if not grid:
-        return {"data": {"spec_name": "", "sims": [], "rows": []}}
+        return {"recognized": False, "data": {"spec_name": "", "sims": [], "rows": []}}
 
     ncols = max(len(r) for r in grid)
     for r in grid:
@@ -291,7 +291,7 @@ def parse_xlsx_compliance(xlsx_bytes):
             break
     if header_axis_row is None:
         # Fall back: treat as plain grid, no compliance structure recognized.
-        return {"data": {"spec_name": "", "sims": [], "rows": []}}
+        return {"recognized": False, "data": {"spec_name": "", "sims": [], "rows": []}}
 
     # Map header columns.
     axis_cols = []  # list of (col_index, axis_label)
@@ -431,7 +431,7 @@ def parse_xlsx_compliance(xlsx_bytes):
             }
         )
 
-    return {"data": {"spec_name": spec_name, "sims": sims, "rows": rows}}
+    return {"recognized": True, "data": {"spec_name": spec_name, "sims": sims, "rows": rows}}
 
 
 def _first_str(row, run):
@@ -1113,6 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
         payload = self._read_json()
         dir_arg = payload.get("dir")
         tid = payload.get("template")
+        force = bool(payload.get("force"))
         if not dir_arg:
             return self._send_error_json("missing 'dir'")
         tpl = tstore.get_template(CFG.reports_root, tid)  # 404 if absent
@@ -1123,6 +1124,18 @@ class Handler(BaseHTTPRequestHandler):
         }
         project_dir = resolve_project_dir(dir_arg, create=True)
         pj = os.path.join(project_dir, "project.json")
+        # Refuse to clobber an existing project unless the caller explicitly
+        # opted in; even then keep a .bak so an accidental overwrite is
+        # recoverable. (This is the most destructive path in the tool.)
+        if os.path.isfile(pj):
+            if not force:
+                return self._send_error_json(
+                    "a project already exists in this folder", status=409
+                )
+            try:
+                os.replace(pj, pj + ".bak")
+            except OSError:
+                pass
         atomic_write(
             pj, json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
         )

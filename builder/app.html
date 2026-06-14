@@ -507,18 +507,35 @@ function newProjectObject(){
            outline: instantiateSkeleton(App.config.skeleton) };
 }
 
+// Probe whether a project.json already lives at `dir` (best-effort: any error
+// — bad path, server hiccup — resolves to false so creation still surfaces the
+// real failure on the actual write).
+async function projectExistsAt(dir){
+  try{
+    const probe = await api("GET","/api/project",{query:{dir}});
+    return !!(probe && probe.meta_info && probe.meta_info.exists);
+  }catch(_){ return false; }
+}
+
 async function newProject(){
   modalPrompt(T("dialog.new.title","New project"),
     T("dialog.new.msg","Enter the project folder path (absolute or under reports root)."),
     App.dir||"", async (dir)=>{
-      if (!dir) return;
-      App.project = newProjectObject();
-      App.dir = dir.trim();
-      App.selId = COVER_ID;
-      App.view = "editor";
-      render();
-      await saveProject(false);
-      toast(T("toast.created","Project created"));
+      if (!dir) return; dir=dir.trim(); if(!dir) return;
+      const make = async ()=>{
+        App.project = newProjectObject();
+        App.dir = dir;
+        App.selId = COVER_ID;
+        App.view = "editor";
+        render();
+        await saveProject(false);
+        toast(T("toast.created","Project created"));
+      };
+      if (await projectExistsAt(dir)){
+        modalConfirm(T("dialog.overwrite.title","Folder already has a project"),
+          T("dialog.overwrite.msg","A project already exists in this folder. Creating a new one overwrites it and cannot be undone."),
+          make);
+      } else { make(); }
   });
 }
 
@@ -1016,7 +1033,15 @@ function renderBlockCard(node, block, idx){
   if (idx===node.blocks.length-1) dn.disabled=true;
   actions.appendChild(up); actions.appendChild(dn);
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
-    onclick:()=>{ const i=cur(); if(i>=0){ node.blocks.splice(i,1); markDirty(); renderEditor(); } }}));
+    onclick:()=>{
+      const i=cur(); if(i<0) return;
+      const del=()=>{ node.blocks.splice(i,1); markDirty(); renderEditor(); };
+      // Block deletion is not undoable (the grid undo stack dies with the block)
+      // and autosave persists the empty state. Guard the costly/irrecoverable ones.
+      const warn = deleteBlockWarning(block);
+      if (warn) modalConfirm(T("dialog.del_block.title","Delete this block?"), warn, del);
+      else del();
+    }}));
   bar.appendChild(actions);
   card.appendChild(bar);
 
@@ -1029,6 +1054,21 @@ function renderBlockCard(node, block, idx){
 
   wireBlockDrag(card, node, block);
   return card;
+}
+// Returns a confirmation message if deleting `block` would lose hard-to-recreate
+// data, else null (delete silently). Images/empty blocks are cheap to re-add.
+function deleteBlockWarning(block){
+  if (!block) return null;
+  if (block.type === "datatable"){
+    const n = ((block.data && block.data.rows) || []).length;
+    const base = T("dialog.del_datatable.msg","This deletes the whole compliance table and cannot be undone.");
+    return n ? (base + " (" + n + (n===1?" metric row":" metric rows") + ")") : base;
+  }
+  if (block.type === "table"){
+    const hasData = (block.rows || []).some(r => (r||[]).some(c => String(c==null?"":c).trim()));
+    if (hasData) return T("dialog.del_table.msg","This deletes the table and its contents and cannot be undone.");
+  }
+  return null;
 }
 function moveBlock(node, idx, dir){
   const j=idx+dir; if (idx<0||j<0||j>=node.blocks.length) return;
@@ -1993,6 +2033,12 @@ async function importXlsxCompliance(file, block){
   try{
     const b64 = await fileToB64(file);
     const r = await api("POST","/api/import-xlsx",{json:{xlsx_b64:b64, mode:"compliance"}});
+    if (r && r.recognized === false){
+      // No compliance header band found: do NOT clobber a table the user already
+      // filled. Keep current data and tell them why nothing happened.
+      toast(T("toast.xlsx_unrecognized","No compliance table recognized in that file — existing data kept."), true);
+      return;
+    }
     if (r.data){
       block.data = r.data;
       // GUARD: the model stores a single scalar (sim_ntwc) per row for non-MTM axes,
@@ -2980,12 +3026,19 @@ function newFromTemplate(){
       T("dialog.new.msg","Enter the project folder path (absolute or under reports root)."),
       "", async (dir)=>{
         if (!dir) return; dir=dir.trim(); if(!dir) return;
-        try{
-          await api("POST","/api/new-from-template",{json:{dir, template:tplId}});
-          await openProject(dir);
-        }catch(e){
-          toast(T("toast.create_failed","Create failed: ")+e.message, true);
-        }
+        const create = async (force)=>{
+          try{
+            await api("POST","/api/new-from-template",{json:{dir, template:tplId, force:!!force}});
+            await openProject(dir);
+          }catch(e){
+            toast(T("toast.create_failed","Create failed: ")+e.message, true);
+          }
+        };
+        if (await projectExistsAt(dir)){
+          modalConfirm(T("dialog.overwrite.title","Folder already has a project"),
+            T("dialog.overwrite.msg","A project already exists in this folder. Creating a new one overwrites it and cannot be undone."),
+            ()=>create(true));
+        } else { create(false); }
     });
   };
   if (App.templates.length === 1){ askDir(App.templates[0].id); return; }
