@@ -59,6 +59,7 @@
   }
   #editor{flex:1 1 auto;overflow:auto;padding:18px 22px}
   #editor-inner{max-width:980px;margin:0 auto}
+  #editor-inner.wide{max-width:none}     /* data tables need the full canvas */
 
   /* outline tree */
   .tree-head{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
@@ -173,6 +174,22 @@
 
   /* free table grid */
   .grid-wrap{overflow:auto;border:1px solid var(--line);border-radius:6px}
+  /* compliance grid: bound height so the horizontal scrollbar stays reachable
+     without scrolling the whole page to the bottom of a tall table */
+  .grid-wrap.dt-grid{max-height:72vh}
+  /* freeze the header while scrolling the metric list; collapsed borders clip
+     under a sticky thead, so the bottom rule is redrawn with an inset shadow */
+  .grid-wrap.dt-grid thead{position:sticky;top:0;z-index:3}
+  .grid-wrap.dt-grid thead th{padding:4px 7px}
+  .grid-wrap.dt-grid thead tr:last-child th{box-shadow:inset 0 -1px 0 var(--line)}
+  /* freeze the leading identity columns (actions / Category / Item) on horizontal
+     scroll so the row stays identifiable next to far-right sim values; the left
+     offsets are measured and pinned in JS (auto table layout, content-driven widths) */
+  .grid-wrap.dt-grid td.gi-freeze,.grid-wrap.dt-grid th.gi-freeze{position:sticky;z-index:2;background:var(--panel)}
+  .grid-wrap.dt-grid thead th.gi-freeze{z-index:4;background:#eef1f5}
+  .grid-wrap.dt-grid .gi-freeze-edge{box-shadow:inset -1px 0 0 var(--line)}
+  /* the bottom-right corner cell needs both the header rule and the freeze edge */
+  .grid-wrap.dt-grid thead tr:last-child th.gi-freeze-edge{box-shadow:inset -1px 0 0 var(--line),inset 0 -1px 0 var(--line)}
   table.grid{border-collapse:collapse;width:100%}
   table.grid td,table.grid th{border:1px solid var(--line);padding:0;min-width:60px;vertical-align:top}
   table.grid td .cell,table.grid th .cell{padding:5px 7px;outline:none;min-height:24px;white-space:pre-wrap}
@@ -188,9 +205,12 @@
   table.grid.gi-grid .cell{cursor:cell;}
   table.grid.gi-grid .cell.gi-editing{cursor:text;user-select:text;background:#fff;
     box-shadow:inset 0 0 0 2px var(--accent);}
-  .cell.cell-selected{background:var(--accent-soft);}
-  .cell.cell-focus{box-shadow:inset 0 0 0 2px var(--accent);}
-  .cell.cell-invalid{background:#fff7ed;box-shadow:inset 0 0 0 1px var(--warn);}
+  /* paint selection/focus/invalid on the TD (not the inner div) so the highlight
+     fills the full row height even for empty cells, whose div only grows to its
+     content and would otherwise leave a white strip below */
+  table.grid td:has(>.cell.cell-selected){background:var(--accent-soft)}
+  table.grid td:has(>.cell.cell-focus){box-shadow:inset 0 0 0 2px var(--accent)}
+  table.grid td:has(>.cell.cell-invalid){background:#fff7ed;box-shadow:inset 0 0 0 1px var(--warn)}
 
   /* structural drag-reorder (neutral accent; distinct from the red flag style) */
   table.grid tr.dragging{opacity:.5}
@@ -775,10 +795,12 @@ function renderAll(){ renderTree(); renderEditor(); }
 
 function renderEditor(){
   const host = $("#editor-inner"); host.innerHTML="";
+  host.classList.remove("wide");          // prose reads best narrow; widened only for data tables
   if (!App.project){ host.appendChild(el("div",{class:"empty",text:T("status.welcome","Open or create a project to begin.")})); return; }
   if (App.selId === COVER_ID){ renderCoverForm(host); return; }
   const r = findNode(App.selId);
   if (!r){ host.appendChild(el("div",{class:"empty",text:T("editor.pick","Select a section.")})); return; }
+  if (hasDatatable(r.node)) host.classList.add("wide");
   renderNodeEditor(host, r.node);
 }
 
@@ -1701,7 +1723,7 @@ function editDatatable(host, block){
     el("span",{html:'<span class="sw" style="background:#fef2f2;outline:2px solid #dc2626;outline-offset:-2px"></span>'+T("datatable.legend_flag","out-of-spec (auto red-flag)")}),
   ]);
   host.appendChild(legend);
-  const metricWrap = el("div",{class:"grid-wrap"});
+  const metricWrap = el("div",{class:"grid-wrap dt-grid"});
   host.appendChild(metricWrap);
 
   // shared select/copy/paste/fill/undo context for the metric grid.
@@ -1760,6 +1782,7 @@ function editDatatable(host, block){
     const flatAxes = []; // {si, ai, label}
     data.sims.forEach((s, si)=> (s.axes||[]).forEach((ax, ai)=> flatAxes.push({si, ai, label:ax})));
 
+    const thead = el("thead");
     const hr1 = el("tr",{class:"hdr"});
     hr1.appendChild(el("th",{}));                                  // row-actions column
     hr1.appendChild(el("th",{html:T("datatable.col.cat","Category")}));
@@ -1770,14 +1793,16 @@ function editDatatable(host, block){
     hr1.appendChild(el("th",{html:T("datatable.col.spec","Spec")}));
     hr1.appendChild(el("th",{html:T("datatable.col.spec_mtm","Spec MIN/TYP/MAX"), colspan:3}));
     data.sims.forEach(s=> hr1.appendChild(el("th",{text:(s.title||s.stage||s.key||"sim"), colspan:(s.axes||[]).length})));
-    tbl.appendChild(hr1);
+    thead.appendChild(hr1);
 
     const hr2 = el("tr",{class:"hdr"});
     ["","","","","","",""].forEach(()=>hr2.appendChild(el("th",{})));   // actions + 6 fixed
     ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
     flatAxes.forEach(fa=> hr2.appendChild(el("th",{text:fa.label})));
-    tbl.appendChild(hr2);
+    thead.appendChild(hr2);
+    tbl.appendChild(thead);
 
+    const tbody = el("tbody");
     data.rows.forEach((row, ri)=>{
       const tr = el("tr",{});
       const actTd = rowActionsCell(ri, data.rows.length, rowStruct);     // not a grid cell
@@ -1806,10 +1831,12 @@ function editDatatable(host, block){
           flat++;
         });
       });
-      tbl.appendChild(tr);
+      tbody.appendChild(tr);
     });
+    tbl.appendChild(tbody);
     metricWrap.appendChild(tbl);
     ctx.table = tbl; tbl.classList.add("gi-grid");
+    freezeLeadCols(tbl);                    // pin actions/Category/Item after layout
     paintFlags();
     restoreFocusAfterRender(ctx);
   }
@@ -1831,6 +1858,39 @@ function rowActionsCell(ri, total, rowStruct){
   td.appendChild(b("⊝","above","grid.insert_row_above", false));
   td.appendChild(b("✕","delete","grid.delete_row", false));
   return td;
+}
+
+// Freeze the leading identity columns (row-actions / Category / Item) so a row
+// stays identifiable when scrolled right to far sim values. Auto table layout
+// makes column widths content-driven, so CSS can't know each column's offset —
+// measure them from the (per-column) second header row and pin sticky `left`.
+const GI_FREEZE_N = 3;
+// re-pin on resize so the measured offsets don't go stale (registered once)
+let GI_FREEZE_RESIZE = false;
+function ensureFreezeResizeHandler(){
+  if (GI_FREEZE_RESIZE) return; GI_FREEZE_RESIZE = true;
+  window.addEventListener("resize", debounce(()=>{
+    document.querySelectorAll(".grid-wrap.dt-grid table.grid").forEach(freezeLeadCols);
+  }, 150));
+}
+function freezeLeadCols(tbl){
+  ensureFreezeResizeHandler();
+  const head = tbl.tHead; if(!head || !head.rows.length) return;
+  const ref = head.rows[head.rows.length-1];          // hr2: exactly one cell per leaf column
+  const lefts=[]; let acc=0;
+  for(let i=0;i<GI_FREEZE_N;i++){
+    if(!ref.cells[i]) return;                          // fewer columns than the freeze count: skip
+    lefts.push(acc); acc += ref.cells[i].getBoundingClientRect().width;
+  }
+  if(acc<=0) return;                                   // not laid out / hidden: don't pin to 0
+  for(const tr of tbl.rows){
+    for(let i=0;i<GI_FREEZE_N;i++){
+      const c = tr.cells[i]; if(!c) continue;
+      c.classList.add("gi-freeze");
+      c.style.left = lefts[i] + "px";
+      if(i===GI_FREEZE_N-1) c.classList.add("gi-freeze-edge");
+    }
+  }
 }
 
 /* ---- compliance typed cell factories (register shared-layer adapters) ------ */
