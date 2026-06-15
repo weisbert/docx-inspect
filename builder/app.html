@@ -1671,6 +1671,14 @@ function editDatatable(host, block){
     });
   }
   const addGroup = (stage)=>{
+    // C1 stopgap: sim values are stored in a single per-row store (sim_mtm/sim_ntwc)
+    // with no group dimension, so a 2nd group would silently share group 1's values
+    // and export identical columns. Block creating one until the per-group model
+    // migration lands (see simAxisCell TODO). Existing groups can still be deleted.
+    if (data.sims.length >= 1){
+      toast(T("datatable.one_group_only","Multiple simulation groups are not supported yet — all groups would share one set of values."), true);
+      return;
+    }
     const st = stage!=null ? stage : (stagePresets[0]||"");
     snapshot(ctx);                                          // undo BEFORE adding a group (decision 7)
     data.sims.push({ key:uniqueSimKey(data.sims, st), title:"", stage:st, axes:defaultAxes.slice() });
@@ -1735,12 +1743,19 @@ function editDatatable(host, block){
     });
     simBd.appendChild(chips);
     const addG = el("div",{class:"grid-tools"});
-    // quick-add buttons: one per configured stage preset, plus a generic "group"
-    stagePresets.forEach(st=>{
-      addG.appendChild(el("button",{class:"sm-btn", text:"+ "+st, onclick:()=>addGroup(st)}));
-    });
-    addG.appendChild(el("button",{class:"sm-btn", text:"+ "+T("datatable.group","Group"),
-      onclick:()=>addGroup(null)}));
+    if (data.sims.length >= 1){
+      // C1 stopgap: only one simulation group is safe today (see addGroup). Explain
+      // why the add buttons are absent instead of silently dropping them.
+      addG.appendChild(el("span",{style:{color:"var(--muted)",fontSize:"12px"},
+        text:T("datatable.one_group_hint","One simulation group per table for now (multiple groups would share the same values).")}));
+    } else {
+      // quick-add buttons: one per configured stage preset, plus a generic "group"
+      stagePresets.forEach(st=>{
+        addG.appendChild(el("button",{class:"sm-btn", text:"+ "+st, onclick:()=>addGroup(st)}));
+      });
+      addG.appendChild(el("button",{class:"sm-btn", text:"+ "+T("datatable.group","Group"),
+        onclick:()=>addGroup(null)}));
+    }
     simBd.appendChild(addG);
   };
   // add an axis via modalPrompt (replaces native prompt, decision 12), guarding the
@@ -1825,8 +1840,11 @@ function editDatatable(host, block){
     metricWrap.querySelectorAll(".axis-val").forEach(td=>td.classList.remove("flagcell"));
     Object.keys(flags).forEach(ri=>{
       (flags[ri]||[]).forEach(ai=>{
-        const cell = metricWrap.querySelector(`[data-r="${ri}"][data-flatax="${ai}"]`);
-        if (cell) cell.classList.add("flagcell");
+        // `ai` is a semantic MTM slot (0/1/2), NOT a flat column position. Match by
+        // data-mtm so the right column lights up regardless of axis order; any group
+        // showing that slot is painted (groups share one stored value today).
+        metricWrap.querySelectorAll(`[data-r="${ri}"][data-mtm="${ai}"]`)
+          .forEach(cell=>cell.classList.add("flagcell"));
       });
     });
   }
@@ -2004,7 +2022,11 @@ function simAxisCell(ctx, row, axisLabel, ri, flatIdx, c, after){
   const get = ()=> (mtmIdx!=null) ? (row.sim_mtm||[])[mtmIdx] : row.sim_ntwc;
   const set = (v)=>{ if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v; };
   const cell = el("div",{class:"cell", text:fmtAxis(get())});
-  const td = el("td",{class:"axis-val", "data-r":ri, "data-flatax":flatIdx},[cell]);
+  // data-mtm = semantic [MIN,TYP,MAX] slot (0/1/2); blank for non-MTM axes. The
+  // validator returns flags by MTM slot, so paintFlags locates cells by this, not
+  // by column order -- correct even after axes are reordered. (See paintFlags.)
+  const td = el("td",{class:"axis-val", "data-r":ri, "data-flatax":flatIdx,
+    "data-mtm": (mtmIdx!=null ? mtmIdx : "")},[cell]);
   regCell(ctx, { r:ri, c, type:"axis", el:cell,
     read:()=> fmtAxis(get()),
     write:(s)=>{ const v=parseAxis(s); set(v); cell.textContent = s==="" ? "" : s;
