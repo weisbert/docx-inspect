@@ -16,6 +16,13 @@ document (portrait body flow -- never a new page, never landscape, never a page-
 Nothing domain specific is hardcoded here: column widths, fonts, axis labels (including the
 unbreakable narrow-axis token), fill colors, limit directions and the flag color all arrive
 through the ``cfg`` dict (the template config's table section) or the data itself.
+
+RETURN-SHAPE CONTRACT: both renderers return a result dict
+    {"table": <python-docx Table or None>,
+     "total_rows": int,          # data rows rendered
+     "flagged_rows": int,        # rows with >=1 out-of-spec sim cell (datatable only)
+     "warnings": [ {type, detail, location?}, ... ]}  # e.g. row_clip_risk
+The engine unpacks this and merges ``warnings``/counts into its render manifest.
 """
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH as ALIGN, WD_LINE_SPACING
@@ -135,8 +142,34 @@ def _fmt_val(v):
     return v
 
 
+def _violates(limit, nv, smin, smax, en, styp):
+    """True when a single simulated value ``nv`` is out of the row's limit.
+
+    Directions: ``le`` (<= upper bound) / ``ge`` (>= target) / ``range`` ([MIN,MAX]).
+    Thresholds come from the spec triple / scalar spec -- no hardcoded numbers."""
+    if nv is None:
+        return False
+    if limit == "le":
+        thr = smax if smax is not None else (en if en is not None else styp)
+        return thr is not None and nv > thr
+    if limit == "ge":
+        thr = smin if smin is not None else (smax if smax is not None else en)
+        return thr is not None and nv < thr
+    if limit == "range":
+        return (smin is not None and nv < smin) or (smax is not None and nv > smax)
+    return False
+
+
 def flag_positions(row):
-    """Indices in the simulation [MIN,TYP,MAX] triple that violate the row's limit.
+    """Axis indices in the simulation group that violate the row's limit.
+
+    Indices 0/1/2 are the simulation [MIN,TYP,MAX] triple; index 3 is the NTWC
+    corner (``_axis_value`` lays the sim group out as [MIN,TYP,MAX,NTWC]). NTWC
+    is evaluated against its own spec threshold (``spec_ntwc``) when present,
+    otherwise it falls back to the same MTM-derived thresholds as the triple --
+    so a None NTWC (no corner value) is never flagged. Backward-tolerant: callers
+    that only ever looked at {0,1,2} keep working; index 3 is added only when an
+    NTWC value is out of spec.
 
     Directions: ``le`` (<= upper bound) / ``ge`` (>= target) / ``range`` ([MIN,MAX]).
     Thresholds are taken from the row's spec triple / scalar spec. No hardcoded numbers.
@@ -149,32 +182,47 @@ def flag_positions(row):
     smin, styp, smax = _numv(sm[0]), _numv(sm[1]), _numv(sm[2])
     en = _numv(row.get("spec"))
     flags = set()
-    if limit == "le":
-        thr = smax if smax is not None else (en if en is not None else styp)
-        if thr is not None:
-            for i, v in enumerate(sim):
-                nv = _numv(v)
-                if nv is not None and nv > thr:
-                    flags.add(i)
-    elif limit == "ge":
-        thr = smin if smin is not None else (smax if smax is not None else en)
-        if thr is not None:
-            for i, v in enumerate(sim):
-                nv = _numv(v)
-                if nv is not None and nv < thr:
-                    flags.add(i)
-    elif limit == "range":
-        for i, v in enumerate(sim):
-            nv = _numv(v)
-            if nv is None:
-                continue
-            if (smin is not None and nv < smin) or (smax is not None and nv > smax):
-                flags.add(i)
+    for i, v in enumerate(sim):
+        if _violates(limit, _numv(v), smin, smax, en, styp):
+            flags.add(i)
+    # NTWC corner = axis index 3. Prefer the NTWC-specific spec bound; if the
+    # template carries no spec_ntwc, reuse the MTM-derived thresholds.
+    nt = _numv(row.get("sim_ntwc"))
+    if nt is not None:
+        nspec = _numv(row.get("spec_ntwc"))
+        n_smin = nspec if nspec is not None else smin
+        n_smax = nspec if nspec is not None else smax
+        n_en = nspec if nspec is not None else en
+        if _violates(limit, nt, n_smin, n_smax, n_en, styp):
+            flags.add(3)
     return flags
 
 
 def _default_axes(cfg):
     return list(cfg.get("axis_labels", ["MIN", "TYP", "MAX", "NTWC"]))
+
+
+# Dependency-free clip heuristic. The compliance table keeps EXACTLY row heights
+# (iron rule 2): a cell that holds more text than one line can hold is silently
+# clipped by Word rather than spilling. We can't measure glyph widths without a
+# font engine, so we estimate the chars that fit on one line from the cell's
+# usable width and the font size, and warn (never resize) when the value is
+# longer. Conservative on purpose -- under-warn rather than cry wolf.
+#   chars/cm at the reference 7pt is ~8 (calibrated so a real, tight compliance
+#   layout's legitimate numeric content -- e.g. "-148.5" in a 0.88cm axis column
+#   at 7pt -- does NOT warn, while genuinely oversized free text still does). It
+#   scales inversely with font size, so a bigger font fits fewer chars/cm.
+_CLIP_CHARS_PER_CM_AT_7PT = 8.0
+_CLIP_CELL_PAD_CM = 0.1   # left+right cell margins (~28+28 dxa) eat usable width
+
+
+def _clip_capacity(width_cm, font_pt):
+    """Estimated max single-line characters for a cell of ``width_cm`` at ``font_pt``."""
+    usable = max(0.0, float(width_cm) - _CLIP_CELL_PAD_CM)
+    if usable <= 0 or not font_pt:
+        return 0
+    cpc = _CLIP_CHARS_PER_CM_AT_7PT * (7.0 / float(font_pt))
+    return int(usable * cpc)
 
 
 def make_groups(data, cfg):
@@ -300,27 +348,64 @@ def render_datatable(doc, data, cfg):
         catg.append((i, j))
         i = j + 1
 
+    warnings = []
+    flagged_rows = 0
+
+    def _clip_check(val, width_cm, kind, row_label):
+        """Record a row_clip_risk warning when a cell value is too long for one
+        line (EXACTLY height => Word clips it). Metadata only -- never resizes."""
+        if val is None:
+            return
+        s = str(val)
+        cap = _clip_capacity(width_cm, font_pt)
+        if cap and len(s) > cap:
+            shown = s if len(s) <= 30 else s[:30] + "..."
+            warnings.append({
+                "type": "row_clip_risk",
+                "detail": '%s "%s" may clip (%d chars, ~%d fit at %.2gcm)'
+                          % (kind, shown, len(s), cap, width_cm),
+                "location": row_label,
+            })
+
     for (g0, g1) in catg:
         for gi in range(g0, g1 + 1):
             row = rows[gi]
             r = start + gi
             band = fills["setting"] if row["kind"] in setting_kinds else fills["result"]
             flags = flag_positions(row)
+            if flags:
+                flagged_rows += 1
+            row_label = "row %d (%s)" % (gi, row.get("item", ""))
+            # When a row merges its sim axis cells into one wide cell, the
+            # per-axis width no longer bounds the text, so skip the clip check
+            # for sim cells (would otherwise over-warn on a non-clipping merge).
+            span = bool(row.get("sim_span"))
             for idx, p in enumerate(plan):
                 if p["kind"] == "cat":
                     continue
                 _shade(table.cell(r, idx), band)
                 if p["kind"] == "item":
                     _set_cell_text(table.cell(r, idx), row["item"], font_pt)
+                    _clip_check(row.get("item"), p["w"], "item", row_label)
                 elif p["kind"] == "unit":
                     _set_cell_text(table.cell(r, idx), row["unit"], font_pt)
+                    _clip_check(row.get("unit"), p["w"], "unit", row_label)
                 elif p["kind"] == "spec":
                     _set_cell_text(table.cell(r, idx), row.get("spec"), font_pt)
+                    _clip_check(row.get("spec"), p["w"], "spec", row_label)
                 elif p["kind"] == "axis":
                     v = _axis_value(row, p["group"], p["axis"])
                     red = (p["role"] == "sim" and p["axis"] in flags)
+                    # B&W-safe marker: flagged sim values are red AND bold so the
+                    # flag survives a grayscale print. Bold adds no measurable
+                    # width here (fixed column layout) so it cannot push a cell to
+                    # wrap/clip -- the EXACTLY row-height no-spill guarantee holds.
                     _set_cell_text(table.cell(r, idx), _fmt_val(v), font_pt,
-                                   color=(flag_color if red else None))
+                                   bold=red, color=(flag_color if red else None))
+                    # skip the clip check for merged sim cells (no per-axis bound)
+                    if not (span and p["role"] == "sim"):
+                        _clip_check(_fmt_val(v), p["w"],
+                                    "%s.%s" % (p["group"], p["label"]), row_label)
             if row.get("sim_span"):
                 for g in groups:
                     if g["role"] == "sim":
@@ -340,7 +425,15 @@ def render_datatable(doc, data, cfg):
         table.rows[r].height = Pt(row_h["header"] if r < 3 else row_h["data"])
         table.rows[r].height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
 
-    return table
+    # RETURN SHAPE (CONTRACT): a result dict. ``table`` is the python-docx Table
+    # object (same one previously returned bare); the rest is render metadata the
+    # engine feeds into its warnings manifest.
+    return {
+        "table": table,
+        "total_rows": len(rows),
+        "flagged_rows": flagged_rows,
+        "warnings": warnings,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +441,15 @@ def render_datatable(doc, data, cfg):
 # ---------------------------------------------------------------------------
 def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
-        header_fill, border{val,sz,color}, font_pt(optional)."""
+        header_fill, border{val,sz,color}, font_pt(optional).
+
+    RETURN SHAPE (CONTRACT): the same result-dict shape as render_datatable --
+    {"table": <Table or None>, "total_rows": int, "flagged_rows": 0,
+     "warnings": []}. A free table has no compliance limits, so flagged_rows is
+     always 0 and warnings is always empty; the keys exist for a uniform caller.
+     ``table`` is None when there are no rows to render."""
     if not rows:
-        return None
+        return {"table": None, "total_rows": 0, "flagged_rows": 0, "warnings": []}
     ncols = max(len(r) for r in rows)
     nrows = len(rows)
     header_fill = cfg.get("header_fill", "D9D9D9")
@@ -389,4 +488,4 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
         r, c, rs, cs = m["r"], m["c"], m.get("rs", 1), m.get("cs", 1)
         table.cell(r, c).merge(table.cell(r + rs - 1, c + cs - 1))
 
-    return table
+    return {"table": table, "total_rows": nrows, "flagged_rows": 0, "warnings": []}

@@ -517,17 +517,27 @@ def run_export(project_dir, fmt, save_first=False):
 
     name = os.path.basename(project_dir.rstrip(os.sep)) or "report"
     docx_out = os.path.join(out_dir, "%s.docx" % name)
-    docx_abs = os.path.abspath(engine.render_report(project, cfg, project_dir, docx_out))
+    # render_report returns {out_path, warnings, stats}; tolerate the legacy
+    # bare-string return too. The render manifest (warnings + stats) is surfaced
+    # to the frontend as additive keys on the success payload so the user can see
+    # missing images / out-of-spec / clip risks after an export.
+    render_result = engine.render_report(project, cfg, project_dir, docx_out)
+    out_path = engine._result_out_path(render_result) or docx_out
+    docx_abs = os.path.abspath(out_path)
+    warnings = render_result.get("warnings", []) if isinstance(render_result, dict) else []
+    stats = render_result.get("stats", {}) if isinstance(render_result, dict) else {}
 
     if fmt == "docx":
         rel = os.path.relpath(docx_abs, project_dir).replace("\\", "/")
-        return {"out": rel, "abs": docx_abs.replace("\\", "/"), "fmt": "docx"}
+        return {"out": rel, "abs": docx_abs.replace("\\", "/"), "fmt": "docx",
+                "warnings": warnings, "stats": stats}
 
     if fmt == "pdf":
         pdf_abs = os.path.splitext(docx_abs)[0] + ".pdf"
         _word_export_pdf(docx_abs, pdf_abs)
         rel = os.path.relpath(pdf_abs, project_dir).replace("\\", "/")
-        return {"out": rel, "abs": pdf_abs.replace("\\", "/"), "fmt": "pdf"}
+        return {"out": rel, "abs": pdf_abs.replace("\\", "/"), "fmt": "pdf",
+                "warnings": warnings, "stats": stats}
 
     raise ValueError("unknown fmt: %s" % fmt)
 

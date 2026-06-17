@@ -141,6 +141,10 @@
   .rich.multi p.li-bullet::before{content:"\2022";position:absolute;left:.45em;color:var(--muted)}
   .rich.multi p.li-number{list-style:none;padding-left:1.9em;position:relative;counter-increment:linum}
   .rich.multi p.li-number::before{content:counter(linum) ".";position:absolute;left:.3em;color:var(--muted)}
+  /* cross-reference chip: an atomic, non-editable token in the prose editor */
+  .ref-chip{display:inline-block;background:var(--accent-soft);border:1px solid var(--accent);
+    color:var(--accent);border-radius:4px;padding:0 5px;margin:0 1px;font-size:.85em;
+    white-space:nowrap;cursor:default;user-select:none}
 
   /* image block */
   .img-drop{
@@ -282,6 +286,16 @@
     transition:opacity .2s,transform .2s;pointer-events:none}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(-4px)}
   #toast.err{background:var(--danger)}
+  /* export render-manifest panel */
+  .export-summary{background:#fffbeb;border:1px solid #fde68a;border-radius:6px;
+    padding:8px 12px;color:#92400e;font-size:13px;margin:0 0 12px}
+  .export-warn-list{max-height:280px;overflow-y:auto;border:1px solid var(--line);
+    border-radius:6px}
+  .export-warn-row{display:flex;gap:10px;padding:6px 10px;font-size:12px;
+    border-bottom:1px solid var(--line2)}
+  .export-warn-row:last-child{border-bottom:none}
+  .export-warn-type{flex:0 0 auto;font-weight:600;color:#b45309;white-space:nowrap}
+  .export-warn-detail{flex:1 1 auto;color:#475569;word-break:break-word}
   .empty{color:var(--muted);text-align:center;padding:40px 10px}
   .ro-note{background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px 12px;
     color:#92400e;font-size:13px;display:flex;align-items:center;gap:10px;margin-bottom:12px}
@@ -553,6 +567,10 @@ function ensureProjectIds(nodes){
   (nodes||[]).forEach(n=>{
     if (!n.id) n.id = uid();
     if (!Array.isArray(n.blocks)) n.blocks = [];
+    // Backfill a stable id on any media block missing one (older projects /
+    // imported seeds). Cross-references and the engine's caption bookmark
+    // (bm_<id>_num) both key off this id, so it must exist before render.
+    n.blocks.forEach(b=>{ if (isMediaBlock(b) && !b.id) b.id = uid(); });
     if (!Array.isArray(n.children)) n.children = [];
     ensureProjectIds(n.children);
   });
@@ -607,9 +625,86 @@ async function exportProject(fmt){
     const r = await api("POST","/api/export",{query:{dir:App.dir, fmt}, json:{save_first:true}});
     setStatus("saved", T("status.exported","Export ready"));
     toast((fmt==="pdf"?T("toast.pdf_ready","PDF ready: "):T("toast.docx_ready","Word ready: ")) + (r.out||r.abs||""));
+    showExportReport(r);
   }catch(e){
     setStatus("err","export failed"); toast("Export failed: "+e.message, true);
   }
+}
+
+// Build human-readable lines from the export render manifest (warnings + stats).
+// The engine returns warning dicts {type, detail, location?} plus a stats dict
+// (total_blocks, missing_images, blocks_with_errors, row_clip_risks, ...). We
+// roll the warnings up by type into a short "N images missing, M ..." summary
+// and keep a full per-warning list for the detail panel.
+function exportWarningSummary(stats, warnings){
+  stats = stats || {}; warnings = warnings || [];
+  const counts = {};
+  warnings.forEach(w=>{ const t=w&&w.type||"warning"; counts[t]=(counts[t]||0)+1; });
+  const flagged = warnings.reduce((n,w)=> n + (w&&w.type==="spec_out_of_range"?1:0), 0);
+  // Prefer explicit stats counters where the engine provides them; fall back to
+  // the per-warning tally so a new warning type still shows up.
+  const get = (k)=> (stats[k]!=null ? stats[k] : (counts[k]||0));
+  const parts = [];
+  const missing = get("missing_images");
+  if (missing) parts.push(fmtCount(missing, T("export.w_missing_one","{n} image missing"),
+                                            T("export.w_missing_many","{n} images missing")));
+  const clips = get("row_clip_risks");
+  if (clips) parts.push(fmtCount(clips, T("export.w_clip_one","{n} clip risk"),
+                                        T("export.w_clip_many","{n} clip risks")));
+  const errs = get("blocks_with_errors");
+  if (errs) parts.push(fmtCount(errs, T("export.w_error_one","{n} block error"),
+                                       T("export.w_error_many","{n} block errors")));
+  const nocap = get("blocks_without_captions");
+  if (nocap) parts.push(fmtCount(nocap, T("export.w_nocap_one","{n} item without a caption"),
+                                         T("export.w_nocap_many","{n} items without a caption")));
+  const dangling = get("dangling_refs");
+  if (dangling) parts.push(fmtCount(dangling, T("export.w_ref_one","{n} broken reference"),
+                                              T("export.w_ref_many","{n} broken references")));
+  const logos = get("missing_logos");
+  if (logos) parts.push(fmtCount(logos, T("export.w_logo_one","{n} logo missing"),
+                                        T("export.w_logo_many","{n} logos missing")));
+  if (flagged) parts.push(fmtCount(flagged, T("export.w_oos_one","{n} value out of spec"),
+                                            T("export.w_oos_many","{n} values out of spec")));
+  return parts;
+}
+function fmtCount(n, one, many){ return (n===1?one:many).replace("{n}", String(n)); }
+
+// After a successful export, show the render manifest. No warnings -> a quiet
+// toast only (already fired by exportProject). With warnings -> a small panel
+// listing the rolled-up summary and every individual warning so the user knows
+// what to fix before sharing the document.
+function showExportReport(r){
+  if (!r || typeof r !== "object") return;
+  const warnings = Array.isArray(r.warnings) ? r.warnings : [];
+  const stats = r.stats || {};
+  const summary = exportWarningSummary(stats, warnings);
+  if (!summary.length && !warnings.length) return;  // clean export: stay quiet
+
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("export.report_title","Export finished with warnings")}));
+  const out = r.out || r.abs || "";
+  if (out) m.appendChild(el("p",{text:(r.fmt==="pdf"?T("toast.pdf_ready","PDF ready: ")
+                                                    :T("toast.docx_ready","Word ready: ")) + out}));
+  if (summary.length){
+    m.appendChild(el("div",{class:"export-summary", text: summary.join(", ")}));
+  }
+  if (warnings.length){
+    const list = el("div",{class:"export-warn-list"});
+    warnings.forEach(w=>{
+      const type = (w&&w.type)||"warning";
+      const detail = (w&&w.detail!=null)?String(w.detail):"";
+      const loc = (w&&w.location)?(" — "+w.location):"";
+      list.appendChild(el("div",{class:"export-warn-row"},[
+        el("span",{class:"export-warn-type", text:type}),
+        el("span",{class:"export-warn-detail", text:detail+loc}),
+      ]));
+    });
+    m.appendChild(list);
+  }
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn primary", text:T("action.close","Close"), onclick:closeOverlay}),
+  ]));
+  showOverlay();
 }
 
 /* ============================================================================
@@ -624,18 +719,25 @@ function imgPresetOf(width){
   return "custom";
 }
 function newBlock(type){
+  // Media blocks (figures / tables) carry a stable per-block id assigned once at
+  // creation and never regenerated. It is the basis for the caption-number
+  // bookmark (engine: bm_<id>_num) that paragraph cross-references target, so it
+  // must survive edits and project saves.
   switch(type){
     case "para":  return { type:"para", list:null, runs:[{t:""}] };
-    case "image": return { type:"image", file:"", caption:"", width_cm: IMG_PRESETS.full, size:"full" };
-    case "imagegrid": return { type:"imagegrid", cols:2, caption:"", width_cm: IMG_PRESETS.full,
+    case "image": return { type:"image", id:uid(), file:"", caption:"", width_cm: IMG_PRESETS.full, size:"full" };
+    case "imagegrid": return { type:"imagegrid", id:uid(), cols:2, caption:"", width_cm: IMG_PRESETS.full,
                                sub_captions:false, items:[] };
-    case "table": return { type:"table", caption:"", header_rows:1,
+    case "table": return { type:"table", id:uid(), caption:"", header_rows:1,
                            rows:[["","",""],["","",""]], merges:[], col_w:null };
-    case "datatable": return { type:"datatable", kind:"compliance",
+    case "datatable": return { type:"datatable", id:uid(), kind:"compliance",
         caption: T("datatable.default_caption","Compliance Table"),
         data: blankComplianceData() };
   }
 }
+// Media block types that get a stable id (cross-reference targets).
+const MEDIA_BLOCK_TYPES = ["image","imagegrid","table","datatable"];
+function isMediaBlock(b){ return b && MEDIA_BLOCK_TYPES.indexOf(b.type) >= 0; }
 function blankComplianceData(){
   const cc = App.config.compliance || {};
   const axes = cc.axis_labels || ["MIN","TYP","MAX","NTWC"];
@@ -1164,6 +1266,61 @@ function proseToBlocks(editor){
   return blocks;
 }
 
+/* ---- cross-references ----------------------------------------------------- */
+// A reference run is { ref:<blockId> } (no text/formatting). It targets a
+// captioned figure/table by its stable block id; the engine renders it as a live
+// Word REF field. The editor shows it as an atomic [Figure: caption] chip.
+function refKindLabel(type){
+  return String(type||"").indexOf("image")===0
+    ? T("ref.figure","Figure") : T("ref.table","Table");
+}
+// All captioned, id-bearing media blocks across the project, in document order.
+function collectRefTargets(){
+  const out = [];
+  if (!App.project) return out;
+  walk(App.project.outline, (n)=>{
+    (n.blocks||[]).forEach(b=>{
+      if (isMediaBlock(b) && b.id && (b.caption||"").trim()){
+        out.push({ id:b.id, kind:refKindLabel(b.type), caption:b.caption.trim() });
+      }
+    });
+  });
+  return out;
+}
+// Short display label for a reference chip: "[Figure: caption]" or, if the
+// target is gone, a clearly-marked "[ref: missing]".
+function refChipLabel(refId){
+  const targets = collectRefTargets();
+  for (const t of targets){
+    if (t.id === refId) return "[" + t.kind + ": " + t.caption + "]";
+  }
+  return "[" + T("ref.missing","ref: missing") + "]";
+}
+// Modal: list every captioned figure/table; `onPick(id)` inserts a reference.
+function openRefPicker(onPick){
+  const targets = collectRefTargets();
+  if (!targets.length){
+    toast(T("ref.none","No captioned figures or tables to reference yet"), true);
+    return;
+  }
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("ref.title","Insert reference")}));
+  m.appendChild(el("p",{text:T("ref.msg","Pick a figure or table to reference.")}));
+  const listBox = el("div",{class:"ref-picker-list",
+    style:{maxHeight:"320px",overflowY:"auto",margin:"4px 0 8px"}});
+  targets.forEach(t=>{
+    listBox.appendChild(el("button",{class:"sm-btn",
+      style:{display:"block",width:"100%",textAlign:"left",marginBottom:"6px"},
+      text:t.kind + ": " + t.caption,
+      onclick:()=>{ closeOverlay(); onPick(t.id); }}));
+  });
+  m.appendChild(listBox);
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn", text:T("action.cancel","Cancel"), onclick:closeOverlay}),
+  ]));
+  showOverlay();
+}
+
 function buildProseEditor(host, node, seg){
   const tb = el("div",{class:"mini-toolbar prose-toolbar"});
   const editor = el("div",{class:"rich multi", contenteditable:"true", spellcheck:"false"});
@@ -1203,6 +1360,51 @@ function buildProseEditor(host, node, seg){
         editor.focus(); serialize(); refresh(); }});
     tb.appendChild(sw);
   });
+  tb.appendChild(el("span",{class:"mt-sep"}));
+
+  // Remember the caret inside the editor so a reference can be dropped where the
+  // user was typing -- opening the picker modal moves focus off the editor and
+  // would otherwise collapse the live selection.
+  let savedRange = null;
+  const rememberRange = ()=>{
+    if (!selInEditor()) return;
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount) savedRange = sel.getRangeAt(0).cloneRange();
+  };
+  // Build an atomic, non-editable chip element for a reference run.
+  const makeChip = (refId)=>{
+    const span = el("span",{class:"ref-chip", contenteditable:"false",
+      "data-ref":refId, text:refChipLabel(refId)});
+    return span;
+  };
+  const insertRef = (refId)=>{
+    editor.focus();
+    let range = savedRange;
+    if (!range){
+      // no remembered caret -> append at the end of the last paragraph
+      const last = editor.lastElementChild || editor;
+      range = document.createRange();
+      range.selectNodeContents(last);
+      range.collapse(false);
+    }
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    range.deleteContents();
+    const chip = makeChip(refId);
+    range.insertNode(chip);
+    // place caret right after the chip and add a trailing space for typing
+    const after = document.createTextNode(" ");
+    if (chip.parentNode) chip.parentNode.insertBefore(after, chip.nextSibling);
+    const r2 = document.createRange();
+    r2.setStartAfter(after); r2.collapse(true);
+    sel.removeAllRanges(); sel.addRange(r2);
+    savedRange = r2.cloneRange();
+    serialize();
+  };
+  const refBtn = el("button",{class:"mt-btn", title:T("para.insert_ref","Insert reference"),
+    html:T("para.insert_ref_glyph","Ref"),
+    onmousedown:(e)=>{ e.preventDefault(); rememberRange(); openRefPicker(insertRef); }});
+  tb.appendChild(refBtn);
 
   // top-level <p> containing the caret (for list state + list toggling)
   const currentP = ()=>{
@@ -1234,8 +1436,8 @@ function buildProseEditor(host, node, seg){
   };
 
   editor.addEventListener("input", serialize);
-  editor.addEventListener("keyup", refresh);
-  editor.addEventListener("mouseup", refresh);
+  editor.addEventListener("keyup", ()=>{ refresh(); rememberRange(); });
+  editor.addEventListener("mouseup", ()=>{ refresh(); rememberRange(); });
   editor.addEventListener("focus", ()=>{
     try{ document.execCommand("defaultParagraphSeparator", false, "p"); }catch(_){}
     refresh();
@@ -1265,6 +1467,11 @@ function blockPlainText(b){
 function runsToHtml(runs){
   if (!runs || !runs.length) return "";
   return runs.map(r=>{
+    if (r && r.ref){
+      // atomic, non-editable cross-reference chip
+      return `<span class="ref-chip" contenteditable="false" data-ref="${escapeHtml(r.ref)}">`
+        + escapeHtml(refChipLabel(r.ref)) + `</span>`;
+    }
     let t = escapeHtml(r.t||"");
     if (!t) return "";
     t = t.replace(/\n/g,"<br>");
@@ -1282,7 +1489,8 @@ function htmlToRuns(rich){
     const last = runs[runs.length-1];
     const r = { t:text };
     if (st.b) r.b=true; if (st.i) r.i=true; if (st.color) r.color=st.color;
-    if (last && !!last.b===!!r.b && !!last.i===!!r.i && (last.color||null)===(r.color||null)){
+    // never merge a text run into a reference run (a ref run carries no text)
+    if (last && !last.ref && !!last.b===!!r.b && !!last.i===!!r.i && (last.color||null)===(r.color||null)){
       last.t += text;
     } else runs.push(r);
   };
@@ -1290,6 +1498,11 @@ function htmlToRuns(rich){
     node.childNodes.forEach(ch=>{
       if (ch.nodeType===3){ push(ch.nodeValue.replace(/ /g," "), st); return; }
       if (ch.nodeType!==1) return;
+      // a cross-reference chip is atomic: emit a ref run, never descend into it
+      if (ch.getAttribute && ch.getAttribute("data-ref")){
+        runs.push({ ref: ch.getAttribute("data-ref") });
+        return;
+      }
       const tag = ch.tagName.toLowerCase();
       const ns = { b:st.b, i:st.i, color:st.color };
       if (tag==="b"||tag==="strong") ns.b=true;

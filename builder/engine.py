@@ -201,12 +201,23 @@ def row_exact_height(row, twips):
     trPr.append(h)
 
 
-def add_field(p, instr, placeholder="", bold=None):
+def add_field(p, instr, placeholder="", bold=None, bookmark_id=None, bookmark_name=None):
+    """Emit a complete Word field (begin / instrText / separate / placeholder / end).
+
+    When both ``bookmark_id`` and ``bookmark_name`` are given, the entire field is
+    wrapped in <w:bookmarkStart/> ... <w:bookmarkEnd/> so a REF field can target the
+    number the field renders. ``bookmark_id`` must be a per-document-unique integer
+    and ``bookmark_name`` a per-document-unique name (see CaptionState)."""
     def mk(run_el):
         if bold:
             rpr = OxmlElement("w:rPr")
             rpr.append(OxmlElement("w:b"))
             run_el.append(rpr)
+    if bookmark_id is not None and bookmark_name:
+        bs = OxmlElement("w:bookmarkStart")
+        bs.set(qn("w:id"), str(bookmark_id))
+        bs.set(qn("w:name"), bookmark_name)
+        p._p.append(bs)
     r1 = OxmlElement("w:r"); mk(r1)
     b = OxmlElement("w:fldChar"); b.set(qn("w:fldCharType"), "begin"); r1.append(b)
     r2 = OxmlElement("w:r"); mk(r2)
@@ -219,6 +230,10 @@ def add_field(p, instr, placeholder="", bold=None):
     e = OxmlElement("w:fldChar"); e.set(qn("w:fldCharType"), "end"); r5.append(e)
     for r in (r1, r2, r3, r4, r5):
         p._p.append(r)
+    if bookmark_id is not None and bookmark_name:
+        be = OxmlElement("w:bookmarkEnd")
+        be.set(qn("w:id"), str(bookmark_id))
+        p._p.append(be)
 
 
 def fill(cell, text, ascii=None, eastasia=None, size=None, bold=None, italic=None,
@@ -639,7 +654,29 @@ def _add_formatted_run(p, text, bold=None, italic=None, color=None):
             run_fmt(r, bold=bold, italic=italic, color=color)
 
 
-def _render_para(doc, block, body_name):
+def _render_ref_run(p, ref_id, ref_targets, warn=None):
+    """Emit a cross-reference for a paragraph run that carries a ``ref`` key.
+
+    A reference run points at a captioned block's stable id; the live number is a
+    Word REF field targeting that block's caption-number bookmark
+    (``bm_<block_id>_num``, the scheme step 1 established). The field shows the
+    number live and -- via the ``\\h`` switch -- is a Ctrl+click hyperlink.
+
+    ``ref_targets`` maps a known block id to a short label (e.g. "Figure" /
+    "Table") used only as the un-refreshed placeholder text. A reference whose
+    target is missing (dangling) degrades to a visible red "[ref: ...]" marker
+    plus a ``dangling_ref`` manifest warning -- it never aborts the render."""
+    if not ref_id or ref_id not in ref_targets:
+        r = p.add_run("[ref: %s]" % (ref_id or "?"))
+        run_fmt(r, color="FF0000")
+        if warn:
+            warn({"type": "dangling_ref", "detail": ref_id or "(empty)"})
+        return
+    bname = "bm_%s_num" % ref_id
+    add_field(p, " REF %s \\h " % bname, placeholder=ref_targets[ref_id] or "?")
+
+
+def _render_para(doc, block, body_name, ref_targets=None, warn=None):
     lst = block.get("list")
     if lst == "bullet":
         p = doc.add_paragraph(style="List Bullet")
@@ -647,9 +684,14 @@ def _render_para(doc, block, body_name):
         p = doc.add_paragraph(style="List Number")
     else:
         p = doc.add_paragraph(style=body_name)
+    targets = ref_targets if ref_targets is not None else {}
     for run in block.get("runs", []):
-        _add_formatted_run(p, run.get("t", ""), bold=run.get("b"),
-                           italic=run.get("i"), color=run.get("color"))
+        ref_id = run.get("ref") if isinstance(run, dict) else None
+        if ref_id:
+            _render_ref_run(p, ref_id, targets, warn=warn)
+        else:
+            _add_formatted_run(p, run.get("t", ""), bold=run.get("b"),
+                               italic=run.get("i"), color=run.get("color"))
 
 
 def _image_settings(cfg):
@@ -672,8 +714,11 @@ def _fit_height(pic, max_height_cm):
         pic.width = int(pic.width * ratio)
 
 
-def _place_picture(p, path, fname, width_cm, max_height_cm):
-    """Add one centered picture (or a red placeholder) into paragraph ``p``."""
+def _place_picture(p, path, fname, width_cm, max_height_cm, warn=None):
+    """Add one centered picture (or a red placeholder) into paragraph ``p``.
+
+    ``warn`` (optional callable) receives a warning dict for a missing or
+    unreadable image so callers can collect them into the render manifest."""
     if path and os.path.exists(path):
         try:
             pic = p.add_run().add_picture(path, width=Cm(width_cm))
@@ -683,25 +728,29 @@ def _place_picture(p, path, fname, width_cm, max_height_cm):
             r = p.add_run(f"[image: {fname}]")
             run_fmt(r, color="C00000")
             print("  ! image failed:", ex)
+            if warn:
+                warn({"type": "missing_image",
+                      "detail": "%s (%s)" % (fname or "(no file)", type(ex).__name__)})
             return
     r = p.add_run(f"[image placeholder: {fname}]")
     run_fmt(r, color="C00000")
+    if warn:
+        warn({"type": "missing_image", "detail": fname or "(no file)"})
 
 
-def _render_image(doc, block, project_dir, chap, seq, cfg):
+def _render_image(doc, block, project_dir, chap, seq, cfg, warn=None):
     fname = block.get("file", "")
     width = _as_float(block.get("width_cm", 12.0), 12.0)
     path = os.path.join(project_dir, fname.replace("/", os.sep)) if fname else ""
     pic_p = doc.add_paragraph()
     pic_p.alignment = ALIGN.CENTER
     _place_picture(pic_p, path, fname, width,
-                   _image_settings(cfg).get("max_height_cm", 18.0))
+                   _image_settings(cfg).get("max_height_cm", 18.0), warn=warn)
     caption = block.get("caption", "")
-    prefix = cfg.get("caption_prefix", {}).get("image", "Figure")
-    doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
+    _render_caption_with_seq(doc, caption, cfg, chap, seq, block.get("id"), "image")
 
 
-def _render_image_grid(doc, block, project_dir, chap, seq, cfg):
+def _render_image_grid(doc, block, project_dir, chap, seq, cfg, warn=None):
     """A borderless table laying images out in a grid; the whole group shares one
     figure number. Each cell scales its image to the column width (and the height
     cap), with optional (a)(b)(c) sub-captions below each image."""
@@ -737,7 +786,7 @@ def _render_image_grid(doc, block, project_dir, chap, seq, cfg):
                     fn = it.get("file", "")
                     pth = (os.path.join(project_dir, fn.replace("/", os.sep))
                            if fn else "")
-                    _place_picture(p, pth, fn, cell_w, max_h)
+                    _place_picture(p, pth, fn, cell_w, max_h, warn=warn)
                     if show_sub:
                         sp = cell.add_paragraph()
                         sp.alignment = ALIGN.CENTER
@@ -746,23 +795,209 @@ def _render_image_grid(doc, block, project_dir, chap, seq, cfg):
                 idx += 1
 
     caption = block.get("caption", "")
-    prefix = cfg.get("caption_prefix", {}).get("image", "Figure")
-    doc.add_paragraph(f"{prefix} {chap}-{seq}  {caption}", style="Caption")
+    _render_caption_with_seq(doc, caption, cfg, chap, seq, block.get("id"), "image")
 
 
 def _render_caption(doc, text, cfg):
     doc.add_paragraph(text, style="Caption")
 
 
+# ---------------------------------------------------------------------------
+# Word-native SEQ-field captions + cross-reference bookmarks (Design #1)
+# ---------------------------------------------------------------------------
+#
+# CONTRACT (steps 2-4 rely on this):
+#   * Bookmark naming scheme: each captioned block's number portion is wrapped in
+#     a bookmark named  "bm_" + <block_id> + "_num"  (e.g. bm_img-123-abc_num).
+#     The block_id is the stable per-block "id" assigned by the frontend; when a
+#     block has no id, a render-local fallback name is used (never collides, but
+#     is NOT a stable cross-reference target).
+#   * A cross-reference run is a paragraph run carrying {"ref": <block_id>} (no
+#     "t"/formatting). It renders as a Word REF field with instruction
+#     " REF bm_<block_id>_num \\h " (the \\h switch makes it a Ctrl+click
+#     hyperlink). The placeholder text is the "<chap>-<seq>" the target's caption
+#     would show un-refreshed (see _collect_ref_targets), so it reads identically
+#     until F9. A reference whose target has no caption bookmark is "dangling":
+#     it degrades to a red "[ref: <id>]" marker plus a dangling_ref warning.
+#   * SEQ identifiers: "Figure" for image/imagegrid captions, "Table" for
+#     datatable/table captions -- ASCII, separate counters, reset per Heading 1
+#     via the "\\s 1" switch. These MUST match what a REF/SEQ consumer expects.
+#   * STYLEREF 1 \\s yields the Heading 1 chapter number (multilevel autonumber).
+#
+# The visible numbering (chapter-counter, counter resets each Heading 1) matches
+# the previous literal-text output; the placeholder text written into each field
+# is exactly the chapter/seq the engine already computed, so an un-updated doc
+# reads identically and Word recomputes live numbers on F9.
+
+# SEQ identifier per caption type (ASCII, stable, separate counters).
+_SEQ_NAME = {"image": "Figure", "table": "Table"}
+
+
+class CaptionState:
+    """Per-document allocator for unique bookmark ids + names around captions."""
+
+    def __init__(self):
+        self.bookmark_id_counter = 0
+        self.bookmark_names = set()
+        self._auto = 0
+
+    def next_bookmark(self, block_id):
+        """Return (numeric_id, name) for this block's caption number bookmark.
+
+        ``block_id`` is the stable frontend id. When absent or already used, a
+        render-local fallback keeps bookmark names unique so the render never
+        aborts on a duplicate; such fallbacks are not stable xref targets."""
+        if block_id:
+            name = "bm_%s_num" % block_id
+        else:
+            name = None
+        if not name or name in self.bookmark_names:
+            self._auto += 1
+            name = "bm_auto_%d_num" % self._auto
+            while name in self.bookmark_names:
+                self._auto += 1
+                name = "bm_auto_%d_num" % self._auto
+        self.bookmark_names.add(name)
+        bid = self.bookmark_id_counter
+        self.bookmark_id_counter += 1
+        return bid, name
+
+
+def _caption_state(cfg):
+    cs = cfg.get("_caption_state")
+    if cs is None:
+        cs = CaptionState()
+        cfg["_caption_state"] = cs
+    return cs
+
+
+def _render_caption_with_seq(doc, text, cfg, chap, seq, block_id, caption_type):
+    """Render a Caption-styled paragraph whose number is live Word fields.
+
+    Layout:  <prefix> [STYLEREF 1 \\s]-[SEQ <Figure|Table> \\* ARABIC \\s 1]  <text>
+    The SEQ field (the within-chapter counter) is wrapped in a bookmark so REF
+    fields can target the number. ``chap`` / ``seq`` become the field placeholder
+    text, so an un-refreshed doc shows the same number the engine computed."""
+    cap = doc.add_paragraph(style="Caption")
+    cap_prefixes = cfg.get("caption_prefix", {})
+    prefix = cap_prefixes.get(caption_type,
+                              "Figure" if caption_type == "image" else "Table")
+    seq_name = _SEQ_NAME.get(caption_type, "Figure")
+
+    cstate = _caption_state(cfg)
+    bid, bname = cstate.next_bookmark(block_id)
+
+    r = cap.add_run(prefix + " ")
+    run_fmt(r, bold=True)
+    # chapter number from the Heading 1 multilevel autonumber
+    add_field(cap, " STYLEREF 1 \\s ", placeholder=str(chap), bold=True)
+    r = cap.add_run("-")
+    run_fmt(r, bold=True)
+    # within-chapter counter (bookmarked for cross-references)
+    add_field(cap, " SEQ %s \\* ARABIC \\s 1 " % seq_name, placeholder=str(seq),
+              bold=True, bookmark_id=bid, bookmark_name=bname)
+    r = cap.add_run("  " + (text or ""))
+    run_fmt(r, bold=False)
+    return cap
+
+
+def _render_block_error(doc, ex):
+    """Emit a visible red error line in place of a block that failed to render."""
+    p = doc.add_paragraph(style="Caption")
+    r = p.add_run("[block error: %s: %s]"
+                  % (type(ex).__name__, str(ex)[:120]))
+    run_fmt(r, color="FF0000", bold=True)
+
+
+def _collect_table_result(res, warn, location):
+    """Route a table renderer's result into the warnings manifest.
+
+    The compliance / free-table renderers now return a dict
+    {"table", "total_rows", "flagged_rows", "warnings"} (see tables.py contract).
+    This stays backward-tolerant: a bare Table object (legacy shape) is accepted
+    and simply yields no extra warnings. Each per-cell warning from the renderer
+    (e.g. ``row_clip_risk``) is re-emitted with this block's location appended."""
+    if not isinstance(res, dict):
+        return
+    for w in res.get("warnings", []) or []:
+        entry = dict(w) if isinstance(w, dict) else {"type": "table_warning",
+                                                     "detail": str(w)}
+        inner = entry.get("location")
+        entry["location"] = ("%s / %s" % (location, inner)) if inner else location
+        warn(entry)
+
+
+def _collect_ref_targets(outline):
+    """Pre-scan the outline for cross-reference targets BEFORE rendering.
+
+    Returns a dict mapping each captioned block's stable id -> the "<chap>-<seq>"
+    placeholder string that the block's caption number would show un-refreshed.
+    A paragraph's REF run uses this only as the field placeholder text, so the
+    reference reads identically to the caption until Word recomputes on F9. The
+    mapping mirrors the SAME counting rules _build_outline uses (img and table
+    sequences reset per Heading 1; a table only consumes a number when it has a
+    caption), so forward AND backward references resolve to the right number.
+
+    Only blocks with a non-empty ``id`` AND a non-empty caption become targets --
+    those are exactly the blocks _render_caption_with_seq bookmarks as
+    ``bm_<id>_num``. References to anything else are treated as dangling."""
+    targets = {}
+    state = {"chap": 0, "img": {}, "tbl": {}}
+
+    def walk(node, depth):
+        if depth == 0:
+            state["chap"] += 1
+            state["img"][state["chap"]] = 0
+            state["tbl"][state["chap"]] = 0
+        chap = state["chap"]
+        if node.get("fixed_body"):
+            # fixed bodies carry no captioned media blocks
+            for child in node.get("children", []):
+                walk(child, depth + 1)
+            return
+        for block in node.get("blocks", []):
+            btype = block.get("type")
+            bid = block.get("id")
+            cap = block.get("caption", "")
+            if btype in ("image", "imagegrid"):
+                state["img"][chap] += 1
+                if bid and cap:
+                    targets[bid] = "%d-%d" % (chap, state["img"][chap])
+            elif btype in ("datatable", "table"):
+                if cap:
+                    state["tbl"][chap] += 1
+                    if bid:
+                        targets[bid] = "%d-%d" % (chap, state["tbl"][chap])
+        for child in node.get("children", []):
+            walk(child, depth + 1)
+
+    for node in outline or []:
+        walk(node, 0)
+    return targets
+
+
 def _build_outline(doc, cfg, outline, names):
+    """Render the outline; returns {"warnings": [...], "stats": {...}}.
+
+    Each block renders inside try/except so one malformed block degrades to a
+    visible red error line and a manifest entry instead of aborting the whole
+    export. Caption / figure counters are incremented BEFORE the block body so a
+    failure mid-render leaves the numbering of later blocks unchanged."""
     body_name = names["body_name"]
     fixed_bodies = cfg.get("fixed_bodies", {})
     comp_cfg = cfg["compliance"]
     free_cfg = cfg.get("free_table", {})
-    cap_prefix = cfg.get("caption_prefix", {"image": "Figure", "table": "Table"})
+
+    # Cross-reference targets (block id -> "<chap>-<seq>" placeholder) gathered in
+    # a pre-pass so a paragraph may reference a figure/table that appears later.
+    ref_targets = _collect_ref_targets(outline)
 
     # chapter-sequence counters: keyed by chapter number
-    state = {"chap": 0, "img_seq": {}, "tbl_seq": {}}
+    state = {"chap": 0, "img_seq": {}, "tbl_seq": {},
+             "warnings": [], "total_blocks": 0}
+
+    def warn(entry):
+        state["warnings"].append(entry)
 
     def walk(node, depth):
         level = depth + 1
@@ -776,37 +1011,68 @@ def _build_outline(doc, cfg, outline, names):
         # fixed body wins over blocks
         fb_key = node.get("fixed_body")
         if fb_key and fb_key in fixed_bodies:
-            _render_fixed_body(doc, fixed_bodies[fb_key], names)
+            try:
+                _render_fixed_body(doc, fixed_bodies[fb_key], names)
+            except Exception as ex:
+                _render_block_error(doc, ex)
+                warn({"type": "block_error",
+                      "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
+                      "location": "chapter %d / fixed_body %s" % (chap, fb_key)})
         else:
-            for block in node.get("blocks", []):
+            for idx, block in enumerate(node.get("blocks", [])):
                 btype = block.get("type")
-                if btype == "para":
-                    _render_para(doc, block, body_name)
-                elif btype == "image":
+                state["total_blocks"] += 1
+                # Counters increment BEFORE the body so a failure does not skew
+                # the numbering of subsequent figures/tables.
+                if btype in ("image", "imagegrid"):
                     state["img_seq"][chap] += 1
-                    _render_image(doc, block, cfg["_project_dir"], chap,
-                                  state["img_seq"][chap], cfg)
-                elif btype == "imagegrid":
-                    state["img_seq"][chap] += 1
-                    _render_image_grid(doc, block, cfg["_project_dir"], chap,
-                                       state["img_seq"][chap], cfg)
-                elif btype == "datatable":
-                    cap = block.get("caption", "")
-                    if cap:
-                        state["tbl_seq"][chap] += 1
-                        _render_caption(doc, f'{cap_prefix["table"]} {chap}-'
-                                             f'{state["tbl_seq"][chap]}  {cap}', cfg)
-                    tables.render_datatable(doc, block["data"], comp_cfg)
-                elif btype == "table":
-                    cap = block.get("caption", "")
-                    if cap:
-                        state["tbl_seq"][chap] += 1
-                        _render_caption(doc, f'{cap_prefix["table"]} {chap}-'
-                                             f'{state["tbl_seq"][chap]}  {cap}', cfg)
-                    tables.render_free_table(doc, block.get("rows", []), free_cfg,
-                                             header_rows=block.get("header_rows", 1),
-                                             merges=block.get("merges"),
-                                             col_w=block.get("col_w"))
+                seq = state["img_seq"][chap]
+                cap = block.get("caption", "")
+                if btype in ("datatable", "table") and cap:
+                    state["tbl_seq"][chap] += 1
+                tbl_seq = state["tbl_seq"][chap]
+                try:
+                    if btype == "para":
+                        _render_para(doc, block, body_name,
+                                     ref_targets=ref_targets, warn=warn)
+                    elif btype == "image":
+                        _render_image(doc, block, cfg["_project_dir"], chap,
+                                      seq, cfg, warn=warn)
+                    elif btype == "imagegrid":
+                        _render_image_grid(doc, block, cfg["_project_dir"], chap,
+                                           seq, cfg, warn=warn)
+                    elif btype == "datatable":
+                        if cap:
+                            _render_caption_with_seq(doc, cap, cfg, chap, tbl_seq,
+                                                     block.get("id"), "table")
+                        else:
+                            warn({"type": "no_caption",
+                                  "detail": "datatable",
+                                  "location": "chapter %d / block %d" % (chap, idx)})
+                        res = tables.render_datatable(doc, block["data"], comp_cfg)
+                        _collect_table_result(
+                            res, warn, "chapter %d / datatable / block %d" % (chap, idx))
+                    elif btype == "table":
+                        if cap:
+                            _render_caption_with_seq(doc, cap, cfg, chap, tbl_seq,
+                                                     block.get("id"), "table")
+                        else:
+                            warn({"type": "no_caption",
+                                  "detail": "table",
+                                  "location": "chapter %d / block %d" % (chap, idx)})
+                        res = tables.render_free_table(
+                            doc, block.get("rows", []), free_cfg,
+                            header_rows=block.get("header_rows", 1),
+                            merges=block.get("merges"),
+                            col_w=block.get("col_w"))
+                        _collect_table_result(
+                            res, warn, "chapter %d / table / block %d" % (chap, idx))
+                except Exception as ex:
+                    _render_block_error(doc, ex)
+                    warn({"type": "block_error",
+                          "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
+                          "location": "chapter %d / %s / block %d"
+                                      % (chap, btype, idx)})
 
         for child in node.get("children", []):
             walk(child, depth + 1)
@@ -814,17 +1080,57 @@ def _build_outline(doc, cfg, outline, names):
     for node in outline:
         walk(node, 0)
 
+    warnings = state["warnings"]
+    stats = {
+        "total_blocks": state["total_blocks"],
+        "blocks_with_errors": sum(1 for w in warnings if w["type"] == "block_error"),
+        "blocks_without_captions": sum(1 for w in warnings if w["type"] == "no_caption"),
+        "missing_images": sum(1 for w in warnings if w["type"] == "missing_image"),
+        "row_clip_risks": sum(1 for w in warnings if w["type"] == "row_clip_risk"),
+        "dangling_refs": sum(1 for w in warnings if w["type"] == "dangling_ref"),
+    }
+    return {"warnings": warnings, "stats": stats}
+
 
 # ===========================================================================
 # Top-level render
 # ===========================================================================
 def render_report(project, cfg, project_dir, out_path):
+    """Render the project to ``out_path`` and return a result manifest.
+
+    RETURN SHAPE (CONTRACT, steps 2-4 depend on it):
+        {
+          "out_path": <str>,          # the saved .docx path
+          "warnings": [ {type, detail, location?}, ... ],
+          "stats":    {total_blocks, blocks_with_errors,
+                       blocks_without_captions, missing_images, ...},
+        }
+    Warning ``type`` values currently emitted: "missing_image", "missing_logo",
+    "no_caption", "block_error", "row_clip_risk", "dangling_ref". The shape is
+    additive -- later steps may add new types/keys -- so callers must tolerate
+    unknown entries. A "dangling_ref" warning means a paragraph cross-reference
+    pointed at a block id that has no caption bookmark (target deleted / never
+    captioned); the reference renders as a visible red "[ref: ...]" marker.
+    Callers needing only the path can read result["out_path"]; ``_result_out_path``
+    normalizes both the new dict shape and any legacy plain-string return.
+
+    ``row_clip_risk`` warnings come from the compliance / free-table renderers:
+    the table keeps EXACTLY row heights (no spill, no orientation change), so an
+    over-long cell is clipped by Word rather than wrapping; this warning surfaces
+    that risk WITHOUT changing the row height (iron rule 2)."""
     if project.get("schema_version") != 1:
         raise ValueError(f"unsupported schema_version: {project.get('schema_version')}")
 
     cfg["_project_dir"] = project_dir
+    # reset any per-render caption bookmark allocator carried on a reused cfg
+    cfg.pop("_caption_state", None)
     meta = project.get("meta", {})
     styles = cfg["styles"]
+
+    warnings = []
+    logo_path = cfg.get("_logo_path")
+    if not logo_path or not os.path.exists(logo_path):
+        warnings.append({"type": "missing_logo", "detail": logo_path or "(no logo configured)"})
 
     doc = Document()
     names = _apply_page_and_styles(doc, styles)
@@ -833,11 +1139,25 @@ def render_report(project, cfg, project_dir, out_path):
     _build_footer(doc, styles)
     _build_cover(doc, cfg, meta)
     _build_toc(doc, cfg)
-    _build_outline(doc, cfg, project.get("outline", []), names)
+    outline_result = _build_outline(doc, cfg, project.get("outline", []), names)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     doc.save(out_path)
-    return out_path
+
+    warnings.extend(outline_result.get("warnings", []))
+    stats = dict(outline_result.get("stats", {}))
+    stats["missing_logos"] = sum(1 for w in warnings if w["type"] == "missing_logo")
+    return {"out_path": out_path, "warnings": warnings, "stats": stats}
+
+
+def _result_out_path(result):
+    """Normalize render_report's result to the output path string.
+
+    Accepts the rich dict {"out_path": ...} (current) or a bare string (legacy),
+    so callers stay backward-tolerant across the return-shape change."""
+    if isinstance(result, dict):
+        return result.get("out_path")
+    return result
 
 
 # ===========================================================================
@@ -895,8 +1215,16 @@ def main(argv=None):
     out_dir = os.path.abspath(args.out) if args.out else os.path.join(project_dir, "out")
     out_path = os.path.join(out_dir, f"{name}.docx")
 
-    render_report(project, cfg, project_dir, out_path)
-    print("OK ->", out_path)
+    result = render_report(project, cfg, project_dir, out_path)
+    out = _result_out_path(result) or out_path
+    print("OK ->", out)
+    if isinstance(result, dict):
+        warnings = result.get("warnings", [])
+        if warnings:
+            print("warnings: %d" % len(warnings))
+            for w in warnings:
+                loc = (" @ %s" % w["location"]) if w.get("location") else ""
+                print("  - %s: %s%s" % (w.get("type"), w.get("detail"), loc))
     return 0
 
 
