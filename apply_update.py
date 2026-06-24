@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Apply / roll back report update bundles -- safely, with one command.
+
+A small standard-library CLI for moving structured-document updates between
+machines without losing local edits. It operates on a "reports root" (the folder
+that holds the per-report ``<name>/project.json`` directories plus a
+``templates/`` library). By default the reports root is ``./local`` next to this
+script; override with ``--root`` or the ``BUILDER_REPORTS_ROOT`` env var.
+
+Usage (run with the project's venv python, from the repo root):
+
+  python apply_update.py [bundle.zip] [--root DIR] [--dry-run] [--yes]
+      Apply an update bundle. With NO path, picks the newest *.zip in
+      ``<root>/_updates/`` (drop a bundle there and run with no path). Every file
+      it would overwrite is copied to ``<root>/_backups/<timestamp>/`` first, so
+      an apply is always reversible.
+
+  python apply_update.py --snapshot [--root DIR]
+      Package the current ``project.json`` files into
+      ``<root>/_outbox/to_send_<ts>.zip`` (images are NOT included -- they stay on
+      disk, referenced by path) to hand back for the next round-trip.
+
+  python apply_update.py --rollback [--root DIR] [--yes]
+      Restore the most recent backup (undo the last apply).
+
+  python apply_update.py --list [--root DIR]
+      Show available backups and the managed file set.
+
+Bundle formats (auto-detected):
+  * plain zip -- every member is written under the reports root (full replace).
+  * smart zip -- contains an ``update.json`` manifest:
+        {"projects": {"<dir>": {"mode": "replace"}|{"mode":"patch","ops":[...]}},
+         "files": ["templates/.../config.json", ...], "note": "..."}
+    'patch' mode merges ops into the LOCAL ``project.json`` by section id, leaving
+    every other section (prose + image references) untouched -- so a single
+    section can be updated without a full round-trip and without losing edits.
+
+Safety: never deletes an ``images/`` folder; only touches files it is told to;
+backs up before writing; warns if a target changed locally since the last apply.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import shutil
+import sys
+import zipfile
+
+SELF = os.path.dirname(os.path.abspath(__file__))
+RESERVED = {"_backups", "_updates", "_outbox", "__pycache__"}
+
+
+# ---------------------------------------------------------------------------
+# Reports-root resolution + path helpers.
+# ---------------------------------------------------------------------------
+
+
+def resolve_root(arg):
+    if arg:
+        return os.path.abspath(arg)
+    env = os.environ.get("BUILDER_REPORTS_ROOT")
+    if env:
+        return os.path.abspath(env)
+    cand = os.path.join(SELF, "local")
+    return cand if os.path.isdir(cand) else SELF
+
+
+def _backups(root):
+    return os.path.join(root, "_backups")
+
+
+def _updates(root):
+    return os.path.join(root, "_updates")
+
+
+def _outbox(root):
+    return os.path.join(root, "_outbox")
+
+
+def _state_path(root):
+    return os.path.join(root, ".update_state.json")
+
+
+def _ts():
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _atomic_write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+def _safe_rel(name):
+    """Return a root-relative path for a zip member, or None if unsafe."""
+    n = name.replace("\\", "/").strip()
+    if not n or n.endswith("/"):
+        return None
+    if os.path.isabs(n) or ".." in n.split("/") or ":" in n:
+        return None
+    parts = n.split("/")
+    if parts[0] in RESERVED:
+        return None
+    return os.path.normpath(os.path.join(*parts))
+
+
+def _load_state(root):
+    try:
+        with open(_state_path(root), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_state(root, st):
+    _atomic_write(_state_path(root),
+                  json.dumps(st, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# project.json section patching (by node id, title fallback).
+# ---------------------------------------------------------------------------
+
+
+def _find_node(nodes, node_id=None, title=None):
+    for n in nodes:
+        if node_id and n.get("id") == node_id:
+            return n
+        if title and not node_id and n.get("title") == title:
+            return n
+        hit = _find_node(n.get("children", []), node_id, title)
+        if hit:
+            return hit
+    return None
+
+
+def _apply_ops(project, ops):
+    log = []
+    for op in ops or []:
+        kind = op.get("op")
+        node = _find_node(project.get("outline", []),
+                          op.get("node_id"), op.get("title"))
+        if node is None:
+            log.append("  ! op %s: node not found (%s/%s) -- skipped"
+                       % (kind, op.get("node_id"), op.get("title")))
+            continue
+        if kind == "set_blocks":
+            node["blocks"] = op.get("blocks", [])
+            log.append("  ~ set blocks of '%s'" % node.get("title", ""))
+        elif kind == "set_title":
+            node["title"] = op.get("value", node.get("title"))
+            log.append("  ~ set title -> '%s'" % node["title"])
+        else:
+            log.append("  ! unknown op '%s' -- skipped" % kind)
+    return log
+
+
+# ---------------------------------------------------------------------------
+# Apply.
+# ---------------------------------------------------------------------------
+
+
+def _pick_bundle(root, arg):
+    if arg:
+        return os.path.abspath(arg)
+    up = _updates(root)
+    if os.path.isdir(up):
+        zips = [os.path.join(up, f) for f in os.listdir(up)
+                if f.lower().endswith(".zip")]
+        if zips:
+            return max(zips, key=os.path.getmtime)
+    return None
+
+
+def cmd_apply(root, arg, dry, yes):
+    bundle = _pick_bundle(root, arg)
+    if not bundle or not os.path.isfile(bundle):
+        print("error: no bundle. Pass a path, or drop a .zip in %s" % _updates(root))
+        return 2
+    print("root:   %s" % root)
+    print("bundle: %s" % bundle)
+    zf = zipfile.ZipFile(bundle)
+    names = zf.namelist()
+    manifest = None
+    if "update.json" in names:
+        manifest = json.loads(zf.read("update.json").decode("utf-8"))
+        if manifest.get("note"):
+            print("note:   %s" % manifest["note"])
+
+    state = _load_state(root)
+    actions = []   # (kind, rel, payload)
+
+    if manifest:
+        for rel in manifest.get("files", []):
+            r = _safe_rel(rel)
+            if r and rel in names:
+                actions.append(("replace", r, zf.read(rel)))
+        for pdir, spec in (manifest.get("projects") or {}).items():
+            r = _safe_rel(pdir + "/project.json")
+            if not r:
+                continue
+            if spec.get("mode") == "patch":
+                actions.append(("patch", r, spec.get("ops", [])))
+            else:
+                member = pdir + "/project.json"
+                if member in names:
+                    actions.append(("replace", r, zf.read(member)))
+    else:
+        for name in names:
+            if name == "update.json":
+                continue
+            r = _safe_rel(name)
+            if r:
+                actions.append(("replace", r, zf.read(name)))
+
+    if not actions:
+        print("nothing to apply (empty / unrecognized bundle).")
+        return 1
+
+    ts = _ts()
+    plan = []
+    for kind, rel, payload in actions:
+        tgt = os.path.join(root, rel)
+        exists = os.path.isfile(tgt)
+        warn = ""
+        if kind == "replace" and exists:
+            cur = _sha(_read(tgt))
+            if state.get(rel) and state[rel] != cur and _sha(payload) != cur:
+                warn = "  <-- changed locally since last apply (will be backed up)"
+        verb = {"replace": "replace" if exists else "create", "patch": "patch"}[kind]
+        plan.append((kind, rel, tgt, payload, exists, warn))
+        print("  %-8s %s%s" % (verb, rel, warn))
+
+    if dry:
+        print("\n[dry-run] nothing written. Backups would go to _backups/%s/" % ts)
+        return 0
+    if not yes:
+        ans = input("\nApply these %d change(s)? [y/N] " % len(plan)).strip().lower()
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+
+    bdir = os.path.join(_backups(root), ts)
+    for kind, rel, tgt, payload, exists, warn in plan:
+        if exists:
+            dst = os.path.join(bdir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(tgt, dst)
+        if kind == "replace":
+            _atomic_write(tgt, payload)
+            state[rel] = _sha(payload)
+        elif kind == "patch":
+            base = _read(tgt) if exists else b"{}"
+            proj = json.loads(base.decode("utf-8"))
+            for line in _apply_ops(proj, payload):
+                print(line)
+            out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
+            _atomic_write(tgt, out)
+            state[rel] = _sha(out)
+    _save_state(root, state)
+    print("\nOK. Backed up to: %s" % bdir)
+    print("Now in the GUI: make sure the report isn't open-with-unsaved-edits,")
+    print("then hard-refresh (Ctrl+Shift+R) and reopen it.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Snapshot / rollback / list.
+# ---------------------------------------------------------------------------
+
+
+def cmd_snapshot(root):
+    proj_dirs = []
+    for name in sorted(os.listdir(root)):
+        if name in RESERVED or name == "templates":
+            continue
+        if os.path.isfile(os.path.join(root, name, "project.json")):
+            proj_dirs.append(name)
+    if not proj_dirs:
+        print("no project.json found under %s" % root)
+        return 1
+    os.makedirs(_outbox(root), exist_ok=True)
+    out = os.path.join(_outbox(root), "to_send_%s.zip" % _ts())
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for d in proj_dirs:
+            z.write(os.path.join(root, d, "project.json"), d + "/project.json")
+    print("packaged %d project.json (images excluded):" % len(proj_dirs))
+    for d in proj_dirs:
+        print("  -", d)
+    print("-> %s" % out)
+    return 0
+
+
+def _latest_backup(root):
+    b = _backups(root)
+    if not os.path.isdir(b):
+        return None
+    subs = [os.path.join(b, d) for d in os.listdir(b)
+            if os.path.isdir(os.path.join(b, d))]
+    return max(subs, key=os.path.getmtime) if subs else None
+
+
+def cmd_rollback(root, yes):
+    bdir = _latest_backup(root)
+    if not bdir:
+        print("no backups to roll back to.")
+        return 1
+    files = []
+    for dp, _dn, fn in os.walk(bdir):
+        for f in fn:
+            full = os.path.join(dp, f)
+            files.append((full, os.path.relpath(full, bdir)))
+    print("restore from: %s" % bdir)
+    for _full, rel in files:
+        print("  restore", rel)
+    if not yes:
+        ans = input("\nRestore these %d file(s)? [y/N] " % len(files)).strip().lower()
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    pre = os.path.join(_backups(root), _ts() + "-pre-rollback")
+    for full, rel in files:
+        tgt = os.path.join(root, rel)
+        if os.path.isfile(tgt):
+            dst = os.path.join(pre, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(tgt, dst)
+        _atomic_write(tgt, _read(full))
+    print("\nOK. Restored. (Current state saved to %s first.)" % pre)
+    return 0
+
+
+def cmd_list(root):
+    print("root: %s" % root)
+    b = _backups(root)
+    if os.path.isdir(b):
+        subs = sorted(os.listdir(b))
+        print("backups (%d):" % len(subs))
+        for s in subs[-10:]:
+            print("  ", s)
+    else:
+        print("backups: none")
+    st = _load_state(root)
+    if st:
+        print("last-applied files (%d):" % len(st))
+        for k in sorted(st):
+            print("  ", k)
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Apply report update bundles.")
+    ap.add_argument("bundle", nargs="?", help="bundle .zip (default: newest in <root>/_updates/)")
+    ap.add_argument("--root", help="reports root (default: ./local next to this script)")
+    ap.add_argument("--dry-run", action="store_true", help="preview, write nothing")
+    ap.add_argument("--yes", action="store_true", help="skip confirmation")
+    ap.add_argument("--snapshot", action="store_true", help="package current project.json to hand back")
+    ap.add_argument("--rollback", action="store_true", help="restore the most recent backup")
+    ap.add_argument("--list", action="store_true", help="list backups / applied files")
+    a = ap.parse_args(argv)
+    root = resolve_root(a.root)
+    if a.snapshot:
+        return cmd_snapshot(root)
+    if a.rollback:
+        return cmd_rollback(root, a.yes)
+    if a.list:
+        return cmd_list(root)
+    return cmd_apply(root, a.bundle, a.dry_run, a.yes)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
