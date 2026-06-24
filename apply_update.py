@@ -185,24 +185,15 @@ def _pick_bundle(root, arg):
     return None
 
 
-def cmd_apply(root, arg, dry, yes):
-    bundle = _pick_bundle(root, arg)
-    if not bundle or not os.path.isfile(bundle):
-        print("error: no bundle. Pass a path, or drop a .zip in %s" % _updates(root))
-        return 2
-    print("root:   %s" % root)
-    print("bundle: %s" % bundle)
-    zf = zipfile.ZipFile(bundle)
+def read_bundle(root, bundle_path):
+    """Return (manifest_or_None, actions). Each action is (kind, rel, payload):
+    kind in {replace, patch}; payload is bytes for replace, an ops list for patch."""
+    zf = zipfile.ZipFile(bundle_path)
     names = zf.namelist()
     manifest = None
     if "update.json" in names:
         manifest = json.loads(zf.read("update.json").decode("utf-8"))
-        if manifest.get("note"):
-            print("note:   %s" % manifest["note"])
-
-    state = _load_state(root)
-    actions = []   # (kind, rel, payload)
-
+    actions = []
     if manifest:
         for rel in manifest.get("files", []):
             r = _safe_rel(rel)
@@ -225,52 +216,99 @@ def cmd_apply(root, arg, dry, yes):
             r = _safe_rel(name)
             if r:
                 actions.append(("replace", r, zf.read(name)))
+    return manifest, actions
 
-    if not actions:
-        print("nothing to apply (empty / unrecognized bundle).")
-        return 1
 
-    ts = _ts()
+def plan_actions(root, actions):
+    """Annotate each action with target/exists/verb/warn. Returns (plan, state)."""
+    state = _load_state(root)
     plan = []
     for kind, rel, payload in actions:
         tgt = os.path.join(root, rel)
         exists = os.path.isfile(tgt)
-        warn = ""
+        warn = False
         if kind == "replace" and exists:
             cur = _sha(_read(tgt))
             if state.get(rel) and state[rel] != cur and _sha(payload) != cur:
-                warn = "  <-- changed locally since last apply (will be backed up)"
+                warn = True
         verb = {"replace": "replace" if exists else "create", "patch": "patch"}[kind]
-        plan.append((kind, rel, tgt, payload, exists, warn))
-        print("  %-8s %s%s" % (verb, rel, warn))
+        plan.append({"kind": kind, "rel": rel, "tgt": tgt, "payload": payload,
+                     "exists": exists, "verb": verb, "warn": warn})
+    return plan, state
 
+
+def run_plan(root, plan, state, on_log=None):
+    """Back up + write every planned action. Returns (backup_dir, log_lines)."""
+    bdir = os.path.join(_backups(root), _ts())
+    logs = []
+    for it in plan:
+        if it["exists"]:
+            dst = os.path.join(bdir, it["rel"])
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(it["tgt"], dst)
+        if it["kind"] == "replace":
+            _atomic_write(it["tgt"], it["payload"])
+            state[it["rel"]] = _sha(it["payload"])
+        else:
+            base = _read(it["tgt"]) if it["exists"] else b"{}"
+            proj = json.loads(base.decode("utf-8"))
+            for line in _apply_ops(proj, it["payload"]):
+                logs.append(line)
+                if on_log:
+                    on_log(line)
+            out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
+            _atomic_write(it["tgt"], out)
+            state[it["rel"]] = _sha(out)
+    _save_state(root, state)
+    return bdir, logs
+
+
+def apply_bundle(root, bundle_path, dry=False, on_log=None):
+    """Programmatic entry (used by the GUI server). Returns a JSON-able summary."""
+    manifest, actions = read_bundle(root, bundle_path)
+    plan, state = plan_actions(root, actions)
+    summary = {
+        "note": (manifest or {}).get("note", ""),
+        "actions": [{"verb": p["verb"], "rel": p["rel"].replace("\\", "/"),
+                     "warn": p["warn"]} for p in plan],
+        "backup": "", "logs": [],
+    }
+    if not plan or dry:
+        return summary
+    bdir, logs = run_plan(root, plan, state, on_log)
+    summary["backup"] = bdir
+    summary["logs"] = logs
+    return summary
+
+
+def cmd_apply(root, arg, dry, yes):
+    bundle = _pick_bundle(root, arg)
+    if not bundle or not os.path.isfile(bundle):
+        print("error: no bundle. Pass a path, or drop a .zip in %s" % _updates(root))
+        return 2
+    print("root:   %s" % root)
+    print("bundle: %s" % bundle)
+    manifest, actions = read_bundle(root, bundle)
+    if manifest and manifest.get("note"):
+        print("note:   %s" % manifest["note"])
+    plan, state = plan_actions(root, actions)
+    if not plan:
+        print("nothing to apply (empty / unrecognized bundle).")
+        return 1
+    for p in plan:
+        tail = "  <-- changed locally since last apply (will be backed up)" if p["warn"] else ""
+        print("  %-8s %s%s" % (p["verb"], p["rel"], tail))
     if dry:
-        print("\n[dry-run] nothing written. Backups would go to _backups/%s/" % ts)
+        print("\n[dry-run] nothing written.")
         return 0
     if not yes:
         ans = input("\nApply these %d change(s)? [y/N] " % len(plan)).strip().lower()
         if ans not in ("y", "yes"):
             print("aborted.")
             return 1
-
-    bdir = os.path.join(_backups(root), ts)
-    for kind, rel, tgt, payload, exists, warn in plan:
-        if exists:
-            dst = os.path.join(bdir, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(tgt, dst)
-        if kind == "replace":
-            _atomic_write(tgt, payload)
-            state[rel] = _sha(payload)
-        elif kind == "patch":
-            base = _read(tgt) if exists else b"{}"
-            proj = json.loads(base.decode("utf-8"))
-            for line in _apply_ops(proj, payload):
-                print(line)
-            out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
-            _atomic_write(tgt, out)
-            state[rel] = _sha(out)
-    _save_state(root, state)
+    bdir, logs = run_plan(root, plan, state)
+    for line in logs:
+        print(line)
     print("\nOK. Backed up to: %s" % bdir)
     print("Now in the GUI: make sure the report isn't open-with-unsaved-edits,")
     print("then hard-refresh (Ctrl+Shift+R) and reopen it.")

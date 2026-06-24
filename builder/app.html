@@ -2808,6 +2808,8 @@ function renderProjectsSection(){
       onclick:newFromTemplate}),
     el("button",{class:"tb-btn", text:T("home.import_word","Import Word"),
       onclick:importWord}),
+    el("button",{class:"tb-btn", text:T("home.apply_update","Apply update"),
+      onclick:applyUpdate}),
   ]));
   if (!App.projects.length){
     sec.appendChild(el("div",{class:"empty", text:T("home.projects_empty",
@@ -3322,6 +3324,26 @@ async function importMaster(){
         toast(T("toast.import_failed","Import failed: ")+e.message, true);
       }
   });
+}
+
+/* ---- flow: apply an update bundle (.zip from Claude) ---------------------- */
+async function applyUpdate(){
+  const file = await pickFile(".zip"); if (!file) return;
+  const b64 = await fileToB64(file);
+  setStatus("saving", T("status.applying","Applying update..."));
+  try{
+    const r = await api("POST","/api/apply-update",{json:{name:file.name, zip_b64:b64}});
+    const acts = r.actions || [];
+    const warned = acts.filter(a=>a.warn).length;
+    let msg = T("toast.update_applied","Update applied: ")+acts.length+T("toast.update_files"," file(s)");
+    if (warned) msg += " ("+warned+T("toast.update_warned"," had local edits - backed up)");
+    toast(msg);
+    await refreshHome();
+    setStatus("", T("status.no_project","No project open"));
+  }catch(e){
+    setStatus("err", T("status.apply_failed","apply failed"));
+    toast(T("toast.apply_failed","Apply failed: ")+e.message, true);
+  }
 }
 
 /* ---- flow: delete template ------------------------------------------------ */

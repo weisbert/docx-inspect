@@ -771,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_import_docx()
             if path == "/api/new-from-template":
                 return self._api_new_from_template()
+            if path == "/api/apply-update":
+                return self._api_apply_update()
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -1151,6 +1153,45 @@ class Handler(BaseHTTPRequestHandler):
         )
         return self._send_json({"ok": True, "project": project})
 
+    def _api_apply_update(self):
+        """Apply an uploaded update bundle (.zip) to the reports root.
+
+        Body: {"name": <filename>, "zip_b64": <base64 zip>}. The zip is stored
+        under reports_root/_updates/ and applied via the shared apply_update
+        module (full backup of every overwritten file first). Returns the
+        apply summary {note, actions:[{verb,rel,warn}], backup, logs}.
+        """
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        payload = self._read_json()
+        b64 = payload.get("zip_b64") or ""
+        if not b64:
+            return self._send_error_json("missing 'zip_b64'")
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            return self._send_error_json("invalid base64 zip")
+        base = payload.get("name") or "update"
+        if base.lower().endswith(".zip"):
+            base = base[:-4]
+        name = (_sanitize_name(base) or "update") + ".zip"
+        updates_dir = os.path.join(CFG.reports_root, "_updates")
+        os.makedirs(updates_dir, exist_ok=True)
+        dest = os.path.join(updates_dir, name)
+        atomic_write(dest, raw)
+        apply_update = _import_apply_update()
+        summary = apply_update.apply_bundle(CFG.reports_root, dest, dry=False)
+        return self._send_json({"ok": True, **summary})
+
+
+def _import_apply_update():
+    """Import the repo-root apply_update module (shared with the CLI)."""
+    repo_root = os.path.abspath(os.path.join(HERE, ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    import apply_update  # noqa: E402  (repo-root sibling of builder/)
+    return apply_update
+
 
 def _rmtree_quiet(path):
     import shutil
@@ -1209,12 +1250,22 @@ def default_config_path():
     return matches[0] if matches else None
 
 
+def default_reports_root():
+    """Default reports_root: a sibling ``local/`` folder if it exists, else None.
+
+    Lets ``python builder/server.py`` (or a start script) Just Work without
+    ``--root`` in the common layout where reports live under ``<repo>/local``.
+    """
+    cand = os.path.abspath(os.path.join(HERE, "..", "local"))
+    return cand if os.path.isdir(cand) else None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Structured document builder server")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--root",
-        default=os.environ.get("BUILDER_REPORTS_ROOT"),
+        default=os.environ.get("BUILDER_REPORTS_ROOT") or default_reports_root(),
         help="reports_root: project folders must stay under this path",
     )
     parser.add_argument(
@@ -1223,6 +1274,10 @@ def main(argv=None):
         help="path to the template config JSON",
     )
     parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument(
+        "--open", dest="open_browser", action="store_true",
+        help="open the app in the default browser once the server is up",
+    )
     args = parser.parse_args(argv)
 
     CFG.reports_root = os.path.abspath(args.root) if args.root else None
@@ -1241,6 +1296,11 @@ def main(argv=None):
         "Document builder server on http://%s:%d (root=%s, config=%s)\n"
         % (args.bind, args.port, CFG.reports_root, CFG.template_config_path)
     )
+    if args.open_browser:
+        import webbrowser
+        import threading
+        url = "http://127.0.0.1:%d/app.html" % args.port
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
