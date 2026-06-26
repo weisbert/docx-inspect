@@ -316,6 +316,22 @@
   .home-row-main{flex:1 1 auto;min-width:0;overflow:hidden}
   .home-row-main .sub{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .home-actions{margin-left:auto;display:flex;gap:6px;flex-shrink:0}
+  /* sim checklist (per-project, stored in project.json -> sim_checklist) */
+  .ckl{padding:14px 18px;max-width:1120px}
+  .ckl-head{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+  .ckl-title{font-weight:600;font-size:15px}
+  .ckl-prog{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+  .ckl-table{border-collapse:collapse;width:100%;font-size:12px}
+  .ckl-table th,.ckl-table td{border:1px solid var(--border,#ddd);padding:4px 7px;text-align:left;vertical-align:top}
+  .ckl-table th{background:var(--panel,#f4f4f4);font-weight:600;white-space:nowrap}
+  .ckl-id{font-weight:600;white-space:nowrap}
+  .ckl-wrap{max-width:280px}
+  .ckl-table tr.s-done{opacity:.6}
+  .ckl-chip{border:none;border-radius:10px;padding:2px 11px;font-size:11px;font-weight:600;cursor:pointer;color:#fff;white-space:nowrap}
+  .ckl-chip.s-todo{background:#9aa0a6}
+  .ckl-chip.s-doing{background:#e8a13a}
+  .ckl-chip.s-done{background:#3fae5a}
+  .ckl-note{width:150px;border:1px solid var(--border,#ddd);border-radius:4px;padding:2px 5px;font-size:11px;background:transparent;color:inherit}
 </style>
 </head>
 <body>
@@ -330,6 +346,8 @@
     <span class="tb-sep"></span>
     <button class="tb-btn" id="btn-docx" data-ui="toolbar.export_docx">Export Word</button>
     <button class="tb-btn" id="btn-pdf"  data-ui="toolbar.export_pdf">Export PDF</button>
+    <span class="tb-sep"></span>
+    <button class="tb-btn" id="btn-checklist" data-ui="toolbar.checklist">Checklist</button>
     <div id="status">
       <span class="dot" id="status-dot"></span>
       <span id="status-text">—</span>
@@ -2722,22 +2740,28 @@ function render(){
   syncChrome();
   if (App.view === "home"){ renderHome(); return; }
   if (App.view === "template"){ renderTemplate(); return; }
+  if (App.view === "checklist"){ renderChecklist(); return; }
   renderAll();
 }
 
 function syncChrome(){
-  const inEditor   = App.view === "editor";
-  const inTemplate = App.view === "template";
-  // export buttons are project-only; Save works in both editors (project save vs template save)
+  const inEditor    = App.view === "editor";
+  const inTemplate  = App.view === "template";
+  const inChecklist = App.view === "checklist";
+  // export buttons are project-only; Save works in all three editors (project/template/checklist)
   ["#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !inEditor; });
-  $("#btn-save").disabled = !(inEditor || inTemplate);
+  $("#btn-save").disabled = !(inEditor || inTemplate || inChecklist);
   $("#btn-open").disabled = inTemplate;
   $("#btn-new").disabled  = inTemplate;
-  // left pane hosts the project outline OR the skeleton tree
+  // left pane hosts the project outline OR the skeleton tree (checklist is full-width)
   $("#outline").classList.toggle("hidden", !(inEditor || inTemplate));
   $("#btn-home").classList.toggle("hidden", App.view === "home");
+  // the checklist entry button is project-only (a project must be open)
+  const bc = $("#btn-checklist");
+  if (bc) bc.classList.toggle("hidden", !(inEditor || inChecklist));
   if (App.view === "home") setStatus("", T("status.no_project","No project open"));
   if (inTemplate) setStatus("", T("status.template_mode","Editing template"));
+  if (inChecklist) setStatus("", T("status.checklist_mode","Simulation checklist"));
 }
 
 async function goHome(){
@@ -2770,6 +2794,90 @@ function renderHome(){
   const root = el("div",{class:"home"});
   root.appendChild(renderTemplatesSection());
   root.appendChild(renderProjectsSection());
+  host.appendChild(root);
+}
+
+/* ============================================================================
+   SIM CHECKLIST VIEW
+   Per-project tracker stored in project.json -> sim_checklist {version, runs[]}.
+   Each run advances todo -> doing -> done by clicking its status chip. Edits go
+   straight into App.project and ride the existing autosave / snapshot / bundle
+   path -- no extra server endpoint, no extra bundle file.
+============================================================================ */
+const CKL_STATES = ["todo","doing","done"];
+function cklStateLabel(s){
+  return T("checklist.status."+s,
+           s==="doing" ? "Doing" : s==="done" ? "Done" : "To-do");
+}
+function getChecklist(){ return (App.project && App.project.sim_checklist) || null; }
+function enterChecklist(){
+  if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
+  App.view = "checklist";
+  render();
+}
+function cklCycle(run){
+  const i = CKL_STATES.indexOf(run.status);
+  run.status = CKL_STATES[(i + 1) % CKL_STATES.length] || "todo";
+  markDirty();
+  renderChecklist();   // refresh chip color + progress line
+}
+function renderChecklist(){
+  const host = $("#editor-inner"); host.innerHTML = "";
+  const ckl = getChecklist();
+  const runs = (ckl && Array.isArray(ckl.runs)) ? ckl.runs : [];
+  const root = el("div",{class:"ckl"});
+
+  const counts = {todo:0, doing:0, done:0};
+  runs.forEach(r=>{ if (counts[r.status]==null) counts[r.status]=0; counts[r.status]++; });
+  root.appendChild(el("div",{class:"ckl-head"},[
+    el("button",{class:"tb-btn", text:T("checklist.back","< Report"),
+      onclick:()=>{ App.view="editor"; render(); }}),
+    el("div",{class:"ckl-title", text:T("checklist.title","Simulation Checklist")}),
+    el("div",{class:"ckl-prog", text:
+      counts.done+"/"+runs.length+" "+cklStateLabel("done")
+      +"  -  "+counts.doing+" "+cklStateLabel("doing")
+      +"  -  "+counts.todo+" "+cklStateLabel("todo")}),
+  ]));
+
+  if (!runs.length){
+    root.appendChild(el("div",{class:"empty",
+      text:T("checklist.empty","No simulation checklist in this project.")}));
+    host.appendChild(root);
+    return;
+  }
+
+  const tbl = el("table",{class:"ckl-table"});
+  tbl.appendChild(el("thead",{},[ el("tr",{},[
+    el("th",{text:"#"}),
+    el("th",{text:"TB"}),
+    el("th",{text:T("checklist.col.analysis","Analysis")}),
+    el("th",{text:T("checklist.col.corner","Corner")}),
+    el("th",{text:"N"}),
+    el("th",{text:T("checklist.col.collects","Collects")}),
+    el("th",{text:T("checklist.col.maps","Report target")}),
+    el("th",{text:T("checklist.col.status","Status")}),
+    el("th",{text:T("checklist.col.note","Note")}),
+  ]) ]));
+  const tb = el("tbody");
+  runs.forEach(run=>{
+    const chip = el("button",{class:"ckl-chip s-"+run.status,
+      text:cklStateLabel(run.status), onclick:()=>cklCycle(run)});
+    const note = el("input",{class:"ckl-note", type:"text", value:run.note||""});
+    note.addEventListener("input",()=>{ run.note = note.value; markDirty(); });
+    tb.appendChild(el("tr",{class:"s-"+run.status},[
+      el("td",{class:"ckl-id", text:run.id||""}),
+      el("td",{text:run.tb||""}),
+      el("td",{text:run.analysis||""}),
+      el("td",{text:run.corner||""}),
+      el("td",{text:run.n||""}),
+      el("td",{class:"ckl-wrap", text:run.collects||""}),
+      el("td",{class:"ckl-wrap", text:run.maps_to||""}),
+      el("td",{}, chip),
+      el("td",{}, note),
+    ]));
+  });
+  tbl.appendChild(tb);
+  root.appendChild(tbl);
   host.appendChild(root);
 }
 
@@ -3472,6 +3580,7 @@ function wireToolbar(){
   $("#btn-save").onclick = ()=>{ flushActiveGrid(); if (App.view === "template") persistTemplate({stay:true}); else saveProject(false); };
   $("#btn-docx").onclick = ()=>exportProject("docx");
   $("#btn-pdf").onclick   = ()=>exportProject("pdf");
+  $("#btn-checklist").onclick = enterChecklist;
 }
 function wireGlobal(){
   document.addEventListener("click",(e)=>{ if(!$("#ctx").contains(e.target)) closeCtx(); });
