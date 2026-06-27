@@ -26,6 +26,12 @@ inspect_*.txt
 probe_*.txt
 *_media/
 
+# Archives and data bundles -- keep local working data out of version control
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
 # OS / editor
 .DS_Store
 Thumbs.db
