@@ -348,6 +348,7 @@
     <button class="tb-btn" id="btn-pdf"  data-ui="toolbar.export_pdf">Export PDF</button>
     <span class="tb-sep"></span>
     <button class="tb-btn" id="btn-checklist" data-ui="toolbar.checklist">Checklist</button>
+    <button class="tb-btn" id="btn-copytext" data-ui="toolbar.copytext" title="Copy the whole report as text to paste back over a text-only channel">Copy text</button>
     <div id="status">
       <span class="dot" id="status-dot"></span>
       <span id="status-text">—</span>
@@ -2759,6 +2760,9 @@ function syncChrome(){
   // the checklist entry button is project-only (a project must be open)
   const bc = $("#btn-checklist");
   if (bc) bc.classList.toggle("hidden", !(inEditor || inChecklist));
+  // the "copy as text" button is project-only too (needs a loaded project)
+  const bt = $("#btn-copytext");
+  if (bt) bt.classList.toggle("hidden", !(inEditor || inChecklist));
   if (App.view === "home") setStatus("", T("status.no_project","No project open"));
   if (inTemplate) setStatus("", T("status.template_mode","Editing template"));
   if (inChecklist) setStatus("", T("status.checklist_mode","Simulation checklist"));
@@ -3581,7 +3585,42 @@ function wireToolbar(){
   $("#btn-docx").onclick = ()=>exportProject("docx");
   $("#btn-pdf").onclick   = ()=>exportProject("pdf");
   $("#btn-checklist").onclick = enterChecklist;
+  $("#btn-copytext").onclick = copyProjectText;
 }
+
+/* ============================================================================
+   ONE-CLICK TEXT EXPORT
+   Copy the entire project (text + structure) to the clipboard as compact JSON,
+   so it can be pasted back over a text-only channel (no file upload needed).
+   Images are path references, not embedded bytes, so the payload stays small.
+============================================================================ */
+function copyProjectText(){
+  if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
+  flushActiveGrid();   // commit any in-flight grid cell so the copy is current
+  const text = JSON.stringify(App.project);
+  const ok = ()=>toast(T("toast.copied_text","Copied report as text")+" ("+text.length+" chars)");
+  try{
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(ok, ()=>fallbackCopyText(text, ok));
+    } else {
+      fallbackCopyText(text, ok);
+    }
+  }catch(_){ fallbackCopyText(text, ok); }
+}
+function fallbackCopyText(text, ok){
+  try{
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.left = "-9999px"; ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const done = document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (done){ return ok && ok(); }
+  }catch(_){}
+  toast(T("toast.copy_failed","Copy failed -- open project.json and copy it manually"), true);
+}
+
 function wireGlobal(){
   document.addEventListener("click",(e)=>{ if(!$("#ctx").contains(e.target)) closeCtx(); });
   document.addEventListener("scroll",closeCtx,true);
