@@ -332,6 +332,56 @@
   .ckl-chip.s-doing{background:#e8a13a}
   .ckl-chip.s-done{background:#3fae5a}
   .ckl-note{width:150px;border:1px solid var(--border,#ddd);border-radius:4px;padding:2px 5px;font-size:11px;background:transparent;color:inherit}
+
+  /* ---- live report preview (read-only, document-like) ---- */
+  .pv-wrap{height:100%;overflow:auto;background:#e9ebef;padding:0 0 60px}
+  .pv-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
+    padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line)}
+  .pv-bar .pv-bar-t{font-weight:600;color:var(--muted);font-size:13px}
+  .pv-bar .spacer{margin-left:auto}
+  .pv-hint{color:var(--muted);font-size:12px}
+  .pv-doc{max-width:830px;margin:22px auto;background:#fff;color:#111;
+    box-shadow:0 1px 4px rgba(0,0,0,.18);padding:54px 64px 70px;
+    font-family:"Times New Roman","SimSun",serif;font-size:15px;line-height:1.6}
+  .pv-title{text-align:center;border-bottom:2px solid #111;padding-bottom:26px;margin-bottom:30px}
+  .pv-title-main{font-size:26px;font-weight:700;letter-spacing:.01em;margin:14px 0 18px}
+  .pv-title-meta{display:inline-block;text-align:left;color:#333;font-size:14px;line-height:1.9}
+  .pv-ml-k{color:#666}
+  .pv-h{font-weight:700;line-height:1.35;margin:1.3em 0 .5em}
+  .pv-h1{font-size:21px;border-bottom:1px solid #bbb;padding-bottom:.2em;margin-top:1.5em}
+  .pv-h2{font-size:18px} .pv-h3{font-size:16px} .pv-h4{font-size:15px}
+  .pv-h5,.pv-h6{font-size:14px}
+  .pv-hnum{color:#111;margin-right:.15em;font-variant-numeric:tabular-nums}
+  .pv-p{margin:.45em 0;text-align:justify}
+  .pv-bullet{margin:.25em 0 .25em 0;padding-left:1.5em;text-indent:-1.1em}
+  .pv-bullet::before{content:"\2022\00a0\00a0"}
+  .pv-fixed{color:#888;font-style:italic;background:#f6f6f6;border:1px dashed #ccc;
+    border-radius:4px;padding:8px 12px;margin:.5em 0;font-size:13px}
+  .pv-fig{margin:1.1em 0;text-align:center}
+  .pv-img{max-width:100%;height:auto;border:1px solid #ddd}
+  .pv-imgrid{display:grid;gap:8px;justify-items:center;align-items:start}
+  .pv-gcell{width:100%}
+  .pv-sub{font-size:13px;color:#444;margin-top:3px}
+  .pv-missing{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:6px;min-width:60%;min-height:120px;color:#b00;background:#fff5f5;
+    border:2px dashed #e3a0a0;border-radius:6px;padding:18px;font-size:13px}
+  .pv-missing-ic{font-size:30px;filter:grayscale(1);opacity:.6}
+  .pv-cap{font-size:13px;color:#333;margin-top:7px;text-align:center}
+  .pv-capnum{font-weight:700}
+  .pv-tblwrap{margin:1.1em 0}
+  .pv-tcap{margin:0 0 6px}
+  .pv-table{border-collapse:collapse;width:100%;font-size:13.5px;line-height:1.35}
+  .pv-table .pv-td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:left}
+  .pv-table tr.pv-hdr>.pv-td,.pv-table tr.pv-hdr>th{background:#eef1f4;font-weight:700;text-align:center}
+  .pv-dt{font-size:12px}
+  .pv-dt .pv-axis{background:#f3f5f8;font-weight:600;text-align:center;white-space:nowrap}
+  .pv-dt .pv-num{text-align:center;font-variant-numeric:tabular-nums}
+  .pv-dt .pv-flag{color:#d00;font-weight:700}
+  @media print{
+    #toolbar,#outline,.pv-bar{display:none !important}
+    #app,#main,#editor,#editor-inner,.pv-wrap{height:auto;overflow:visible;background:#fff}
+    .pv-doc{box-shadow:none;margin:0;max-width:none;padding:0}
+  }
 </style>
 </head>
 <body>
@@ -347,6 +397,7 @@
     <button class="tb-btn" id="btn-docx" data-ui="toolbar.export_docx">Export Word</button>
     <button class="tb-btn" id="btn-pdf"  data-ui="toolbar.export_pdf">Export PDF</button>
     <span class="tb-sep"></span>
+    <button class="tb-btn" id="btn-preview" data-ui="toolbar.preview" title="Preview the report in the browser (no file, no Word needed)">Preview</button>
     <button class="tb-btn" id="btn-checklist" data-ui="toolbar.checklist">Checklist</button>
     <button class="tb-btn" id="btn-copytext" data-ui="toolbar.copytext" title="Copy the whole report as text to paste back over a text-only channel">Copy text</button>
     <div id="status">
@@ -2742,6 +2793,7 @@ function render(){
   if (App.view === "home"){ renderHome(); return; }
   if (App.view === "template"){ renderTemplate(); return; }
   if (App.view === "checklist"){ renderChecklist(); return; }
+  if (App.view === "preview"){ renderPreview(); return; }
   renderAll();
 }
 
@@ -2749,23 +2801,28 @@ function syncChrome(){
   const inEditor    = App.view === "editor";
   const inTemplate  = App.view === "template";
   const inChecklist = App.view === "checklist";
-  // export buttons are project-only; Save works in all three editors (project/template/checklist)
-  ["#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !inEditor; });
+  const inPreview   = App.view === "preview";
+  // a project is loaded in any of the project-scoped views (editor/checklist/preview)
+  const inProject   = inEditor || inChecklist || inPreview;
+  // export buttons are project-only; allow exporting straight from the preview too
+  ["#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !(inEditor || inPreview); });
   $("#btn-save").disabled = !(inEditor || inTemplate || inChecklist);
   $("#btn-open").disabled = inTemplate;
   $("#btn-new").disabled  = inTemplate;
-  // left pane hosts the project outline OR the skeleton tree (checklist is full-width)
+  // left pane hosts the project outline OR the skeleton tree (checklist/preview are full-width)
   $("#outline").classList.toggle("hidden", !(inEditor || inTemplate));
   $("#btn-home").classList.toggle("hidden", App.view === "home");
-  // the checklist entry button is project-only (a project must be open)
+  // the project-scoped toolbar buttons (preview/checklist/copytext) need a loaded project
+  const bp = $("#btn-preview");
+  if (bp) bp.classList.toggle("hidden", !inProject);
   const bc = $("#btn-checklist");
-  if (bc) bc.classList.toggle("hidden", !(inEditor || inChecklist));
-  // the "copy as text" button is project-only too (needs a loaded project)
+  if (bc) bc.classList.toggle("hidden", !inProject);
   const bt = $("#btn-copytext");
-  if (bt) bt.classList.toggle("hidden", !(inEditor || inChecklist));
+  if (bt) bt.classList.toggle("hidden", !inProject);
   if (App.view === "home") setStatus("", T("status.no_project","No project open"));
   if (inTemplate) setStatus("", T("status.template_mode","Editing template"));
   if (inChecklist) setStatus("", T("status.checklist_mode","Simulation checklist"));
+  if (inPreview) setStatus("", T("status.preview_mode","Preview (read-only)"));
 }
 
 async function goHome(){
@@ -2883,6 +2940,298 @@ function renderChecklist(){
   tbl.appendChild(tb);
   root.appendChild(tbl);
   host.appendChild(root);
+}
+
+/* ============================================================================
+   LIVE REPORT PREVIEW  (read-only, in-browser)
+   Walks App.project the same way engine.py does -- chapter-scoped Figure/Table
+   numbering, captions, compliance over-spec flagging -- and lays the result out
+   like a document, so there is no export-then-open-in-Word round trip. It is an
+   APPROXIMATE rendering: content + numbering + flagging are faithful, page
+   geometry/fonts are not. Always reads the live (possibly unsaved) App.project.
+============================================================================ */
+function enterPreview(){
+  if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
+  flushActiveGrid();   // commit any in-flight grid cell so the preview is current
+  App.view = "preview";
+  render();
+}
+
+function renderPreview(){
+  const host = $("#editor-inner"); host.innerHTML = "";
+  const wrap = el("div",{class:"pv-wrap"});
+
+  const bar = el("div",{class:"pv-bar"});
+  bar.appendChild(el("button",{class:"tb-btn", text:T("preview.back","< Report"),
+    onclick:()=>{ App.view = "editor"; render(); }}));
+  bar.appendChild(el("button",{class:"tb-btn", text:T("preview.refresh","Refresh"),
+    onclick:()=>{ flushActiveGrid(); renderPreview(); }}));
+  bar.appendChild(el("span",{class:"pv-bar-t", text:T("preview.title","Live preview")}));
+  bar.appendChild(el("span",{class:"spacer"}));
+  bar.appendChild(el("span",{class:"pv-hint",
+    text:T("preview.hint","Approximate layout; content, numbering and flags match the export.")}));
+  bar.appendChild(el("button",{class:"tb-btn", text:T("preview.print","Print / PDF"),
+    onclick:()=>window.print()}));
+  wrap.appendChild(bar);
+
+  wrap.appendChild(buildPreviewDoc());
+  host.appendChild(wrap);
+}
+
+function buildPreviewDoc(){
+  const doc = el("div",{class:"pv-doc"});
+  doc.appendChild(previewTitle());
+  const state = { chap:0, img:0, tbl:0 };
+  (App.project.outline || []).forEach(n => previewNode(doc, n, 0, state));
+  return doc;
+}
+
+function previewTitle(){
+  const meta = App.project.meta || {};
+  const fields = (App.config && App.config.cover && App.config.cover.fields) || [];
+  const box = el("div",{class:"pv-title"});
+  // pick the most title-like cover field that has a value; fall back gracefully
+  const titleField = fields.find(f => /title|name/i.test(f.key) && meta[f.key]);
+  const titleVal = (titleField && meta[titleField.key]) || meta.title || meta.name
+                   || T("preview.untitled","(untitled report)");
+  box.appendChild(el("div",{class:"pv-title-main", text:String(titleVal)}));
+  // a few info-table fields under the title (label: value), correctness over guessing keys
+  const meta_lines = el("div",{class:"pv-title-meta"});
+  fields.filter(f => f.table === "info" && f !== titleField && meta[f.key]
+                     && typeof meta[f.key] !== "object")
+        .forEach(f => meta_lines.appendChild(el("div",{},[
+          el("span",{class:"pv-ml-k", text:(f.label || f.key) + ": "}),
+          document.createTextNode(String(meta[f.key])),
+        ])));
+  box.appendChild(meta_lines);
+  return box;
+}
+
+// Mirrors engine.walk: level-1 nodes open a chapter (reset Figure/Table counters);
+// blocks of a chapter (incl. all its subsections, in document order) share them.
+function previewNode(host, node, depth, state){
+  const level = depth + 1;
+  if (level === 1){ state.chap++; state.img = 0; state.tbl = 0; }
+  const chap = state.chap;
+
+  const num = nodePath(node.id);
+  const h = el("div",{class:"pv-h pv-h" + Math.min(level, 6)});
+  if (num) h.appendChild(el("span",{class:"pv-hnum", text:num + "  "}));
+  h.appendChild(document.createTextNode(node.title || ""));
+  host.appendChild(h);
+
+  if (node.fixed_body){
+    host.appendChild(el("div",{class:"pv-fixed",
+      text:T("preview.fixed","[ Standard template text — generated by the engine on export. ]")}));
+  } else {
+    (node.blocks || []).forEach(b => previewBlock(host, b, chap, state));
+  }
+  (node.children || []).forEach(c => previewNode(host, c, depth + 1, state));
+}
+
+function previewBlock(host, block, chap, state){
+  if (!block) return;
+  switch (block.type){
+    case "para":      host.appendChild(previewPara(block)); break;
+    case "image":     state.img++; host.appendChild(previewImage(block, chap, state.img)); break;
+    case "imagegrid": state.img++; host.appendChild(previewImageGrid(block, chap, state.img)); break;
+    case "table": {
+      const cap = (block.caption || "").trim();
+      if (cap) state.tbl++;
+      host.appendChild(previewFreeTable(block, chap, cap ? state.tbl : null));
+      break;
+    }
+    case "datatable": {
+      const cap = (block.caption || "").trim();
+      if (cap) state.tbl++;
+      host.appendChild(previewDatatable(block, chap, cap ? state.tbl : null));
+      break;
+    }
+  }
+}
+
+function capPrefix(kind){
+  const tpl = (App.config && (App.config.template || App.config)) || {};
+  const cp = tpl.caption_prefix || {};
+  return cp[kind] || (kind === "image" ? "Figure" : "Table");
+}
+function figLabel(chap, seq){ return capPrefix("image") + " " + chap + "-" + seq; }
+function tblLabel(chap, seq){ return capPrefix("table") + " " + chap + "-" + seq; }
+
+function previewPara(block){
+  const html = runsToHtml(block.runs || []);   // reuse the editor's exact run->HTML
+  if (block.list === "bullet") return el("div",{class:"pv-p pv-bullet", html: html || "&nbsp;"});
+  return el("p",{class:"pv-p", html: html || "&nbsp;"});
+}
+
+function previewMissingImg(name){
+  return el("div",{class:"pv-missing"},[
+    el("div",{class:"pv-missing-ic", text:"\u{1F5BC}"}),
+    el("div",{text: name ? name : T("preview.no_image","Image placeholder (paste a screenshot)")}),
+  ]);
+}
+
+function previewImage(block, chap, seq){
+  const fig = el("figure",{class:"pv-fig"});
+  if (block.file){
+    const img = el("img",{class:"pv-img", src: imgUrl(block.file), alt: block.caption || ""});
+    if (block.width_cm) img.style.width = Math.round(block.width_cm * 37.8) + "px";
+    img.onerror = ()=>{ const m = previewMissingImg(block.file); if (img.parentNode) img.parentNode.replaceChild(m, img); };
+    fig.appendChild(img);
+  } else {
+    fig.appendChild(previewMissingImg(""));
+  }
+  fig.appendChild(previewCaption(figLabel(chap, seq), block.caption));
+  return fig;
+}
+
+function previewImageGrid(block, chap, seq){
+  const fig = el("figure",{class:"pv-fig"});
+  const grid = el("div",{class:"pv-imgrid"});
+  grid.style.gridTemplateColumns = "repeat(" + (block.cols || 2) + ",1fr)";
+  (block.items || []).forEach((it, i)=>{
+    const cell = el("div",{class:"pv-gcell"});
+    if (it && it.file){
+      const img = el("img",{class:"pv-img", src: imgUrl(it.file), alt:""});
+      img.onerror = ()=>{ const m = previewMissingImg(it.file); if (img.parentNode) img.parentNode.replaceChild(m, img); };
+      cell.appendChild(img);
+    } else {
+      cell.appendChild(previewMissingImg(""));
+    }
+    if (block.sub_captions) cell.appendChild(el("div",{class:"pv-sub", text:"(" + String.fromCharCode(97 + i) + ")"}));
+    grid.appendChild(cell);
+  });
+  fig.appendChild(grid);
+  fig.appendChild(previewCaption(figLabel(chap, seq), block.caption));
+  return fig;
+}
+
+function previewCaption(numLabel, text){
+  return el("figcaption",{class:"pv-cap"},[
+    el("span",{class:"pv-capnum", text: numLabel + "  "}),
+    document.createTextNode(text || ""),
+  ]);
+}
+
+function previewFreeTable(block, chap, seq){
+  const wrap = el("div",{class:"pv-tblwrap"});
+  if (seq != null) wrap.appendChild(el("div",{class:"pv-cap pv-tcap"},[
+    el("span",{class:"pv-capnum", text: tblLabel(chap, seq) + "  "}),
+    document.createTextNode(block.caption || ""),
+  ]));
+  const tbl = el("table",{class:"pv-table"});
+  const hr = (block.header_rows != null) ? block.header_rows : 1;
+  const colw = Array.isArray(block.col_w) ? block.col_w : null;
+  if (colw && colw.length){
+    const tot = colw.reduce((a,b)=>a + (Number(b) || 0), 0) || 1;
+    const cg = el("colgroup");
+    colw.forEach(w => cg.appendChild(el("col",{style:{width:(100 * (Number(w) || 0) / tot) + "%"}})));
+    tbl.appendChild(cg);
+  }
+  (block.rows || []).forEach((row, ri)=>{
+    const tr = el("tr",{class: ri < hr ? "pv-hdr" : ""});
+    (row || []).forEach(cell=>{
+      const td = el(ri < hr ? "th" : "td", {class:"pv-td"});
+      td.textContent = (cell == null ? "" : String(cell));
+      tr.appendChild(td);
+    });
+    tbl.appendChild(tr);
+  });
+  wrap.appendChild(tbl);
+  return wrap;
+}
+
+/* ---- compliance datatable: JS port of tables.py group/axis/limit logic ----- */
+function dtNumv(v){
+  if (Array.isArray(v) && v.length === 2) v = v[0];
+  const n = parseFloat(v);
+  return isFinite(n) ? n : null;
+}
+function dtFmt(v){
+  if (v == null || v === "") return "";
+  if (Array.isArray(v) && v.length === 2) return v[0] + "(" + v[1] + ")";
+  return String(v);
+}
+function dtViolates(limit, nv, smin, smax, en, styp){
+  if (nv == null) return false;
+  if (limit === "le"){ const thr = smax != null ? smax : (en != null ? en : styp); return thr != null && nv > thr; }
+  if (limit === "ge"){ const thr = smin != null ? smin : (smax != null ? smax : en); return thr != null && nv < thr; }
+  if (limit === "range"){ return (smin != null && nv < smin) || (smax != null && nv > smax); }
+  return false;
+}
+function dtFlagPositions(row){
+  const flags = new Set();
+  const limit = row.limit;
+  if (!limit) return flags;
+  const sm = row.spec_mtm || [null, null, null];
+  const sim = row.sim_mtm || [null, null, null];
+  const smin = dtNumv(sm[0]), styp = dtNumv(sm[1]), smax = dtNumv(sm[2]);
+  const en = dtNumv(row.spec);
+  sim.forEach((v, i)=>{ if (dtViolates(limit, dtNumv(v), smin, smax, en, styp)) flags.add(i); });
+  const nt = dtNumv(row.sim_ntwc);
+  if (nt != null){
+    const nspec = dtNumv(row.spec_ntwc);
+    const n_smin = nspec != null ? nspec : smin;
+    const n_smax = nspec != null ? nspec : smax;
+    const n_en   = nspec != null ? nspec : en;
+    if (dtViolates(limit, nt, n_smin, n_smax, n_en, styp)) flags.add(3);
+  }
+  return flags;
+}
+function dtAxisValue(row, gkey, ai){
+  const arr = (gkey === "spec")
+    ? (row.spec_mtm || [null, null, null]).concat([row.spec_ntwc])
+    : (row.sim_mtm  || [null, null, null]).concat([row.sim_ntwc]);
+  return ai < arr.length ? arr[ai] : null;
+}
+
+function previewDatatable(block, chap, seq){
+  const data = block.data || {};
+  const wrap = el("div",{class:"pv-tblwrap"});
+  if (seq != null) wrap.appendChild(el("div",{class:"pv-cap pv-tcap"},[
+    el("span",{class:"pv-capnum", text: tblLabel(chap, seq) + "  "}),
+    document.createTextNode(block.caption || ""),
+  ]));
+  const axesDefault = (App.config && App.config.compliance && App.config.compliance.axis_labels)
+                      || ["MIN","TYP","MAX","NTWC"];
+  const groups = [{ key:"spec", title: data.spec_name || "Spec", role:"spec", axes: axesDefault.slice() }];
+  (data.sims || []).forEach(s => groups.push({
+    key: s.key, title: s.title || s.stage || s.key, role:"sim", axes:(s.axes || axesDefault).slice() }));
+
+  const tbl = el("table",{class:"pv-table pv-dt"});
+  const h1 = el("tr",{class:"pv-hdr"});
+  h1.appendChild(el("th",{class:"pv-td", text:"Category", rowspan:"2"}));
+  h1.appendChild(el("th",{class:"pv-td", text:"Item", rowspan:"2"}));
+  groups.forEach(g => h1.appendChild(el("th",{class:"pv-td", text:g.title, colspan:String(g.axes.length || 1)})));
+  h1.appendChild(el("th",{class:"pv-td", text:"Unit", rowspan:"2"}));
+  tbl.appendChild(h1);
+  const h2 = el("tr",{class:"pv-hdr"});
+  groups.forEach(g => g.axes.forEach(ax => h2.appendChild(el("th",{class:"pv-td pv-axis", text:String(ax)}))));
+  tbl.appendChild(h2);
+
+  (data.rows || []).forEach(row=>{
+    const tr = el("tr",{});
+    const c1 = el("td",{class:"pv-td"}); c1.textContent = row.cat || "";  tr.appendChild(c1);
+    const c2 = el("td",{class:"pv-td"}); c2.textContent = row.item || ""; tr.appendChild(c2);
+    const flags = dtFlagPositions(row);
+    groups.forEach(g => g.axes.forEach((ax, ai)=>{
+      const td = el("td",{class:"pv-td pv-num"});
+      td.textContent = dtFmt(dtAxisValue(row, g.key, ai));
+      if (g.role === "sim" && flags.has(ai)) td.classList.add("pv-flag");
+      tr.appendChild(td);
+    }));
+    const cu = el("td",{class:"pv-td"}); cu.textContent = row.unit || ""; tr.appendChild(cu);
+    tbl.appendChild(tr);
+  });
+
+  if (!(data.rows || []).length){
+    wrap.appendChild(tbl);
+    wrap.appendChild(el("div",{class:"pv-fixed",
+      text:T("preview.empty_dt","(Compliance table has no metric rows yet.)")}));
+    return wrap;
+  }
+  wrap.appendChild(tbl);
+  return wrap;
 }
 
 function renderTemplatesSection(){
@@ -3584,6 +3933,7 @@ function wireToolbar(){
   $("#btn-save").onclick = ()=>{ flushActiveGrid(); if (App.view === "template") persistTemplate({stay:true}); else saveProject(false); };
   $("#btn-docx").onclick = ()=>exportProject("docx");
   $("#btn-pdf").onclick   = ()=>exportProject("pdf");
+  $("#btn-preview").onclick = enterPreview;
   $("#btn-checklist").onclick = enterChecklist;
   $("#btn-copytext").onclick = copyProjectText;
 }
