@@ -374,9 +374,10 @@
   .pv-table .pv-td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:left}
   .pv-table tr.pv-hdr>.pv-td,.pv-table tr.pv-hdr>th{background:#eef1f4;font-weight:700;text-align:center}
   .pv-dt{font-size:12px}
-  .pv-dt .pv-axis{background:#f3f5f8;font-weight:600;text-align:center;white-space:nowrap}
-  .pv-dt .pv-num{text-align:center;font-variant-numeric:tabular-nums}
-  .pv-dt .pv-flag{color:#d00;font-weight:700}
+  .pv-dt .pv-td{text-align:center;vertical-align:middle;padding:2px 4px}
+  .pv-dt .pv-axis{font-weight:600;white-space:nowrap}
+  .pv-dt .pv-num{font-variant-numeric:tabular-nums}
+  .pv-spacer{padding:0 !important}
   @media print{
     #toolbar,#outline,.pv-bar{display:none !important}
     #app,#main,#editor,#editor-inner,.pv-wrap{height:auto;overflow:visible;background:#fff}
@@ -3185,51 +3186,135 @@ function dtAxisValue(row, gkey, ai){
   return ai < arr.length ? arr[ai] : null;
 }
 
+// Column plan -- mirrors tables.py _plan_columns (cat,item,[spec], per group:
+// spacer + axes, trailing spacer + unit). Each entry carries its width (cm).
+function dtPlan(groups, showSpec, w){
+  const plan = [{kind:"cat", w:w.cat}, {kind:"item", w:w.item}];
+  if (showSpec) plan.push({kind:"spec", w:w.spec});
+  groups.forEach(g=>{
+    plan.push({kind:"spacer", w:w.spacer});
+    g.axes.forEach((ax, ai)=> plan.push({kind:"axis", group:g.key, role:g.role, axis:ai, label:ax, w:w.axis, g:g}));
+  });
+  plan.push({kind:"spacer", w:w.spacer});
+  plan.push({kind:"unit", w:w.unit});
+  return plan;
+}
+
 function previewDatatable(block, chap, seq){
   const data = block.data || {};
+  const comp = (App.config && App.config.compliance) || {};
+  const fl = comp.fills || {};
+  const F = { header:"#"+(fl.header||"FFFF00"), setting:"#"+(fl.setting||"EEECE1"), result:"#"+(fl.result||"FFFFFF") };
+  const flagColor   = "#"+(comp.flag_color || "FF0000");
+  const settingKinds = new Set(comp.setting_kinds || ["common_setting","module_setting","tb"]);
+  const w = comp.col_w_cm || {cat:1.7, item:4.0, spec:1.0, axis:0.88, spacer:0.2, unit:1.0};
+  const axesDefault = comp.axis_labels || ["MIN","TYP","MAX","NTWC"];
+
   const wrap = el("div",{class:"pv-tblwrap"});
   if (seq != null) wrap.appendChild(el("div",{class:"pv-cap pv-tcap"},[
     el("span",{class:"pv-capnum", text: tblLabel(chap, seq) + "  "}),
     document.createTextNode(block.caption || ""),
   ]));
-  const axesDefault = (App.config && App.config.compliance && App.config.compliance.axis_labels)
-                      || ["MIN","TYP","MAX","NTWC"];
-  const groups = [{ key:"spec", title: data.spec_name || "Spec", role:"spec", axes: axesDefault.slice() }];
+
+  // spec group first, then one group per simulation (matches make_groups)
+  const groups = [{ key:"spec", title: data.spec_name || "Spec", role:"spec", stage:null, axes: axesDefault.slice() }];
   (data.sims || []).forEach(s => groups.push({
-    key: s.key, title: s.title || s.stage || s.key, role:"sim", axes:(s.axes || axesDefault).slice() }));
+    key: s.key, title: s.title || s.key, role:"sim", stage: s.stage || null, axes:(s.axes || axesDefault).slice() }));
+  const showSpec = !groups.some(g => g.role === "spec");   // spec group always present -> false
+  const firstSim = groups.find(g => g.role === "sim");      // sim_span merges this group's first 3 axes
+  const plan = dtPlan(groups, showSpec, w);
+
+  // one cell builder for header + data: fill, bold, color, span are all explicit
+  const cell = (tag, o)=>{
+    const c = el(tag,{class: "pv-td" + (o.cls ? " "+o.cls : "")});
+    if (o.colspan) c.setAttribute("colspan", String(o.colspan));
+    if (o.rowspan) c.setAttribute("rowspan", String(o.rowspan));
+    if (o.fill)  c.style.background = o.fill;
+    if (o.bold)  c.style.fontWeight = "700";
+    if (o.color) c.style.color = o.color;
+    c.textContent = (o.text != null) ? o.text : "";
+    return c;
+  };
 
   const tbl = el("table",{class:"pv-table pv-dt"});
-  const h1 = el("tr",{class:"pv-hdr"});
-  h1.appendChild(el("th",{class:"pv-td", text:"Category", rowspan:"2"}));
-  h1.appendChild(el("th",{class:"pv-td", text:"Item", rowspan:"2"}));
-  groups.forEach(g => h1.appendChild(el("th",{class:"pv-td", text:g.title, colspan:String(g.axes.length || 1)})));
-  h1.appendChild(el("th",{class:"pv-td", text:"Unit", rowspan:"2"}));
-  tbl.appendChild(h1);
-  const h2 = el("tr",{class:"pv-hdr"});
-  groups.forEach(g => g.axes.forEach(ax => h2.appendChild(el("th",{class:"pv-td pv-axis", text:String(ax)}))));
-  tbl.appendChild(h2);
+  const tot = plan.reduce((a,p)=>a + (Number(p.w)||0), 0) || 1;
+  const cg = el("colgroup");
+  plan.forEach(p => cg.appendChild(el("col",{style:{width:(100*(Number(p.w)||0)/tot)+"%"}})));
+  tbl.appendChild(cg);
 
-  (data.rows || []).forEach(row=>{
-    const tr = el("tr",{});
-    const c1 = el("td",{class:"pv-td"}); c1.textContent = row.cat || "";  tr.appendChild(c1);
-    const c2 = el("td",{class:"pv-td"}); c2.textContent = row.item || ""; tr.appendChild(c2);
-    const flags = dtFlagPositions(row);
-    groups.forEach(g => g.axes.forEach((ax, ai)=>{
-      const td = el("td",{class:"pv-td pv-num"});
-      td.textContent = dtFmt(dtAxisValue(row, g.key, ai));
-      if (g.role === "sim" && flags.has(ai)) td.classList.add("pv-flag");
-      tr.appendChild(td);
-    }));
-    const cu = el("td",{class:"pv-td"}); cu.textContent = row.unit || ""; tr.appendChild(cu);
-    tbl.appendChild(tr);
+  // ---- header band: 3 rows, all shaded fills.header ----
+  const r0 = el("tr",{class:"pv-hdr"});
+  plan.forEach(p=>{
+    if (p.kind === "cat")  r0.appendChild(cell("th",{rowspan:3, fill:F.header, bold:true, text:"Category"}));
+    else if (p.kind === "item") r0.appendChild(cell("th",{rowspan:3, fill:F.header, bold:true, text:"Item"}));
+    else if (p.kind === "spec") r0.appendChild(cell("th",{rowspan:3, fill:F.header, bold:true, text:"Spec"}));
+    else if (p.kind === "unit") r0.appendChild(cell("th",{rowspan:3, fill:F.header, bold:true, text:"Unit"}));
+    else if (p.kind === "spacer") r0.appendChild(cell("th",{rowspan:3, fill:F.header, cls:"pv-spacer"}));
+    else if (p.kind === "axis" && p.axis === 0)
+      r0.appendChild(cell("th",{colspan:p.g.axes.length, fill:F.header, bold:true, text:p.g.title}));
   });
+  tbl.appendChild(r0);
 
-  if (!(data.rows || []).length){
+  const r1 = el("tr",{class:"pv-hdr"});           // stage row (only axis area; rest covered by rowspan)
+  plan.forEach(p=>{
+    if (p.kind !== "axis") return;
+    if (p.g.stage){ if (p.axis === 0) r1.appendChild(cell("th",{colspan:p.g.axes.length, fill:F.header, bold:true, text:p.g.stage})); }
+    else r1.appendChild(cell("th",{fill:F.header}));
+  });
+  tbl.appendChild(r1);
+
+  const r2 = el("tr",{class:"pv-hdr"});           // axis labels
+  plan.forEach(p=>{ if (p.kind === "axis") r2.appendChild(cell("th",{fill:F.header, bold:true, cls:"pv-axis", text:String(p.label)})); });
+  tbl.appendChild(r2);
+
+  // ---- data rows ----
+  const rows = data.rows || [];
+  if (!rows.length){
     wrap.appendChild(tbl);
     wrap.appendChild(el("div",{class:"pv-fixed",
       text:T("preview.empty_dt","(Compliance table has no metric rows yet.)")}));
     return wrap;
   }
+  // consecutive same-category runs -> the category column vertical merge
+  const catFirst = new Set(), catSpan = {};
+  for (let i = 0; i < rows.length;){
+    let j = i; while (j+1 < rows.length && rows[j+1].cat === rows[i].cat) j++;
+    catFirst.add(i); catSpan[i] = j - i + 1; i = j + 1;
+  }
+
+  rows.forEach((row, ri)=>{
+    const band  = settingKinds.has(row.kind) ? F.setting : F.result;
+    const flags = dtFlagPositions(row);
+    const tr = el("tr",{});
+    let skip = 0;   // sim_span: skip the merged-away axis cells
+    plan.forEach(p=>{
+      if (p.kind === "cat"){
+        if (catFirst.has(ri)) tr.appendChild(cell("td",{rowspan:catSpan[ri], fill:band, bold:true, text:row.cat||""}));
+        return;   // non-first rows: covered by the rowspan above
+      }
+      if (skip > 0){ skip--; return; }
+      if (p.kind === "item")   return void tr.appendChild(cell("td",{fill:band, text:row.item||""}));
+      if (p.kind === "unit")   return void tr.appendChild(cell("td",{fill:band, text:row.unit||""}));
+      if (p.kind === "spec")   return void tr.appendChild(cell("td",{fill:band, text:dtFmt(row.spec)}));
+      if (p.kind === "spacer") return void tr.appendChild(cell("td",{fill:band, cls:"pv-spacer"}));
+      if (p.kind === "axis"){
+        // sim_span row: the first sim group's first 3 axes merge into one wide cell
+        if (row.sim_span && firstSim && p.group === firstSim.key && p.axis === 0){
+          const red = flags.has(0);
+          tr.appendChild(cell("td",{colspan:3, fill:band, cls:"pv-num",
+            text:dtFmt(dtAxisValue(row, p.group, 0)), color:red?flagColor:null, bold:red}));
+          skip = Math.min(2, firstSim.axes.length - 1);
+          return;
+        }
+        const red = (p.role === "sim" && flags.has(p.axis));
+        tr.appendChild(cell("td",{fill:band, cls:"pv-num",
+          text:dtFmt(dtAxisValue(row, p.group, p.axis)), color:red?flagColor:null, bold:red}));
+        return;
+      }
+    });
+    tbl.appendChild(tr);
+  });
+
   wrap.appendChild(tbl);
   return wrap;
 }
