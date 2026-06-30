@@ -252,6 +252,8 @@
     display:flex;flex-direction:column;align-items:center;gap:4px;min-width:96px}
   .pick:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
   .pick .ico{font-size:20px}
+  .paste-pick{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .paste-pick span:last-child{white-space:nowrap}
 
   /* cover form */
   .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
@@ -1178,6 +1180,10 @@ function renderProseCard(node, seg){
 
   const bar = el("div",{class:"card-bar"});
   bar.appendChild(el("span",{class:"card-kind", text:T("block.prose","Text")}));
+  const actions = el("div",{class:"card-actions"});
+  actions.appendChild(el("button",{class:"icon-btn", title:T("action.copy_text","Copy this text (paste in any section or project)"), text:"⧉",
+    onclick:()=>copyBlocks(seg.blocks, T("block.prose","Text"))}));
+  bar.appendChild(actions);
   card.appendChild(bar);
 
   const body = el("div",{class:"card-body"});
@@ -1210,6 +1216,8 @@ function renderBlockCard(node, block, idx){
   if (idx===0) up.disabled=true;
   if (idx===node.blocks.length-1) dn.disabled=true;
   actions.appendChild(up); actions.appendChild(dn);
+  actions.appendChild(el("button",{class:"icon-btn", title:T("action.copy","Copy block (paste in any section or project)"), text:"⧉",
+    onclick:()=>copyBlocks([block], kindLabel)}));
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
     onclick:()=>{
       const i=cur(); if(i<0) return;
@@ -1273,6 +1281,84 @@ function wireBlockDrag(card, node, block){
 }
 
 /* ---- add-block picker ----------------------------------------------------- */
+/* ============================================================================
+   BLOCK CLIPBOARD  (copy / paste blocks across sections AND projects)
+   The clipboard lives in localStorage, so it survives switching projects and
+   page reloads. A pasted media block gets a FRESH id (so its caption bookmark /
+   cross-reference never collides with the source). When a block is pasted into a
+   DIFFERENT project than it was copied from, its image bytes are re-uploaded into
+   the target project in the background (best effort) so the picture comes along.
+============================================================================ */
+const BLOCK_CLIP_KEY = "docbuilder.blockclip.v1";
+function setBlockClip(payload){
+  App._blockClip = payload;                                   // in-memory mirror
+  try{ localStorage.setItem(BLOCK_CLIP_KEY, JSON.stringify(payload)); }catch(_){}
+}
+function getBlockClip(){
+  try{ const s = localStorage.getItem(BLOCK_CLIP_KEY); if (s) return JSON.parse(s); }catch(_){}
+  return App._blockClip || null;                              // fallback if storage blocked
+}
+function blockWord(n){ return n===1 ? T("block.one","block") : T("block.many","blocks"); }
+
+// Deep-copy the given blocks onto the clipboard. `label` is a short hint shown in
+// the paste menu (e.g. "Table", "Text").
+function copyBlocks(blocks, label){
+  flushActiveGrid();                          // commit any in-flight grid cell first
+  const clones = (blocks||[]).filter(Boolean).map(b => JSON.parse(JSON.stringify(b)));
+  if (!clones.length) return;
+  setBlockClip({ v:1, dir: App.dir||"", label: label||"", blocks: clones });
+  renderEditor();                             // rebuild pickers so "Paste" shows up now
+  toast(T("toast.block_copied","Copied")+" "+clones.length+" "+blockWord(clones.length));
+}
+
+// Clone for insertion: a new id keeps caption bookmarks / cross-refs unique.
+function cloneBlockFresh(b){
+  const c = JSON.parse(JSON.stringify(b));
+  if (c.id) c.id = uid();
+  return c;
+}
+
+function pasteBlocks(node, atIndex){
+  const clip = getBlockClip();
+  if (!clip || !Array.isArray(clip.blocks) || !clip.blocks.length){
+    toast(T("toast.clip_empty","Nothing copied yet"), true); return;
+  }
+  const fresh = clip.blocks.map(cloneBlockFresh);
+  const at = Math.max(0, Math.min(atIndex==null ? node.blocks.length : atIndex, node.blocks.length));
+  node.blocks.splice(at, 0, ...fresh);
+  markDirty(); renderEditor(); saveProject(true);
+  toast(T("toast.block_pasted","Pasted")+" "+fresh.length+" "+blockWord(fresh.length));
+  // cross-project paste: bring the image bytes along (best effort, async)
+  if (clip.dir && App.dir && clip.dir !== App.dir){
+    const imgs = fresh.filter(b => b.type==="image" || b.type==="imagegrid");
+    if (imgs.length) importPastedImages(imgs, clip.dir, node);
+  }
+}
+
+// Re-upload images referenced by pasted blocks from their source project into the
+// current one, so a cross-project paste shows the picture, not a placeholder.
+async function importPastedImages(blocks, srcDir, node){
+  let changed = false, failed = 0;
+  for (const b of blocks){
+    try{
+      if (b.type==="image" && b.file){ b.file = await reuploadImage(b.file, srcDir, node); changed = true; }
+      else if (b.type==="imagegrid"){
+        for (const it of (b.items||[])){ if (it && it.file){ it.file = await reuploadImage(it.file, srcDir, node); changed = true; } }
+      }
+    }catch(_){ failed++; }
+  }
+  if (changed){ markDirty(); renderEditor(); saveProject(true); }
+  if (failed) toast(T("toast.img_copy_partial","Some images could not be copied across projects; paste them again"), true);
+}
+async function reuploadImage(file, srcDir, node){
+  const resp = await fetch(file + "?dir=" + encodeURIComponent(srcDir));
+  if (!resp.ok) throw new Error("src "+resp.status);
+  const b64 = await fileToB64(await resp.blob());
+  const section = sectionOf(node.id);
+  const r = await api("POST","/api/image",{query:{dir:App.dir, section}, json:{ png_b64:b64, section }});
+  return r.file;
+}
+
 function buildAddBlock(node, atIndex){
   const wrap = el("div",{class:"add-block"});
   const picker = el("div",{class:"picker hidden"});
@@ -1290,6 +1376,14 @@ function buildAddBlock(node, atIndex){
       node.blocks.splice(atIndex,0,newBlock(type)); markDirty(); renderEditor();
     }},[ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
   });
+  // paste entry -- only when the clipboard holds something (works cross-project)
+  const clip = getBlockClip();
+  if (clip && Array.isArray(clip.blocks) && clip.blocks.length){
+    const lbl = T("block.paste","Paste") + ": "
+              + (clip.label || (clip.blocks.length + " " + blockWord(clip.blocks.length)));
+    picker.appendChild(el("button",{class:"pick paste-pick", onclick:()=> pasteBlocks(node, atIndex)},
+      [ el("span",{class:"ico",text:"📋"}), el("span",{text: lbl}) ]));
+  }
   wrap.appendChild(trigger); wrap.appendChild(picker);
   return wrap;
 }
