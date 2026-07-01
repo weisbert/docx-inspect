@@ -240,6 +240,15 @@ def golden_project():
                      "runs": [{"t": "an intervening address line"}]},
                     {"type": "para", "list": "number", "level": 0,
                      "runs": [{"t": "second label"}]},
+                    # free table with styled cells (rich runs: bold / red / italic)
+                    {"type": "table", "caption": "Styled cells", "header_rows": 1,
+                     "col_w": None,
+                     "rows": [
+                         ["Style", "Example"],
+                         ["bold+red", {"runs": [{"t": "Bold", "b": True},
+                                                {"t": " red", "color": "FF0000"}]}],
+                         ["italic", {"runs": [{"t": "slanted", "i": True}]}],
+                     ]},
                 ],
                 "children": [],
             },
@@ -288,6 +297,24 @@ def run_is_bold(run):
         return True
     rpr = run._r.find(qn("w:rPr"))
     return rpr is not None and rpr.find(qn("w:b")) is not None
+
+
+def run_is_italic(run):
+    if run.font.italic:
+        return True
+    rpr = run._r.find(qn("w:rPr"))
+    return rpr is not None and rpr.find(qn("w:i")) is not None
+
+
+def find_free_table(doc):
+    """The free table is the one carrying the styled 'Bold' cell (compliance/grid
+    tables don't contain that text)."""
+    for t in doc.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                if "Bold" in cell_text(cell):
+                    return t
+    return None
 
 
 def cell_text(cell):
@@ -553,6 +580,24 @@ def main():
           "lvlText=%r" % abstract_lvl_text(doc, dec_abs, 0))
     check(nida != nid0, "bullets and numbers use different numbering definitions",
           "bulletNum=%r numberNum=%r" % (nid0, nida))
+
+    # --- free table with styled (rich) cells ---
+    ft = find_free_table(doc)
+    check(ft is not None, "free table with styled cells present")
+    if ft is not None:
+        styled = ital = None
+        for row in ft.rows:
+            for cell in row.cells:
+                if "Bold" in cell_text(cell):
+                    styled = cell
+                if cell_text(cell) == "slanted":
+                    ital = cell
+        sruns = cell_runs(styled) if styled is not None else []
+        check(any(run_is_bold(r) for r in sruns), "styled cell has a bold run")
+        check(any(run_is_red(r) and not run_is_bold(r) for r in sruns),
+              "styled cell has a red, non-bold run (per-run styling, not header bold)")
+        iruns = cell_runs(ital) if ital is not None else []
+        check(any(run_is_italic(r) for r in iruns), "styled cell has an italic run")
 
     # --- body style carries a (config-driven) first-line indent ---
     try:

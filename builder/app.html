@@ -125,6 +125,11 @@
   .mt-sep{width:1px;height:18px;background:var(--line);margin:0 3px}
   .swatch{width:18px;height:18px;border-radius:4px;border:1px solid rgba(0,0,0,.15);cursor:pointer}
   .swatch.active{outline:2px solid var(--accent);outline-offset:1px}
+  /* floating B/I/color toolbar shown while editing a styled table cell */
+  .cell-fmt{position:fixed;z-index:50;display:none;align-items:center;gap:5px;padding:4px 7px;
+    background:var(--panel,#fff);border:1px solid var(--line);border-radius:7px;box-shadow:0 2px 10px rgba(0,0,0,.18)}
+  .cf-btn{border:1px solid var(--line);background:#fff;border-radius:5px;padding:1px 7px;font-size:13px;min-width:24px;cursor:pointer}
+  .cf-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
   .rich{
     min-height:42px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;
     outline:none;line-height:1.55;
@@ -1544,9 +1549,9 @@ function buildAddBlock(node, atIndex){
 /* ============================================================================
    BLOCK EDITOR ①  PARA
 ============================================================================ */
-const SPOT_COLORS = [null,"FF0000","00B0F0","16A34A","D97706","7C3AED"];
-// "Default color" resets the run color WITHOUT touching bold/italic. (removeFormat
-// would strip b/i too, so we re-apply the body text color instead.)
+// First swatch is an explicit Black (clearer than a "remove color" swatch that
+// also renders black). Applying black sets the run color without touching b/i.
+const SPOT_COLORS = ["000000","FF0000","00B0F0","16A34A","D97706","7C3AED"];
 const BODY_DEFAULT_COLOR = "000000";
 
 // One contenteditable holding several <p> paragraphs. Enter -> a new <p> (a new
@@ -1675,10 +1680,10 @@ function buildProseEditor(host, node, seg){
   tb.appendChild(bulletBtn); tb.appendChild(numBtn);
   tb.appendChild(el("span",{class:"mt-sep"}));
   SPOT_COLORS.forEach(c=>{
-    const sw = el("span",{class:"swatch", title: c?("#"+c):T("para.color_default","Default color"),
-      style:{background: c?("#"+c):"linear-gradient(135deg,#fff 45%,#cbd5e1 50%,#fff 55%)"},
+    const sw = el("span",{class:"swatch", title: c==="000000"?T("para.color_black","Black"):("#"+c),
+      style:{background:"#"+c},
       onmousedown:(e)=>{ e.preventDefault();
-        document.execCommand("foreColor", false, "#"+(c||BODY_DEFAULT_COLOR));
+        document.execCommand("foreColor", false, "#"+c);
         editor.focus(); serialize(); refresh(); }});
     tb.appendChild(sw);
   });
@@ -1862,6 +1867,21 @@ function colorFromStyle(style){
   return cssColorToHex(m[1].trim());
 }
 function colorFromAttr(node){ const c = node.getAttribute && node.getAttribute("color"); return c?cssColorToHex(c):null; }
+
+/* ---- free-table cell value: plain string (simple) OR {runs:[...]} (styled) ---- */
+function cellRuns(v){
+  if (v && typeof v === "object" && Array.isArray(v.runs)) return v.runs.length ? v.runs : [{t:""}];
+  return [{ t: v==null ? "" : String(v) }];
+}
+function cellText(v){ return cellRuns(v).map(r=>r.t||"").join(""); }
+function cellHtml(v){ return runsToHtml(cellRuns(v)) || ""; }
+// Collapse runs to a plain string when nothing is styled (compact data + markdown).
+function normalizeCell(runs){
+  const rs = (runs||[]).filter(r=> r && (r.t||"") !== "");
+  if (!rs.length) return "";
+  if (rs.some(r=> r.b || r.i || r.color)) return { runs: rs };
+  return rs.map(r=>r.t||"").join("");
+}
 function cssColorToHex(c){
   c = c.trim();
   let m = /^#([0-9a-f]{6})$/i.exec(c); if (m) return m[1].toUpperCase();
@@ -2120,7 +2140,7 @@ function editTable(host, block){
     block.rows.forEach((row, ri)=>{
       const tr = el("tr",{class: ri<block.header_rows?"hdr":""});
       row.forEach((val, ci)=>{
-        const cellDiv = el("div",{class:"cell", text:val});   // NOTE: not contenteditable in select mode
+        const cellDiv = el("div",{class:"cell", html: cellHtml(val)});   // rich: styled runs render as HTML
         const td = el("td",{},[cellDiv]);
         td.addEventListener("contextmenu",(e)=> openTableCellMenu(e, block, ri, ci, rebuild));
         if (ci < nCols-1){                                    // grip on every interior border (skip last col)
@@ -2129,9 +2149,12 @@ function editTable(host, block){
           td.appendChild(grip);
         }
         regCell(ctx, {
-          r:ri, c:ci, type:"text", el:cellDiv,
-          read: ()=> block.rows[ri][ci] ?? "",
-          write:(s)=>{ block.rows[ri][ci] = s; cellDiv.textContent = s; },
+          r:ri, c:ci, type:"text", el:cellDiv, rich:true,
+          read: ()=> cellText(block.rows[ri][ci]),                 // plain text for copy / TSV / fill-down
+          write:(s)=>{ block.rows[ri][ci] = s; cellDiv.innerHTML = cellHtml(s); },
+          writeRich:(elm)=>{ const v = normalizeCell(htmlToRuns(elm)); block.rows[ri][ci] = v; cellDiv.innerHTML = cellHtml(v); },
+          getRaw: ()=> block.rows[ri][ci],
+          setRaw:(v)=>{ block.rows[ri][ci] = v; cellDiv.innerHTML = cellHtml(v); },
         });
         tr.appendChild(td);
       });
@@ -2210,12 +2233,35 @@ function openTableCellMenu(e, block, r, c, rebuild){
   menu.style.top  = Math.min(e.clientY, vh-h-6) + "px";
 }
 
-/* ---- Markdown <-> free table -------------------------------------------------- */
+/* ---- Markdown <-> free table (cells may be styled runs: **bold** *italic*) ---- */
+function runsToInlineMd(runs){
+  return (runs||[]).map(r=>{
+    let t = String(r.t||"").replace(/\\/g,"\\\\").replace(/\|/g,"\\|").replace(/\*/g,"\\*").replace(/\n/g," ");
+    if (!t) return "";
+    if (r.i) t = "*"+t+"*";
+    if (r.b) t = "**"+t+"**";
+    return t;
+  }).join("");
+}
+function inlineMdToRuns(s){
+  const runs=[]; let buf="", b=false, it=false, i=0; const n=s.length;
+  const flush=()=>{ if(buf){ const r={t:buf}; if(b)r.b=true; if(it)r.i=true; runs.push(r); buf=""; } };
+  while(i<n){
+    const ch=s[i];
+    if(ch==="\\" && i+1<n){ buf+=s[i+1]; i+=2; continue; }     // unescape \*, \\, \|
+    if(s.startsWith("***",i)){ flush(); b=!b; it=!it; i+=3; continue; }
+    if(s.startsWith("**",i)){ flush(); b=!b; i+=2; continue; }
+    if(ch==="*"){ flush(); it=!it; i+=1; continue; }
+    buf+=ch; i++;
+  }
+  flush();
+  return runs.length ? runs : [{t:""}];
+}
 function tableToMarkdown(block){
   const rows = block.rows || []; if (!rows.length) return "";
   const ncols = colCount(block);
-  const esc = s => String(s==null?"":s).replace(/\\/g,"\\\\").replace(/\|/g,"\\|").replace(/\n/g," ");
-  const fmt = r => "| " + Array.from({length:ncols}, (_,c)=>esc((r||[])[c])).join(" | ") + " |";
+  const cellMd = v => runsToInlineMd(cellRuns(v));
+  const fmt = r => "| " + Array.from({length:ncols}, (_,c)=>cellMd((r||[])[c])).join(" | ") + " |";
   const hc = Math.min(Math.max(block.header_rows||0, 1), rows.length);   // a Markdown table needs >=1 header row
   const out = [];
   for (let i=0;i<hc;i++) out.push(fmt(rows[i]));
@@ -2230,7 +2276,10 @@ function parseMarkdownTable(md){
     let s = l.trim(); if (s.startsWith("|")) s = s.slice(1); if (s.endsWith("|")) s = s.slice(0,-1);
     const cells=[]; let cur="";
     for (let i=0;i<s.length;i++){ const ch=s[i];
-      if (ch==="\\"){ cur += (s[i+1]||""); i++; continue; }   // \| -> |, \\ -> \
+      if (ch==="\\"){ const nx = s[i+1]||"";
+        if (nx==="|"){ cur += "|"; i++; continue; }            // \| -> literal pipe (delimiter escaped)
+        cur += "\\"+nx; i++; continue;                          // keep other escapes for the inline parser
+      }
       if (ch==="|"){ cells.push(cur.trim()); cur=""; continue; }
       cur += ch;
     }
@@ -2239,7 +2288,7 @@ function parseMarkdownTable(md){
   const dataLines=[]; let sepAt=-1;
   raw.forEach(l => { if (isSep(l)){ if (sepAt<0) sepAt = dataLines.length; return; } dataLines.push(l); });
   if (!dataLines.length) return null;
-  const rows = dataLines.map(splitRow);
+  const rows = dataLines.map(line => splitRow(line).map(cell => normalizeCell(inlineMdToRuns(cell))));
   const ncols = rows.reduce((m,r)=>Math.max(m,r.length),0);
   rows.forEach(r => { while (r.length < ncols) r.push(""); });
   const header_rows = sepAt>=0 ? Math.min(sepAt, rows.length) : (rows.length>1 ? 1 : 0);
@@ -2971,10 +3020,12 @@ function selectAll(ctx){ setAnchor(ctx,0,0); ctx.focus={r:ctx.rows()-1,c:ctx.col
 function enterEdit(ctx, ad, keepText){
   if (ad.type==="select") return;
   ctx.editing = ad;
-  ad._pre = ad.read();                                   // for Esc revert
+  ad._pre = ad.read();                                   // for Esc revert (plain)
+  if (ad.getRaw) ad._preRaw = ad.getRaw();               // rich cells revert to the exact value
   ad.el.setAttribute("contenteditable","true");
   ad.el.classList.add("gi-editing");
   if (!keepText) ad.el.textContent="";                   // "type to replace"
+  if (ad.rich) showCellFmt(ctx, ad);                     // B / I / color toolbar for styled cells
   // plain-text paste interceptor while editing this cell (decision 14)
   if (!ad.el.__giPaste){
     ad.el.addEventListener("paste",(e)=>{
@@ -2994,19 +3045,58 @@ function enterEdit(ctx, ad, keepText){
 }
 function commitEdit(ctx){
   const ad=ctx.editing; if(!ad) return;
-  ad.write(ad.el.textContent);                           // canonical typed write (re-validates)
+  if (ad.rich && ad.writeRich) ad.writeRich(ad.el);      // serialize styled HTML -> runs
+  else ad.write(ad.el.textContent);                      // canonical typed write (re-validates)
   markDirty();
   ad.el.removeAttribute("contenteditable");
   ad.el.classList.remove("gi-editing");
+  hideCellFmt();
   ctx.editing=null; saveProject(true);
 }
 function cancelEdit(ctx){
   const ad=ctx.editing; if(!ad) return;
-  ad.write(ad._pre);                                     // REVERT to pre-edit value (decision 1)
+  if (ad.rich && ad.setRaw) ad.setRaw(ad._preRaw);       // REVERT to pre-edit value (rich)
+  else ad.write(ad._pre);                                // REVERT to pre-edit value (decision 1)
   ad.el.removeAttribute("contenteditable");
   ad.el.classList.remove("gi-editing");
+  hideCellFmt();
   ctx.editing=null;
 }
+/* ---- floating B/I/color toolbar for a styled cell being edited -------------- */
+let _cellFmtEl = null, _cellFmtCtx = null;
+function ensureCellFmt(){
+  if (_cellFmtEl) return _cellFmtEl;
+  const bar = el("div",{class:"cell-fmt", id:"cellfmt"});
+  const btn = (html,title,cmd)=> el("button",{class:"cf-btn", html, title,
+    onmousedown:(e)=>{ e.preventDefault(); document.execCommand(cmd); }});
+  bar.appendChild(btn("<b>B</b>", T("para.bold","Bold"), "bold"));
+  bar.appendChild(btn("<i>I</i>", T("para.italic","Italic"), "italic"));
+  bar.appendChild(el("span",{class:"mt-sep"}));
+  SPOT_COLORS.forEach(c=>{
+    bar.appendChild(el("span",{class:"swatch", title:c==="000000"?T("para.color_black","Black"):("#"+c),
+      style:{background:"#"+c},
+      onmousedown:(e)=>{ e.preventDefault(); document.execCommand("foreColor", false, "#"+c); }}));
+  });
+  document.body.appendChild(bar);
+  // clicking outside the cell + toolbar commits the edit (and hides the bar)
+  document.addEventListener("mousedown",(e)=>{
+    if (!_cellFmtEl || _cellFmtEl.style.display==="none") return;
+    if (_cellFmtEl.contains(e.target)) return;
+    if (_cellFmtCtx && _cellFmtCtx.editing && _cellFmtCtx.editing.el.contains(e.target)) return;
+    if (_cellFmtCtx && _cellFmtCtx.editing) commitEdit(_cellFmtCtx); else hideCellFmt();
+  });
+  _cellFmtEl = bar; return bar;
+}
+function showCellFmt(ctx, ad){
+  const bar = ensureCellFmt(); _cellFmtCtx = ctx;
+  bar.style.display = "flex";
+  const r = ad.el.getBoundingClientRect(), h = bar.offsetHeight || 30;
+  let top = r.top - h - 6; if (top < 4) top = r.bottom + 6;   // flip below when no room above
+  bar.style.left = Math.max(4, Math.round(r.left)) + "px";
+  bar.style.top  = Math.round(top) + "px";
+}
+function hideCellFmt(){ if (_cellFmtEl) _cellFmtEl.style.display="none"; }
+
 // M15: persist an in-flight cell before a structural rebuild (no-op when not editing).
 function flushGridEdit(ctx){
   if (ctx && ctx.editing) commitEdit(ctx);
@@ -3625,7 +3715,7 @@ function previewFreeTable(block, chap, seq){
     const tr = el("tr",{class: ri < hr ? "pv-hdr" : ""});
     (row || []).forEach(cell=>{
       const td = el(ri < hr ? "th" : "td", {class:"pv-td"});
-      td.textContent = (cell == null ? "" : String(cell));
+      td.innerHTML = cellHtml(cell);                 // styled runs render as HTML
       tr.appendChild(td);
     });
     tbl.appendChild(tr);

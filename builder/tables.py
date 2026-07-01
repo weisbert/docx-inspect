@@ -131,6 +131,43 @@ def _set_cell_text(cell, val, font_pt, ascii_font="Arial", eastasia="SimSun",
         f.color.rgb = RGBColor.from_string(color)
 
 
+def _set_cell_runs(cell, runs, font_pt, ascii_font="Arial", eastasia="SimSun",
+                   header_bold=False):
+    """Render styled runs [{t, b, i, color}] into a cell (per-run bold/italic/color).
+    Mirrors _set_cell_text but supports several runs, so a free-table cell can carry
+    the same inline styling as a body paragraph."""
+    cell.text = ""
+    p = cell.paragraphs[0]
+    if font_pt:
+        p.alignment = ALIGN.CENTER
+        pf = p.paragraph_format
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+        pf.line_spacing = Pt(font_pt + 1)
+        _vcenter(cell)
+    for rn in (runs or []):
+        run = p.add_run(rn.get("t", ""))
+        f = run.font
+        if font_pt:
+            f.name = ascii_font
+            f.size = Pt(font_pt)
+            rpr = run._r.get_or_add_rPr()
+            rf = rpr.find(qn("w:rFonts"))
+            if rf is None:
+                rf = OxmlElement("w:rFonts")
+                rpr.insert(0, rf)
+            rf.set(qn("w:ascii"), ascii_font)
+            rf.set(qn("w:hAnsi"), ascii_font)
+            rf.set(qn("w:eastAsia"), eastasia)
+        if bool(rn.get("b")) or header_bold:   # only set when true -> no stray <w:b w:val="0"/>
+            f.bold = True
+        if rn.get("i"):
+            f.italic = True
+        if rn.get("color"):
+            f.color.rgb = RGBColor.from_string(rn["color"])
+
+
 # ---------------------------------------------------------------------------
 # Compliance data model helpers (group / axis / limit logic) -- config driven
 # ---------------------------------------------------------------------------
@@ -484,7 +521,10 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
             cell = table.cell(r, c)
             if r < header_rows:
                 _shade(cell, header_fill)
-            if font_pt:
+            runs = val.get("runs") if isinstance(val, dict) else None
+            if isinstance(runs, list):
+                _set_cell_runs(cell, runs, font_pt, header_bold=(r < header_rows))
+            elif font_pt:
                 _set_cell_text(cell, val, font_pt, bold=(r < header_rows), align="center")
             else:
                 cell.text = "" if val is None else str(val)
