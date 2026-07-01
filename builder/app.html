@@ -47,7 +47,11 @@
   .tb-btn:disabled{opacity:.5;cursor:not-allowed}
   .tb-title{font-weight:650;cursor:pointer;padding:0 6px;color:var(--ink)}
   .tb-title:hover{color:var(--accent)}
-  #status{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+  /* fixed width + right-aligned so the changing status text (Saving…/Autosaved …)
+     never re-triggers the toolbar's flex-wrap -> no layout bounce on every save */
+  #status{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;
+    width:210px;flex-shrink:0;justify-content:flex-end;white-space:nowrap;overflow:hidden}
+  #status-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
   .dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1}
   .dot.saved{background:var(--ok)} .dot.dirty{background:var(--warn)} .dot.saving{background:var(--accent)}
   .dot.err{background:var(--danger)}
