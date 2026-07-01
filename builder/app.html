@@ -440,6 +440,8 @@
     <button class="tb-btn" id="btn-open"   data-ui="toolbar.open">Open</button>
     <button class="tb-btn" id="btn-new"    data-ui="toolbar.new">New</button>
     <button class="tb-btn primary" id="btn-save" data-ui="toolbar.save">Save</button>
+    <button class="tb-btn" id="btn-undo" data-ui="toolbar.undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+    <button class="tb-btn" id="btn-redo" data-ui="toolbar.redo" title="Redo (Ctrl+Y / Ctrl+Shift+Z)">↷ Redo</button>
     <span class="tb-sep"></span>
     <button class="tb-btn" id="btn-docx" data-ui="toolbar.export_docx">Export Word</button>
     <button class="tb-btn" id="btn-pdf"  data-ui="toolbar.export_pdf">Export PDF</button>
@@ -560,6 +562,77 @@ function markDirty(){
   App.dirty = true;
   setStatus("dirty", T("status.unsaved","Unsaved changes"));
   scheduleAutosave();
+  pjScheduleSnapshot();
+}
+
+/* ============================================================================
+   PROJECT-LEVEL UNDO / REDO
+   Coarse, whole-project snapshots (JSON of App.project) coalesced by an idle
+   timer, so a burst of edits collapses into one undo step. Native Ctrl+Z still
+   handles character-level undo while a text field / cell is focused; this kicks
+   in for structural changes (blocks, sections, tables, moves, ...).
+============================================================================ */
+const PJ_UNDO_CAP = 60, PJ_IDLE_MS = 500;
+function pjSnapshot(){ return App.project ? JSON.stringify(App.project) : null; }
+function pjResetUndo(){
+  App._undo = []; App._redo = [];
+  App._lastSnap = pjSnapshot();
+  if (App._undoT){ clearTimeout(App._undoT); App._undoT = null; }
+  updateUndoButtons();
+}
+function pjScheduleSnapshot(){
+  if (App._restoring || !App.project) return;
+  if (App._lastSnap == null) App._lastSnap = pjSnapshot();
+  if (App._undoT) clearTimeout(App._undoT);
+  App._undoT = setTimeout(pjCommitSnapshot, PJ_IDLE_MS);
+}
+function pjCommitSnapshot(){
+  App._undoT = null;
+  const cur = pjSnapshot();
+  if (cur == null || cur === App._lastSnap) return;
+  App._undo = App._undo || []; App._undo.push(App._lastSnap);
+  if (App._undo.length > PJ_UNDO_CAP) App._undo.shift();
+  App._redo = [];
+  App._lastSnap = cur;
+  updateUndoButtons();
+}
+function pjCommitNow(){ if (App._undoT){ clearTimeout(App._undoT); App._undoT = null; } pjCommitSnapshot(); }
+function pjRestore(json){
+  App._restoring = true;
+  try{
+    App.project = JSON.parse(json);
+    if (App.selId !== COVER_ID && !findNode(App.selId)) App.selId = COVER_ID;   // selection may be gone
+    App._lastSnap = json;
+    App.dirty = true;
+    render();
+  } finally { App._restoring = false; }
+  saveProject(true);
+  updateUndoButtons();
+}
+function projectUndo(){
+  if (!App.project) return;
+  flushActiveGrid(); pjCommitNow();                     // fold the in-flight burst into history
+  if (!App._undo || !App._undo.length){ toast(T("toast.nothing_undo","Nothing to undo")); return; }
+  App._redo = App._redo || []; App._redo.push(pjSnapshot());
+  pjRestore(App._undo.pop());
+}
+function projectRedo(){
+  if (!App.project) return;
+  flushActiveGrid();
+  if (App._undoT){ clearTimeout(App._undoT); App._undoT = null; }
+  if (!App._redo || !App._redo.length){ toast(T("toast.nothing_redo","Nothing to redo")); return; }
+  App._undo = App._undo || []; App._undo.push(pjSnapshot());
+  pjRestore(App._redo.pop());
+}
+function updateUndoButtons(){
+  const u = $("#btn-undo"), r = $("#btn-redo");
+  if (u) u.disabled = !(App.project && App._undo && App._undo.length);
+  if (r) r.disabled = !(App.project && App._redo && App._redo.length);
+}
+function isTextEditing(el){
+  if (!el) return false;
+  const tag = (el.tagName || "").toLowerCase();
+  return tag==="input" || tag==="textarea" || el.isContentEditable===true;
 }
 function scheduleAutosave(){
   clearTimeout(App.autosaveTimer);
@@ -661,6 +734,7 @@ async function newProject(){
         App.project = newProjectObject();
         App.dir = dir;
         App.selId = COVER_ID;
+        pjResetUndo();
         App.view = "editor";
         render();
         await saveProject(false);
@@ -709,6 +783,7 @@ async function openProject(dir){
     App.project.outline = App.project.outline || [];
     ensureProjectIds(App.project.outline);
     App.dir = dir; App.selId = COVER_ID; App.dirty=false;
+    pjResetUndo();
     App.view = "editor";
     render();
     setStatus("saved", T("status.opened","Project opened"));
@@ -2080,10 +2155,20 @@ function editTable(host, block){
 
   const tools = el("div",{class:"grid-tools"});
   const mkBtn=(t,fn)=>el("button",{class:"sm-btn",text:t,onclick:fn});
-  tools.appendChild(mkBtn("+ "+T("table.row","Row"), ()=>{ insertTableRow(block, block.rows.length); markDirty(); rebuild(); }));
-  tools.appendChild(mkBtn("+ "+T("table.col","Col"), ()=>{ insertTableCol(block, colCount(block)); markDirty(); rebuild(); }));
-  tools.appendChild(mkBtn("− "+T("table.row","Row"), ()=>{ if(deleteTableRow(block, block.rows.length-1)){ markDirty(); rebuild(); } }));
-  tools.appendChild(mkBtn("− "+T("table.col","Col"), ()=>{ if(deleteTableCol(block, colCount(block)-1)){ markDirty(); rebuild(); } }));
+  const mkBtnT = (t,title,fn)=> el("button",{class:"sm-btn", text:t, title, onclick:fn});
+  // Row/Col ops target the SELECTED cell's row/column (fall back to the last one
+  // when nothing is selected). Grouped: rows together, then columns together.
+  const curR = ()=> (ctx.focus ? ctx.focus.r : block.rows.length-1);
+  const curC = ()=> (ctx.focus ? ctx.focus.c : colCount(block)-1);
+  tools.appendChild(mkBtnT("+ "+T("table.row","Row"), T("table.add_row_ht","Insert a row below the selected row"),
+    ()=>{ insertTableRow(block, curR()+1); markDirty(); rebuild(); }));
+  tools.appendChild(mkBtnT("− "+T("table.row","Row"), T("table.del_row_ht","Delete the selected row"),
+    ()=>{ if(deleteTableRow(block, curR())){ markDirty(); rebuild(); } }));
+  tools.appendChild(el("span",{class:"mt-sep"}));
+  tools.appendChild(mkBtnT("+ "+T("table.col","Col"), T("table.add_col_ht","Insert a column right of the selected column"),
+    ()=>{ insertTableCol(block, curC()+1); markDirty(); rebuild(); }));
+  tools.appendChild(mkBtnT("− "+T("table.col","Col"), T("table.del_col_ht","Delete the selected column"),
+    ()=>{ if(deleteTableCol(block, curC())){ markDirty(); rebuild(); } }));
   tools.appendChild(el("span",{class:"mt-sep"}));
   tools.appendChild(el("label",{style:{color:"var(--muted)",fontSize:"13px"}, text:T("table.header_rows","Header rows:")}));
   const hdrInput = el("input",{class:"ti num", type:"number", min:"0", value:block.header_rows, style:{width:"64px"},
@@ -3343,6 +3428,9 @@ function syncChrome(){
   // export buttons are project-only; allow exporting straight from the preview too
   ["#btn-docx","#btn-pdf"].forEach(s=>{ $(s).disabled = !(inEditor || inPreview); });
   $("#btn-save").disabled = !(inEditor || inTemplate || inChecklist);
+  // undo/redo live in the editor only; enabled state reflects the stacks
+  ["#btn-undo","#btn-redo"].forEach(s=>{ const b=$(s); if(b) b.classList.toggle("hidden", !inEditor); });
+  updateUndoButtons();
   $("#btn-open").disabled = inTemplate;
   $("#btn-new").disabled  = inTemplate;
   // preview makes #editor a non-scrolling full-bleed host so .pv-wrap scrolls and
@@ -4598,6 +4686,8 @@ function wireToolbar(){
   $("#btn-new").onclick  = newProject;
   // route Save by current view: project editor -> saveProject, template editor -> persistTemplate (save in place)
   $("#btn-save").onclick = ()=>{ flushActiveGrid(); if (App.view === "template") persistTemplate({stay:true}); else saveProject(false); };
+  $("#btn-undo").onclick = projectUndo;
+  $("#btn-redo").onclick = projectRedo;
   $("#btn-docx").onclick = ()=>exportProject("docx");
   $("#btn-pdf").onclick   = ()=>exportProject("pdf");
   $("#btn-preview").onclick = enterPreview;
@@ -4651,10 +4741,17 @@ function wireGlobal(){
       flushActiveGrid();   // commit any in-flight grid cell so a manual save persists it
       if (App.view === "template") persistTemplate({stay:true}); else saveProject(false);
     }
-    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z"){
+    const kz = (e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z";
+    const kredo = (e.ctrlKey||e.metaKey) && (e.key.toLowerCase()==="y" || (e.shiftKey && e.key.toLowerCase()==="z"));
+    if (kredo){
+      if (!isTextEditing(document.activeElement)){ e.preventDefault(); projectRedo(); }
+      return;
+    }
+    if (kz && !e.shiftKey){
       const ae = document.activeElement;
       const giCtx = (ae && ae.__giCtx) || (ae && ae.closest && (()=>{ const h=ae.closest("[tabindex]"); return h && h.__giCtx; })());
-      if (giCtx && !giCtx.editing){ e.preventDefault(); gridUndo(giCtx); }
+      if (giCtx && !giCtx.editing){ e.preventDefault(); gridUndo(giCtx); return; }   // grid-granular undo
+      if (!isTextEditing(ae)){ e.preventDefault(); projectUndo(); }                    // else project-level
     }
   });
   // warn on unload if dirty
