@@ -315,6 +315,147 @@ def add_heading_numbering(doc, num_id=88, abstract_id=88, suffix="space", ascii_
 
 
 # ===========================================================================
+# Body list numbering (native Word multilevel: bullets + decimals)
+# ===========================================================================
+# Per-level bullet glyphs (item 3: solid circle, then hollow square, then filled
+# small square). Numbered levels: 1.  a)  i.  (decimal / lower-alpha / lower-roman).
+_LIST_BULLET_GLYPHS = ["●", "□", "▪", "–"]   # ● □ ▪ –
+_LIST_NUM_FMT = ["decimal", "lowerLetter", "lowerRoman"]
+_LIST_NUM_TEXT = ["%1.", "%2)", "%3."]
+_LIST_LEFT_CM = 0.74      # base left indent (level 0)
+_LIST_STEP_CM = 0.74      # extra indent per nesting level
+_LIST_HANG_CM = 0.53      # hanging indent (marker column width)
+_TWIPS_PER_CM = 567
+
+
+def _list_level_ppr(i):
+    """A <w:pPr><w:ind .../></w:pPr> for numbering level i (left + hanging)."""
+    left = round((_LIST_LEFT_CM + i * _LIST_STEP_CM) * _TWIPS_PER_CM)
+    hang = round(_LIST_HANG_CM * _TWIPS_PER_CM)
+    pPr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), str(left))
+    ind.set(qn("w:hanging"), str(hang))
+    pPr.append(ind)
+    return pPr
+
+
+def _add_num(numbering, num_id, abstract_id, restart=False):
+    """Append a <w:num> mapping num_id -> abstract_id. When restart, override every
+    level's start to 1 so a fresh numbered list begins at 1 (not continuing a prior)."""
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    aid = OxmlElement("w:abstractNumId")
+    aid.set(qn("w:val"), str(abstract_id))
+    num.append(aid)
+    if restart:
+        for i in range(9):
+            ov = OxmlElement("w:lvlOverride")
+            ov.set(qn("w:ilvl"), str(i))
+            so = OxmlElement("w:startOverride")
+            so.set(qn("w:val"), "1")
+            ov.append(so)
+            num.append(ov)
+    numbering.append(num)
+
+
+def build_list_numbering(doc, bullet_abs=90, bullet_num=90, dec_abs=91):
+    """Create one bullet abstractNum (per-level glyphs) and one decimal abstractNum,
+    plus a shared bullet <w:num>. Returns the ids a ListCtx needs. Mirrors the
+    heading-numbering construction (all abstractNum before any num, per schema)."""
+    numbering = doc.part.numbering_part.element
+    abs_b = OxmlElement("w:abstractNum")
+    abs_b.set(qn("w:abstractNumId"), str(bullet_abs))
+    mlb = OxmlElement("w:multiLevelType"); mlb.set(qn("w:val"), "hybridMultilevel")
+    abs_b.append(mlb)
+    abs_d = OxmlElement("w:abstractNum")
+    abs_d.set(qn("w:abstractNumId"), str(dec_abs))
+    mld = OxmlElement("w:multiLevelType"); mld.set(qn("w:val"), "multilevel")
+    abs_d.append(mld)
+    for i in range(9):
+        # bullet level
+        lb = OxmlElement("w:lvl"); lb.set(qn("w:ilvl"), str(i))
+        s = OxmlElement("w:start"); s.set(qn("w:val"), "1"); lb.append(s)
+        nf = OxmlElement("w:numFmt"); nf.set(qn("w:val"), "bullet"); lb.append(nf)
+        lt = OxmlElement("w:lvlText")
+        lt.set(qn("w:val"), _LIST_BULLET_GLYPHS[min(i, len(_LIST_BULLET_GLYPHS) - 1)])
+        lb.append(lt)
+        jc = OxmlElement("w:lvlJc"); jc.set(qn("w:val"), "left"); lb.append(jc)
+        lb.append(_list_level_ppr(i))
+        abs_b.append(lb)
+        # decimal level
+        ld = OxmlElement("w:lvl"); ld.set(qn("w:ilvl"), str(i))
+        s2 = OxmlElement("w:start"); s2.set(qn("w:val"), "1"); ld.append(s2)
+        nf2 = OxmlElement("w:numFmt")
+        nf2.set(qn("w:val"), _LIST_NUM_FMT[i] if i < len(_LIST_NUM_FMT) else "decimal")
+        ld.append(nf2)
+        lt2 = OxmlElement("w:lvlText")
+        lt2.set(qn("w:val"), _LIST_NUM_TEXT[i] if i < len(_LIST_NUM_TEXT) else "%%%d." % (i + 1))
+        ld.append(lt2)
+        jc2 = OxmlElement("w:lvlJc"); jc2.set(qn("w:val"), "left"); ld.append(jc2)
+        ld.append(_list_level_ppr(i))
+        abs_d.append(ld)
+    first = numbering.find(qn("w:num"))
+    for a in (abs_b, abs_d):
+        if first is not None:
+            first.addprevious(a)
+        else:
+            numbering.append(a)
+    _add_num(numbering, bullet_num, bullet_abs)   # bullets: one shared, non-restarting num
+    return {"bullet_num": bullet_num, "dec_abs": dec_abs}
+
+
+class ListCtx:
+    """Allocates numbering references for body list paragraphs. Bullets share one
+    num; each *numbered list* gets a fresh restarting num. A numbered list restarts
+    only at a new section (new_section), so numbered items keep counting across
+    intervening non-numbered paragraphs (e.g. a label line followed by a URL line)."""
+
+    def __init__(self, doc, ids, start_num_id=100):
+        self.doc = doc
+        self.bullet_num = ids["bullet_num"]
+        self.dec_abs = ids["dec_abs"]
+        self._next = start_num_id
+        self._active_dec = None
+
+    def new_section(self):
+        self._active_dec = None
+
+    def bullet(self, level):
+        return self.bullet_num, level
+
+    def number(self, level):
+        if self._active_dec is None:
+            self._active_dec = self._next
+            self._next += 1
+            _add_num(self.doc.part.numbering_part.element, self._active_dec,
+                     self.dec_abs, restart=True)
+        return self._active_dec, level
+
+
+def _apply_list(p, list_kind, level, list_ctx):
+    """Attach numbering (numPr) + an explicit per-level indent to paragraph p. The
+    explicit indent overrides the body style's first-line indent for list items."""
+    if list_ctx is None or list_kind not in ("bullet", "number"):
+        return
+    level = max(0, min(_as_int(level, 0), 8))
+    if list_kind == "bullet":
+        num_id, ilvl = list_ctx.bullet(level)
+    else:
+        num_id, ilvl = list_ctx.number(level)
+    pPr = p._p.get_or_add_pPr()
+    for old in pPr.findall(qn("w:numPr")):
+        pPr.remove(old)
+    numPr = OxmlElement("w:numPr")
+    il = OxmlElement("w:ilvl"); il.set(qn("w:val"), str(ilvl)); numPr.append(il)
+    nid = OxmlElement("w:numId"); nid.set(qn("w:val"), str(num_id)); numPr.append(nid)
+    pPr.append(numPr)
+    pf = p.paragraph_format
+    pf.left_indent = Cm(_LIST_LEFT_CM + level * _LIST_STEP_CM)
+    pf.first_line_indent = Cm(-_LIST_HANG_CM)
+
+
+# ===========================================================================
 # Document setup from config (page / styles / header / footer / cover)
 # ===========================================================================
 def _apply_page_and_styles(doc, styles):
@@ -351,6 +492,8 @@ def _apply_page_and_styles(doc, styles):
     an = hd["autonumber"]
     add_heading_numbering(doc, num_id=an.get("num_id", 88), abstract_id=an.get("num_id", 88),
                           suffix=an.get("suffix", "space"), ascii_font=an.get("ascii", "Arial"))
+    # body list numbering (bullets + decimals) -- ids threaded out via names
+    list_ids = build_list_numbering(doc)
     # Heading 1 bottom border (chapter rule)
     h1b = hd["h1_bottom_border"]
     pPr = doc.styles["Heading 1"].element.get_or_add_pPr()
@@ -374,7 +517,9 @@ def _apply_page_and_styles(doc, styles):
     bd = styles["body"]
     body = new_style(doc, bd.get("name", "body"), base=bd.get("base", "Normal"))
     style_font(body, size=bd["size_pt"])
-    style_para(body, left=bd["left_cm"], before=6, after=2)
+    # first_line_cm is optional; when set it gives ordinary body paragraphs a
+    # first-line indent. Absent -> unchanged (backward compatible).
+    style_para(body, left=bd["left_cm"], first_line=bd.get("first_line_cm"), before=6, after=2)
 
     mb = styles["mybody"]
     mybody = new_style(doc, mb["name"], base=mb.get("base", bd.get("name", "body")))
@@ -387,7 +532,8 @@ def _apply_page_and_styles(doc, styles):
     style_font(doc.styles["Header"], ascii=ht["title_font"].get("ascii", "Arial"), size=9)
     style_font(doc.styles["Footer"], ascii=ft["font"]["ascii"], size=ft["font"]["size_pt"])
 
-    return {"body_name": bd.get("name", "body"), "mybody_name": mb["name"]}
+    return {"body_name": bd.get("name", "body"), "mybody_name": mb["name"],
+            "list_ids": list_ids}
 
 
 def _build_header(doc, styles, meta, logo_path):
@@ -597,19 +743,26 @@ def _build_toc(doc, cfg):
 # ===========================================================================
 # Body: outline traversal + the four block types
 # ===========================================================================
-def _render_fixed_body(doc, fb, names):
-    style_name = fb.get("style", names["body_name"])
-    # map config style aliases to actual style names
+def _resolve_style_alias(style_name, names):
+    """Map the config style aliases 'body'/'mybody' to their real style names."""
     if style_name in ("body", names["body_name"]):
-        style_name = names["body_name"]
-    elif style_name in ("mybody", names["mybody_name"]):
-        style_name = names["mybody_name"]
+        return names["body_name"]
+    if style_name in ("mybody", names["mybody_name"]):
+        return names["mybody_name"]
+    return style_name
+
+
+def _render_fixed_body(doc, fb, names, list_ctx=None):
+    fb_style = fb.get("style", names["body_name"])
     for para in fb["paragraphs"]:
+        # a paragraph may override the block style and may be a list item
+        style_name = _resolve_style_alias(para.get("style", fb_style), names)
         p = doc.add_paragraph(style=style_name)
         for run in para["runs"]:
             r = p.add_run(run.get("t", ""))
             run_fmt(r, ascii=run.get("ascii"), eastasia=run.get("eastAsia"),
                     bold=run.get("b"), italic=run.get("i"), color=run.get("color"))
+        _apply_list(p, para.get("list"), para.get("level", 0), list_ctx)
 
 
 def _as_int(v, default):
@@ -676,14 +829,12 @@ def _render_ref_run(p, ref_id, ref_targets, warn=None):
     add_field(p, " REF %s \\h " % bname, placeholder=ref_targets[ref_id] or "?")
 
 
-def _render_para(doc, block, body_name, ref_targets=None, warn=None):
-    lst = block.get("list")
-    if lst == "bullet":
-        p = doc.add_paragraph(style="List Bullet")
-    elif lst == "number":
-        p = doc.add_paragraph(style="List Number")
-    else:
-        p = doc.add_paragraph(style=body_name)
+def _render_para(doc, block, names, ref_targets=None, warn=None, list_ctx=None):
+    # Honor a per-block style alias ('body'/'mybody'); default to body. List glyph/
+    # number + indent come from _apply_list so a bullet/number item is a styled
+    # paragraph with numbering (not an uncustomized built-in List Bullet/Number).
+    style_name = _resolve_style_alias(block.get("style", names["body_name"]), names)
+    p = doc.add_paragraph(style=style_name)
     targets = ref_targets if ref_targets is not None else {}
     for run in block.get("runs", []):
         ref_id = run.get("ref") if isinstance(run, dict) else None
@@ -692,6 +843,7 @@ def _render_para(doc, block, body_name, ref_targets=None, warn=None):
         else:
             _add_formatted_run(p, run.get("t", ""), bold=run.get("b"),
                                italic=run.get("i"), color=run.get("color"))
+    _apply_list(p, block.get("list"), block.get("level", 0), list_ctx)
 
 
 def _image_settings(cfg):
@@ -779,6 +931,10 @@ def _render_image_grid(doc, block, project_dir, chap, seq, cfg, warn=None):
                 cell = table.cell(r, c)
                 cell.width = Cm(cell_w)
                 cell.text = ""
+                # bottom-align so unequal image heights still leave the (a)(b)
+                # sub-captions on a single baseline across the row
+                if show_sub:
+                    tables._vbottom(cell)
                 p = cell.paragraphs[0]
                 p.alignment = ALIGN.CENTER
                 if idx < n:
@@ -984,6 +1140,7 @@ def _build_outline(doc, cfg, outline, names):
     export. Caption / figure counters are incremented BEFORE the block body so a
     failure mid-render leaves the numbering of later blocks unchanged."""
     body_name = names["body_name"]
+    list_ctx = ListCtx(doc, names["list_ids"]) if names.get("list_ids") else None
     fixed_bodies = cfg.get("fixed_bodies", {})
     comp_cfg = cfg["compliance"]
     free_cfg = cfg.get("free_table", {})
@@ -1007,12 +1164,14 @@ def _build_outline(doc, cfg, outline, names):
             state["tbl_seq"][state["chap"]] = 0
         chap = state["chap"]
         doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
+        if list_ctx:
+            list_ctx.new_section()   # numbered lists restart per section
 
         # fixed body wins over blocks
         fb_key = node.get("fixed_body")
         if fb_key and fb_key in fixed_bodies:
             try:
-                _render_fixed_body(doc, fixed_bodies[fb_key], names)
+                _render_fixed_body(doc, fixed_bodies[fb_key], names, list_ctx)
             except Exception as ex:
                 _render_block_error(doc, ex)
                 warn({"type": "block_error",
@@ -1033,8 +1192,9 @@ def _build_outline(doc, cfg, outline, names):
                 tbl_seq = state["tbl_seq"][chap]
                 try:
                     if btype == "para":
-                        _render_para(doc, block, body_name,
-                                     ref_targets=ref_targets, warn=warn)
+                        _render_para(doc, block, names,
+                                     ref_targets=ref_targets, warn=warn,
+                                     list_ctx=list_ctx)
                     elif btype == "image":
                         _render_image(doc, block, cfg["_project_dir"], chap,
                                       seq, cfg, warn=warn)

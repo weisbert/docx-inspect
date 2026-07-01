@@ -138,9 +138,16 @@
   .rich.multi p.pp:last-child{margin-bottom:0}
   .rich.multi{counter-reset:linum}
   .rich.multi p.li-bullet{list-style:none;padding-left:1.5em;position:relative}
-  .rich.multi p.li-bullet::before{content:"\2022";position:absolute;left:.45em;color:var(--muted)}
+  /* per-level glyphs mirror the engine/preview: ● □ ▪ – (Tab / Shift+Tab to nest) */
+  .rich.multi p.li-bullet::before{content:"\25CF";position:absolute;left:.45em;color:var(--muted);font-size:.9em}
+  .rich.multi p.li-bullet[data-level="1"]::before{content:"\25A1"}
+  .rich.multi p.li-bullet[data-level="2"]::before{content:"\25AA"}
+  .rich.multi p.li-bullet[data-level="3"]::before{content:"\2013"}
   .rich.multi p.li-number{list-style:none;padding-left:1.9em;position:relative;counter-increment:linum}
   .rich.multi p.li-number::before{content:counter(linum) ".";position:absolute;left:.3em;color:var(--muted)}
+  .rich.multi p.pp[data-level="1"]{margin-left:1.8em}
+  .rich.multi p.pp[data-level="2"]{margin-left:3.6em}
+  .rich.multi p.pp[data-level="3"]{margin-left:5.4em}
   /* cross-reference chip: an atomic, non-editable token in the prose editor */
   .ref-chip{display:inline-block;background:var(--accent-soft);border:1px solid var(--accent);
     color:var(--accent);border-radius:4px;padding:0 5px;margin:0 1px;font-size:.85em;
@@ -200,6 +207,17 @@
   table.grid th{background:#eef1f5}
   table.grid tr.hdr .cell{font-weight:600}
   .cell:focus{background:var(--accent-soft);box-shadow:inset 0 0 0 2px var(--accent)}
+  /* free table only: fixed column widths so typing never re-flows the columns;
+     widths come from the <colgroup> (block.col_w), long tokens wrap instead of
+     widening. The compliance grid keeps its auto layout (dt-grid, not free-grid). */
+  table.grid.free-grid{table-layout:fixed}
+  table.grid.free-grid td,table.grid.free-grid th{position:relative}
+  table.grid.free-grid td .cell,table.grid.free-grid th .cell{overflow-wrap:anywhere}
+  /* draggable grip straddling each interior column border (persists to col_w) */
+  .col-grip{position:absolute;top:0;right:-3px;width:6px;height:100%;z-index:6;
+    cursor:col-resize;user-select:none}
+  .col-grip:hover,.col-grip.active{background:var(--accent)}
+  body.col-resizing,body.col-resizing *{cursor:col-resize!important;user-select:none!important}
   .grid-tools{display:flex;gap:6px;margin:8px 0;flex-wrap:wrap;align-items:center}
   .sm-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 9px;font-size:13px}
   .sm-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
@@ -337,6 +355,11 @@
 
   /* ---- live report preview (read-only, document-like) ---- */
   .pv-wrap{height:100%;overflow:auto;background:#e9ebef;padding:0 0 60px}
+  /* In preview, make .pv-wrap the real scroll container (fill the editor pane,
+     kill its padding) so the sticky top bar actually freezes instead of scrolling
+     away with #editor (whose auto-height inner box broke the sticky context). */
+  #editor.pv-mode{overflow:hidden;padding:0}
+  #editor.pv-mode>#editor-inner{max-width:none;margin:0;height:100%}
   .pv-bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
     padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line)}
   .pv-bar .pv-bar-t{font-weight:600;color:var(--muted);font-size:13px}
@@ -349,21 +372,28 @@
   .pv-title-main{font-size:26px;font-weight:700;letter-spacing:.01em;margin:14px 0 18px}
   .pv-title-meta{display:inline-block;text-align:left;color:#333;font-size:14px;line-height:1.9}
   .pv-ml-k{color:#666}
-  .pv-h{font-weight:700;line-height:1.35;margin:1.3em 0 .5em}
+  .pv-h{font-weight:700;line-height:1.35;margin:1.3em 0 .5em;scroll-margin-top:56px}
   .pv-h1{font-size:21px;border-bottom:1px solid #bbb;padding-bottom:.2em;margin-top:1.5em}
   .pv-h2{font-size:18px} .pv-h3{font-size:16px} .pv-h4{font-size:15px}
   .pv-h5,.pv-h6{font-size:14px}
   .pv-hnum{color:#111;margin-right:.15em;font-variant-numeric:tabular-nums}
-  .pv-p{margin:.45em 0;text-align:justify}
+  .pv-p{margin:.45em 0;text-align:justify;text-indent:2em}
+  /* list items: hanging indent so wrapped lines clear the marker; per-level nesting
+     is added inline via margin-left. Overrides the body first-line indent. */
+  .pv-li{margin:.25em 0;padding-left:1.6em;text-indent:-1.6em;text-align:justify}
   .pv-bullet{margin:.25em 0 .25em 0;padding-left:1.5em;text-indent:-1.1em}
   .pv-bullet::before{content:"\2022\00a0\00a0"}
   .pv-fixed{color:#888;font-style:italic;background:#f6f6f6;border:1px dashed #ccc;
     border-radius:4px;padding:8px 12px;margin:.5em 0;font-size:13px}
   .pv-fig{margin:1.1em 0;text-align:center}
   .pv-img{max-width:100%;height:auto;border:1px solid #ddd}
-  .pv-imgrid{display:grid;gap:8px;justify-items:center;align-items:start}
-  .pv-gcell{width:100%}
-  .pv-sub{font-size:13px;color:#444;margin-top:3px}
+  /* align-items:stretch equalizes cell heights per row; each cell is a flex
+     column whose image box grows and bottom-aligns its picture, so unequal
+     image heights still leave the (a)(b) sub-labels on one baseline. */
+  .pv-imgrid{display:grid;gap:8px;justify-items:center;align-items:stretch}
+  .pv-gcell{width:100%;display:flex;flex-direction:column}
+  .pv-gimg{flex:1;display:flex;align-items:flex-end;justify-content:center;min-height:0}
+  .pv-sub{font-size:13px;color:#444;margin-top:3px;text-align:center}
   .pv-missing{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
     gap:6px;min-width:60%;min-height:120px;color:#b00;background:#fff5f5;
     border:2px dashed #e3a0a0;border-radius:6px;padding:18px;font-size:13px}
@@ -373,7 +403,7 @@
   .pv-tblwrap{margin:1.1em 0}
   .pv-tcap{margin:0 0 6px}
   .pv-table{border-collapse:collapse;width:100%;font-size:13.5px;line-height:1.35}
-  .pv-table .pv-td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:left}
+  .pv-table .pv-td{border:1px solid #888;padding:4px 7px;vertical-align:top;text-align:left;overflow-wrap:anywhere}
   .pv-table tr.pv-hdr>.pv-td,.pv-table tr.pv-hdr>th{background:#eef1f4;font-weight:700;text-align:center}
   .pv-dt{font-size:12px}
   .pv-dt .pv-td{text-align:center;vertical-align:middle;padding:2px 4px}
@@ -383,6 +413,8 @@
   @media print{
     #toolbar,#outline,.pv-bar{display:none !important}
     #app,#main,#editor,#editor-inner,.pv-wrap{height:auto;overflow:visible;background:#fff}
+    #editor.pv-mode{overflow:visible;padding:0}
+    #editor.pv-mode>#editor-inner{height:auto}
     .pv-doc{box-shadow:none;margin:0;max-width:none;padding:0}
   }
 </style>
@@ -1406,6 +1438,7 @@ function makeProseP(b){
   const html = runsToHtml(b.runs);
   p.innerHTML = html || "<br>";   // an empty <p> needs a <br> to stay focusable
   if (b.list){ p.dataset.list = b.list; p.classList.add(b.list==="bullet"?"li-bullet":"li-number"); }
+  if (b.level){ p.dataset.level = String(Math.max(0, Math.min(b.level|0, 8))); }
   return p;
 }
 function elToBlock(pEl){
@@ -1413,7 +1446,10 @@ function elToBlock(pEl){
   // a lone browser-inserted "bogus" <br> in an empty paragraph -> empty run
   if (runs.length===1 && runs[0].t==="\n" && !(pEl.textContent||"").trim()) runs[0].t="";
   const list = (pEl.dataset && pEl.dataset.list) ? pEl.dataset.list : null;
-  return { type:"para", runs, list };
+  const block = { type:"para", runs, list };
+  const lvl = list && pEl.dataset && pEl.dataset.level ? (parseInt(pEl.dataset.level)||0) : 0;
+  if (lvl) block.level = lvl;   // only list items carry a nesting level
+  return block;
 }
 function proseToBlocks(editor){
   const blocks = []; let buf = null;
@@ -1589,7 +1625,17 @@ function buildProseEditor(host, node, seg){
     p.dataset.list = next;
     p.classList.toggle("li-bullet", next==="bullet");
     p.classList.toggle("li-number", next==="number");
+    if (!next) delete p.dataset.level;    // a plain paragraph carries no nesting level
     editor.focus(); serialize(); refresh();
+  };
+  // Tab / Shift+Tab nests a list item one level in/out (0..3 visualized in the editor)
+  const changeLevel = (p, delta)=>{
+    if (!p || !p.dataset.list) return false;
+    const cur = parseInt(p.dataset.level)||0;
+    const nxt = Math.max(0, Math.min(cur+delta, 8));
+    if (nxt) p.dataset.level = String(nxt); else delete p.dataset.level;
+    editor.focus(); serialize(); refresh();
+    return true;
   };
   const refresh = ()=>{
     if (!selInEditor()) return;
@@ -1600,6 +1646,12 @@ function buildProseEditor(host, node, seg){
     numBtn.classList.toggle("on", lst==="number");
   };
 
+  editor.addEventListener("keydown",(e)=>{
+    if (e.key==="Tab"){
+      const p = currentP();
+      if (p && p.dataset.list){ e.preventDefault(); changeLevel(p, e.shiftKey ? -1 : 1); }
+    }
+  });
   editor.addEventListener("input", serialize);
   editor.addEventListener("keyup", ()=>{ refresh(); rememberRange(); });
   editor.addEventListener("mouseup", ()=>{ refresh(); rememberRange(); });
@@ -1906,13 +1958,27 @@ function editTable(host, block){
 
   const rebuild = ()=>{
     wrap.innerHTML="";
-    const tbl = el("table",{class:"grid"});
+    const tbl = el("table",{class:"grid free-grid"});     // fixed layout: typing never re-flows columns
     ctx.reg.clear();
+    const nCols = colCount(block);
+    // <colgroup> drives the fixed column widths (relative weights from col_w,
+    // or equal when unset). Drag grips edit these weights (see startColResize).
+    const weights = freeColWeights(block);
+    const wsum = weights.reduce((a,b)=>a+(Number(b)||0),0) || 1;
+    const cg = el("colgroup");
+    for (let ci=0; ci<nCols; ci++)
+      cg.appendChild(el("col",{style:{width:(100*(Number(weights[ci])||0)/wsum)+"%"}}));
+    tbl.appendChild(cg);
     block.rows.forEach((row, ri)=>{
       const tr = el("tr",{class: ri<block.header_rows?"hdr":""});
       row.forEach((val, ci)=>{
         const cellDiv = el("div",{class:"cell", text:val});   // NOTE: not contenteditable in select mode
         const td = el("td",{},[cellDiv]);
+        if (ci < nCols-1){                                    // grip on every interior border (skip last col)
+          const grip = el("div",{class:"col-grip", title:T("table.resize_col","Drag to resize column width")});
+          grip.addEventListener("mousedown",(e)=> startColResize(e, ctx, block, ci));
+          td.appendChild(grip);
+        }
         regCell(ctx, {
           r:ri, c:ci, type:"text", el:cellDiv,
           read: ()=> block.rows[ri][ci] ?? "",
@@ -1944,6 +2010,56 @@ function restyleHeaderRows(ctx, block){
   ctx.table.querySelectorAll("tr").forEach((tr, i)=>{
     tr.classList.toggle("hdr", i < (block.header_rows||0));
   });
+}
+// Free-table column widths. col_w is stored in cm (the engine reads it as Cm());
+// preview + editor only use the ratios. When unset/mismatched, columns are equal
+// and sum to FREE_TBL_TOTAL_CM so a first drag persists a sensible Word width.
+const FREE_TBL_TOTAL_CM = 15.5;
+function freeColWeights(block){
+  const n = colCount(block);
+  if (Array.isArray(block.col_w) && block.col_w.length === n)
+    return block.col_w.map(w => { const x = Number(w); return isFinite(x) && x > 0 ? x : FREE_TBL_TOTAL_CM/(n||1); });
+  return new Array(n).fill(FREE_TBL_TOTAL_CM/(n||1));
+}
+// Drag a column border: transfer width between column ci and ci+1 (sum kept
+// constant, so the table stays put and only the two neighbors resize).
+let _colResize = null;
+function startColResize(e, ctx, block, ci){
+  e.preventDefault(); e.stopPropagation();                 // not a .cell: never starts a cell selection
+  const tbl = ctx.table; if(!tbl) return;
+  const weights = freeColWeights(block).slice();
+  _colResize = { ctx, block, ci, startX:e.clientX, weights, moved:false,
+    sum: weights.reduce((a,b)=>a+b,0) || 1,
+    tblW: tbl.getBoundingClientRect().width || 1,
+    grip: e.currentTarget, cur: weights.slice() };
+  if (_colResize.grip) _colResize.grip.classList.add("active");
+  document.body.classList.add("col-resizing");
+  document.addEventListener("mousemove", onColResizeMove);
+  document.addEventListener("mouseup", endColResize);
+}
+function onColResizeMove(e){
+  const s=_colResize; if(!s) return;
+  s.moved = true;
+  const dW = ((e.clientX - s.startX) / s.tblW) * s.sum;    // px delta -> weight delta
+  const minW = s.sum * 0.05;                               // keep each column >= 5%
+  let a = s.weights[s.ci] + dW, b = s.weights[s.ci+1] - dW;
+  if (a < minW){ b -= (minW - a); a = minW; }
+  if (b < minW){ a -= (minW - b); b = minW; }
+  const cur = s.weights.slice(); cur[s.ci]=a; cur[s.ci+1]=b; s.cur=cur;
+  const cols = s.ctx.table ? s.ctx.table.querySelectorAll("colgroup col") : [];
+  const t = cur.reduce((x,y)=>x+y,0) || 1;
+  cols.forEach((c,i)=>{ if(i<cur.length) c.style.width = (100*cur[i]/t)+"%"; });
+}
+function endColResize(){
+  const s=_colResize; _colResize=null;
+  document.removeEventListener("mousemove", onColResizeMove);
+  document.removeEventListener("mouseup", endColResize);
+  document.body.classList.remove("col-resizing");
+  if(!s) return;
+  if (s.grip) s.grip.classList.remove("active");
+  if(!s.moved) return;                                     // a bare click leaves the model untouched
+  s.block.col_w = s.cur.map(w => Math.round(w*100)/100);   // persist cm (2dp)
+  markDirty(); saveProject(true);
 }
 function parseTSV(txt){
   return txt.replace(/\r/g,"").replace(/\n$/,"").split("\n").map(l=>l.split("\t"));
@@ -2904,6 +3020,9 @@ function syncChrome(){
   $("#btn-save").disabled = !(inEditor || inTemplate || inChecklist);
   $("#btn-open").disabled = inTemplate;
   $("#btn-new").disabled  = inTemplate;
+  // preview makes #editor a non-scrolling full-bleed host so .pv-wrap scrolls and
+  // its top bar can stay frozen (see #editor.pv-mode CSS)
+  $("#editor").classList.toggle("pv-mode", inPreview);
   // left pane hosts the project outline OR the skeleton tree (checklist/preview are full-width)
   $("#outline").classList.toggle("hidden", !(inEditor || inTemplate));
   $("#btn-home").classList.toggle("hidden", App.view === "home");
@@ -3048,6 +3167,7 @@ function renderChecklist(){
 function enterPreview(){
   if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
   flushActiveGrid();   // commit any in-flight grid cell so the preview is current
+  App._pvJump = true;  // one-shot: scroll to the node being edited (cleared by renderPreview)
   App.view = "preview";
   render();
 }
@@ -3069,14 +3189,22 @@ function renderPreview(){
     onclick:()=>window.print()}));
   wrap.appendChild(bar);
 
-  wrap.appendChild(buildPreviewDoc());
+  const state = { chap:0, img:0, tbl:0, selEl:null };
+  wrap.appendChild(buildPreviewDoc(state));
   host.appendChild(wrap);
+
+  // jump to the currently-edited node once, when the user clicks Preview
+  if (App._pvJump){
+    App._pvJump = false;
+    if (state.selEl && state.selEl.scrollIntoView)
+      requestAnimationFrame(()=> state.selEl.scrollIntoView({block:"start"}));
+  }
 }
 
-function buildPreviewDoc(){
+function buildPreviewDoc(state){
   const doc = el("div",{class:"pv-doc"});
   doc.appendChild(previewTitle());
-  const state = { chap:0, img:0, tbl:0 };
+  state = state || { chap:0, img:0, tbl:0 };
   (App.project.outline || []).forEach(n => previewNode(doc, n, 0, state));
   return doc;
 }
@@ -3111,10 +3239,13 @@ function previewNode(host, node, depth, state){
 
   const num = nodePath(node.id);
   const h = el("div",{class:"pv-h pv-h" + Math.min(level, 6)});
+  if (node.id != null) h.setAttribute("data-nid", node.id);
   if (num) h.appendChild(el("span",{class:"pv-hnum", text:num + "  "}));
   h.appendChild(document.createTextNode(node.title || ""));
   host.appendChild(h);
+  if (state && node.id != null && node.id === App.selId) state.selEl = h;   // auto-scroll target
 
+  if (state) state.numSeq = [];   // numbered lists restart per section (mirror engine.new_section)
   if (node.fixed_body){
     host.appendChild(el("div",{class:"pv-fixed",
       text:T("preview.fixed","[ Standard template text — generated by the engine on export. ]")}));
@@ -3127,7 +3258,7 @@ function previewNode(host, node, depth, state){
 function previewBlock(host, block, chap, state){
   if (!block) return;
   switch (block.type){
-    case "para":      host.appendChild(previewPara(block)); break;
+    case "para":      host.appendChild(previewPara(block, state)); break;
     case "image":     state.img++; host.appendChild(previewImage(block, chap, state.img)); break;
     case "imagegrid": state.img++; host.appendChild(previewImageGrid(block, chap, state.img)); break;
     case "table": {
@@ -3153,9 +3284,33 @@ function capPrefix(kind){
 function figLabel(chap, seq){ return capPrefix("image") + " " + chap + "-" + seq; }
 function tblLabel(chap, seq){ return capPrefix("table") + " " + chap + "-" + seq; }
 
-function previewPara(block){
+// per-level list markers mirror the engine: ● □ ▪ – for bullets; 1. a) i. for numbers
+const PV_BULLET_GLYPHS = ["●","□","▪","–"];
+function pvBulletGlyph(level){ return PV_BULLET_GLYPHS[Math.min(level, PV_BULLET_GLYPHS.length-1)]; }
+function pvRoman(n){
+  const map=[[10,"x"],[9,"ix"],[5,"v"],[4,"iv"],[1,"i"]]; let s="";
+  for(const [v,r] of map){ while(n>=v){ s+=r; n-=v; } } return s || "i";
+}
+function pvNumberStep(state, level){
+  const seq = state.numSeq = state.numSeq || [];
+  seq[level] = (seq[level]||0) + 1;
+  seq.length = level + 1;                     // deeper counters restart under a new parent
+  const n = seq[level];
+  if (level === 0) return n + ".";
+  if (level === 1) return String.fromCharCode(96 + ((n-1)%26) + 1) + ")";   // a) b) ...
+  return pvRoman(n) + ".";
+}
+function previewPara(block, state){
   const html = runsToHtml(block.runs || []);   // reuse the editor's exact run->HTML
-  if (block.list === "bullet") return el("div",{class:"pv-p pv-bullet", html: html || "&nbsp;"});
+  const lvl = Math.max(0, Math.min(block.level|0, 8));
+  if (block.list === "bullet" || block.list === "number"){
+    const marker = block.list === "bullet"
+      ? pvBulletGlyph(lvl)
+      : (state ? pvNumberStep(state, lvl) : (lvl===0 ? "1." : "a)"));
+    const d = el("div",{class:"pv-li", html: escapeHtml(marker) + "  " + (html || "")});
+    if (lvl) d.style.marginLeft = (lvl * 1.7) + "em";
+    return d;
+  }
   return el("p",{class:"pv-p", html: html || "&nbsp;"});
 }
 
@@ -3186,13 +3341,15 @@ function previewImageGrid(block, chap, seq){
   grid.style.gridTemplateColumns = "repeat(" + (block.cols || 2) + ",1fr)";
   (block.items || []).forEach((it, i)=>{
     const cell = el("div",{class:"pv-gcell"});
+    const imgBox = el("div",{class:"pv-gimg"});           // grows + bottom-aligns so sub-labels share a baseline
     if (it && it.file){
       const img = el("img",{class:"pv-img", src: imgUrl(it.file), alt:""});
       img.onerror = ()=>{ const m = previewMissingImg(it.file); if (img.parentNode) img.parentNode.replaceChild(m, img); };
-      cell.appendChild(img);
+      imgBox.appendChild(img);
     } else {
-      cell.appendChild(previewMissingImg(""));
+      imgBox.appendChild(previewMissingImg(""));
     }
+    cell.appendChild(imgBox);
     if (block.sub_captions) cell.appendChild(el("div",{class:"pv-sub", text:"(" + String.fromCharCode(97 + i) + ")"}));
     grid.appendChild(cell);
   });
@@ -3215,12 +3372,18 @@ function previewFreeTable(block, chap, seq){
     document.createTextNode(block.caption || ""),
   ]));
   const tbl = el("table",{class:"pv-table"});
+  tbl.style.tableLayout = "fixed";                          // match the editor: widths come from the colgroup
   const hr = (block.header_rows != null) ? block.header_rows : 1;
-  const colw = Array.isArray(block.col_w) ? block.col_w : null;
-  if (colw && colw.length){
-    const tot = colw.reduce((a,b)=>a + (Number(b) || 0), 0) || 1;
+  const ncols = (block.rows || []).reduce((m,r)=>Math.max(m,(r||[]).length), 0);
+  const colw = (Array.isArray(block.col_w) && block.col_w.length === ncols) ? block.col_w : null;
+  if (ncols){
     const cg = el("colgroup");
-    colw.forEach(w => cg.appendChild(el("col",{style:{width:(100 * (Number(w) || 0) / tot) + "%"}})));
+    if (colw){
+      const tot = colw.reduce((a,b)=>a + (Number(b) || 0), 0) || 1;
+      colw.forEach(w => cg.appendChild(el("col",{style:{width:(100 * (Number(w) || 0) / tot) + "%"}})));
+    } else {
+      for (let i=0;i<ncols;i++) cg.appendChild(el("col",{style:{width:(100/ncols) + "%"}}));
+    }
     tbl.appendChild(cg);
   }
   (block.rows || []).forEach((row, ri)=>{

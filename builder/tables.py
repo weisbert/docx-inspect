@@ -50,6 +50,15 @@ def _vcenter(cell):
     tcPr.append(va)
 
 
+def _vbottom(cell):
+    """Bottom-align a cell's content. Used by the image grid so that images of
+    unequal height still leave their (a)(b) sub-captions on one baseline."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    va = OxmlElement("w:vAlign")
+    va.set(qn("w:val"), "bottom")
+    tcPr.append(va)
+
+
 def _table_fixed_layout(table):
     tblPr = table._tbl.tblPr
     layout = OxmlElement("w:tblLayout")

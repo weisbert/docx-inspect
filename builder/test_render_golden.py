@@ -80,7 +80,8 @@ def golden_config():
                 "autonumber": {"num_id": 88, "suffix": "space", "ascii": "Arial"},
             },
             "caption": {"ascii": "Arial", "size_pt": 9, "bold": True, "align": "center"},
-            "body": {"name": "ReportBody", "base": "Normal", "size_pt": 10.5, "left_cm": 0.0},
+            "body": {"name": "ReportBody", "base": "Normal", "size_pt": 10.5,
+                     "left_cm": 0.0, "first_line_cm": 0.74},
             "mybody": {"name": "ReportBodyIndent", "base": "ReportBody",
                        "ascii": "Arial", "left_cm": 0.0, "first_line_cm": 0.74},
             "header_table": {
@@ -208,9 +209,40 @@ def golden_project():
                      "width_cm": 12.0, "size": "full"},
                     {"type": "datatable", "id": "dt-gold-1", "kind": "compliance",
                      "caption": "Compliance results", "data": data},
+                    # two (missing) side-by-side images with (a)(b) sub-captions:
+                    # cells must be bottom-aligned so unequal heights keep the
+                    # sub-labels on one baseline.
+                    {"type": "imagegrid", "id": "grid-gold-1", "cols": 2,
+                     "caption": "Side-by-side comparison", "sub_captions": True,
+                     "width_cm": 15.5,
+                     "items": [{"file": "images/left.png"},
+                               {"file": "images/right.png"}]},
                 ],
                 "children": [],
-            }
+            },
+            {
+                "title": "Outline lists",
+                "level": 1,
+                "blocks": [
+                    # nested bullets: solid circle (lvl0) with hollow-square sub (lvl1)
+                    {"type": "para", "list": "bullet", "level": 0,
+                     "runs": [{"t": "PDR"}]},
+                    {"type": "para", "list": "bullet", "level": 1,
+                     "runs": [{"t": "sub point one"}]},
+                    {"type": "para", "list": "bullet", "level": 1,
+                     "runs": [{"t": "sub point two"}]},
+                    # numbered list whose items are separated by a plain paragraph:
+                    # numbering must CONTINUE (restart only per section), so these
+                    # two number items share one numId.
+                    {"type": "para", "list": "number", "level": 0,
+                     "runs": [{"t": "first label"}]},
+                    {"type": "para", "list": None,
+                     "runs": [{"t": "an intervening address line"}]},
+                    {"type": "para", "list": "number", "level": 0,
+                     "runs": [{"t": "second label"}]},
+                ],
+                "children": [],
+            },
         ],
     }
 
@@ -260,6 +292,61 @@ def run_is_bold(run):
 
 def cell_text(cell):
     return "".join(r.text for r in cell_runs(cell)).strip()
+
+
+def para_by_text(doc, text):
+    for p in doc.paragraphs:
+        if p.text.strip() == text:
+            return p
+    return None
+
+
+def para_numpr(p):
+    """Return (ilvl, numId) ints for a paragraph's numbering, or (None, None)."""
+    pPr = p._p.find(qn("w:pPr"))
+    if pPr is None:
+        return (None, None)
+    numPr = pPr.find(qn("w:numPr"))
+    if numPr is None:
+        return (None, None)
+    il = numPr.find(qn("w:ilvl"))
+    nid = numPr.find(qn("w:numId"))
+    iv = int(il.get(qn("w:val"))) if il is not None else None
+    nv = int(nid.get(qn("w:val"))) if nid is not None else None
+    return (iv, nv)
+
+
+def abstract_lvl_text(doc, abstract_id, ilvl):
+    """lvlText string for a given abstractNum id + level, or None."""
+    numbering = doc.part.numbering_part.element
+    for a in numbering.findall(qn("w:abstractNum")):
+        if a.get(qn("w:abstractNumId")) == str(abstract_id):
+            for lvl in a.findall(qn("w:lvl")):
+                if lvl.get(qn("w:ilvl")) == str(ilvl):
+                    lt = lvl.find(qn("w:lvlText"))
+                    return lt.get(qn("w:val")) if lt is not None else None
+    return None
+
+
+def num_to_abstract(doc, num_id):
+    """Map a numId to its abstractNumId (int), or None."""
+    numbering = doc.part.numbering_part.element
+    for n in numbering.findall(qn("w:num")):
+        if n.get(qn("w:numId")) == str(num_id):
+            aid = n.find(qn("w:abstractNumId"))
+            return int(aid.get(qn("w:val"))) if aid is not None else None
+    return None
+
+
+def find_imagegrid_table(doc):
+    """The image grid is the borderless table that carries the "(a)" sub-caption
+    (cover/header tables also use bottom vAlign, so match on sub-caption text)."""
+    for t in doc.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                if "(a)" in cell_text(cell):
+                    return t
+    return None
 
 
 def find_compliance_table(doc):
@@ -425,6 +512,57 @@ def main():
           "text=%r" % cell_text(ptotal_max))
     check(not any(run_is_red(r) for r in ptotal_runs),
           "in-spec P_total MAX (1500) is NOT red")
+
+    # --- image-grid sub-caption alignment (bottom-aligned cells) ---
+    grid_tbl = find_imagegrid_table(doc)
+    check(grid_tbl is not None, "image-grid table present (bottom-aligned cells)")
+    if grid_tbl is not None:
+        cells = [c for row in grid_tbl.rows for c in row.cells]
+        bottom = 0
+        for cell in cells:
+            tcPr = cell._tc.find(qn("w:tcPr"))
+            va = tcPr.find(qn("w:vAlign")) if tcPr is not None else None
+            if va is not None and va.get(qn("w:val")) == "bottom":
+                bottom += 1
+        check(bottom == len(cells),
+              "every image-grid cell is bottom-aligned (sub-captions share a baseline)",
+              "bottom=%d of %d" % (bottom, len(cells)))
+
+    # --- nested body lists (bullets ● / □, continuing numbered list) ---
+    il0, nid0 = para_numpr(para_by_text(doc, "PDR"))
+    il1, nid1 = para_numpr(para_by_text(doc, "sub point one"))
+    check(nid0 is not None and il0 == 0, "bullet lvl0 paragraph has numbering at ilvl 0",
+          "ilvl=%r numId=%r" % (il0, nid0))
+    check(il1 == 1 and nid1 == nid0, "bullet sub-item is ilvl 1 on the same bullet numId",
+          "ilvl=%r numId=%r" % (il1, nid1))
+    bul_abs = num_to_abstract(doc, nid0) if nid0 is not None else None
+    check(abstract_lvl_text(doc, bul_abs, 0) == "●", "bullet level 0 glyph is ● (solid circle)",
+          "lvlText=%r" % abstract_lvl_text(doc, bul_abs, 0))
+    check(abstract_lvl_text(doc, bul_abs, 1) == "□", "bullet level 1 glyph is □ (hollow square)",
+          "lvlText=%r" % abstract_lvl_text(doc, bul_abs, 1))
+
+    ila, nida = para_numpr(para_by_text(doc, "first label"))
+    ilb, nidb = para_numpr(para_by_text(doc, "second label"))
+    _, nidmid = para_numpr(para_by_text(doc, "an intervening address line"))
+    check(nida is not None and nida == nidb,
+          "numbered items keep one numId across an intervening plain paragraph",
+          "numIds=%r,%r" % (nida, nidb))
+    check(nidmid is None, "the intervening plain paragraph has no numbering", "numId=%r" % nidmid)
+    dec_abs = num_to_abstract(doc, nida) if nida is not None else None
+    check(abstract_lvl_text(doc, dec_abs, 0) == "%1.", "numbered level 0 renders as '1.'",
+          "lvlText=%r" % abstract_lvl_text(doc, dec_abs, 0))
+    check(nida != nid0, "bullets and numbers use different numbering definitions",
+          "bulletNum=%r numberNum=%r" % (nid0, nida))
+
+    # --- body style carries a (config-driven) first-line indent ---
+    try:
+        body_style = doc.styles["ReportBody"]
+        fli = body_style.paragraph_format.first_line_indent
+        check(fli is not None and fli > 0,
+              "body style has a positive first-line indent",
+              "first_line_indent=%r" % (fli,))
+    except KeyError:
+        check(False, "body style 'ReportBody' exists")
 
     # --- Word-native caption numbering (SEQ + STYLEREF) + bookmark ---
     caps = caption_paragraphs(doc)
