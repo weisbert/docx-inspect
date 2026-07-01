@@ -1339,24 +1339,39 @@ function groupBlocks(blocks){
 /* ---- prose region card (continuous multi-paragraph editor) --------------- */
 function renderProseCard(node, seg){
   const card = el("div",{class:"card prose-card"});
-  // A media block dragged onto a prose run lands just before that run.
-  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node){ e.preventDefault(); card.classList.add("dragover"); }});
+  const target = ()=> seg.blocks[0];   // the segment's first block (live via serialize)
+  // drop target: a dragged block/segment lands just before this prose run
+  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(target())<0){ e.preventDefault(); card.classList.add("dragover"); }});
   card.addEventListener("dragleave",()=>card.classList.remove("dragover"));
   card.addEventListener("drop",(e)=>{
     e.preventDefault(); card.classList.remove("dragover");
     if (!blockDragSrc||blockDragSrc.node!==node) return;
-    const from = node.blocks.indexOf(blockDragSrc.block); if (from<0) return;
-    const [b] = node.blocks.splice(from,1);
-    const at = node.blocks.indexOf(seg.blocks[0]);
-    node.blocks.splice(at<0?node.blocks.length:at, 0, b);
-    markDirty(); renderEditor();
+    moveBlocksBefore(node, blockDragSrc.blocks, target());
   });
 
   const bar = el("div",{class:"card-bar"});
+  // drag handle (moves the whole text segment); only the handle is draggable, so
+  // selecting text inside the editor is unaffected
+  const handle = el("span",{class:"drag-handle", draggable:"true", title:T("block.drag","Drag to reorder"), text:"⠿"});
+  handle.addEventListener("dragstart",(e)=>{ blockDragSrc={node, blocks: seg.blocks.slice()};
+    card.classList.add("dragging"); e.dataTransfer.effectAllowed="move";
+    try{ e.dataTransfer.setDragImage(card, 12, 12); }catch(_){} });
+  handle.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null;
+    document.querySelectorAll(".card.dragover").forEach(c=>c.classList.remove("dragover")); });
+  bar.appendChild(handle);
   bar.appendChild(el("span",{class:"card-kind", text:T("block.prose","Text")}));
   const actions = el("div",{class:"card-actions"});
   actions.appendChild(el("button",{class:"icon-btn", title:T("action.copy_text","Copy this text (paste in any section or project)"), text:"⧉",
     onclick:()=>copyBlocks(seg.blocks, T("block.prose","Text"))}));
+  actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
+    onclick:()=>{
+      const del=()=>{ seg.blocks.forEach(b=>{ const i=node.blocks.indexOf(b); if(i>=0) node.blocks.splice(i,1); });
+        markDirty(); renderEditor(); };
+      const hasText = seg.blocks.some(b=>(b.runs||[]).some(r=>(r.t||"").trim()));
+      if (hasText) modalConfirm(T("dialog.del_text.title","Delete this text?"),
+        T("dialog.del_text.msg","Remove this text block and all its paragraphs?"), del);
+      else del();
+    }}));
   bar.appendChild(actions);
   card.appendChild(bar);
 
@@ -1434,23 +1449,32 @@ function moveBlock(node, idx, dir){
   const j=idx+dir; if (idx<0||j<0||j>=node.blocks.length) return;
   const [b]=node.blocks.splice(idx,1); node.blocks.splice(j,0,b); markDirty(); renderEditor();
 }
+// Move one-or-more blocks so they land BEFORE targetBlock (or at the end when
+// targetBlock is null). Handles both a single media block and a whole prose
+// segment (several para blocks moved together). Mutates node.blocks in place.
+function moveBlocksBefore(node, movingBlocks, targetBlock){
+  if (!node || !movingBlocks || !movingBlocks.length) return;
+  const set = new Set(movingBlocks);
+  if (targetBlock && set.has(targetBlock)) return;      // dropping onto itself
+  const kept = node.blocks.filter(b=>!set.has(b));
+  let to = targetBlock ? kept.indexOf(targetBlock) : kept.length;
+  if (to < 0) to = kept.length;
+  kept.splice(to, 0, ...movingBlocks);
+  node.blocks.length = 0;
+  for (const b of kept) node.blocks.push(b);
+  markDirty(); renderEditor();
+}
 let blockDragSrc=null;
 function wireBlockDrag(card, node, block){
-  card.addEventListener("dragstart",(e)=>{ blockDragSrc={node,block}; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; });
+  card.addEventListener("dragstart",(e)=>{ blockDragSrc={node, blocks:[block]}; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; });
   card.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null;
     document.querySelectorAll(".card.dragover").forEach(c=>c.classList.remove("dragover")); });
-  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node){ e.preventDefault(); card.classList.add("dragover"); }});
+  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(block)<0){ e.preventDefault(); card.classList.add("dragover"); }});
   card.addEventListener("dragleave",()=>card.classList.remove("dragover"));
   card.addEventListener("drop",(e)=>{
     e.preventDefault(); card.classList.remove("dragover");
     if (!blockDragSrc||blockDragSrc.node!==node) return;
-    const from=node.blocks.indexOf(blockDragSrc.block);
-    if (from<0 || blockDragSrc.block===block) return;
-    // remove first, then resolve the target's live index -> always insert BEFORE
-    // the drop target (consistent for forward and backward drags).
-    const [b]=node.blocks.splice(from,1);
-    let to=node.blocks.indexOf(block); if (to<0) to=node.blocks.length;
-    node.blocks.splice(to,0,b); markDirty(); renderEditor();
+    moveBlocksBefore(node, blockDragSrc.blocks, block);   // insert before this block
   });
 }
 
@@ -1808,11 +1832,11 @@ function buildProseEditor(host, node, seg){
     onmousedown:(e)=>{ e.preventDefault(); rememberRange(); openRefPicker(insertRef); }});
   tb.appendChild(refBtn);
 
-  // top-level <p> containing the caret (for list state + list toggling)
+  // top-level <p>/<div> element containing the caret (for list state + toggling)
   const currentP = ()=>{
     const sel = window.getSelection(); if (!sel||!sel.rangeCount) return null;
     let n = sel.anchorNode;
-    while (n && n!==editor){ if (n.parentNode===editor) return n; n = n.parentNode; }
+    while (n && n!==editor){ if (n.parentNode===editor && n.nodeType===1) return n; n = n.parentNode; }
     return null;
   };
   const selInEditor = ()=>{
@@ -1820,8 +1844,25 @@ function buildProseEditor(host, node, seg){
     let n = sel.anchorNode; while (n){ if (n===editor) return true; n = n.parentNode; }
     return false;
   };
+  // Guarantee the caret sits in a real <p>. contenteditable can collapse to an
+  // empty root (or a bare text node) after everything is deleted -- that left
+  // currentP() null, so list toggles silently no-op'd (the "can't re-add a bullet
+  // after deleting it" bug). Re-wrap loose content / create a <p> and focus it.
+  const ensureParagraph = ()=>{
+    const p0 = currentP(); if (p0) return p0;
+    let host = null;
+    editor.childNodes.forEach(n=>{ if(!host && n.nodeType===1 && (n.tagName==="P"||n.tagName==="DIV")) host=n; });
+    const putCaret = (elm)=>{ const sel=window.getSelection(), r=document.createRange();
+      r.selectNodeContents(elm); r.collapse(false); if(sel){ sel.removeAllRanges(); sel.addRange(r); } };
+    if (host){ putCaret(host); return host; }
+    const p = document.createElement("p"); p.className="pp";
+    while (editor.firstChild) p.appendChild(editor.firstChild);
+    if (!p.childNodes.length) p.appendChild(document.createElement("br"));
+    editor.appendChild(p); putCaret(p); return p;
+  };
   const toggleList = (kind)=>{
-    const p = currentP(); if (!p) return;
+    editor.focus();
+    const p = currentP() || ensureParagraph(); if (!p) return;
     const next = p.dataset.list===kind ? "" : kind;
     p.dataset.list = next;
     p.classList.toggle("li-bullet", next==="bullet");
