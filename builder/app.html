@@ -173,6 +173,12 @@
   .img-prevwrap{position:relative;display:inline-block;max-width:100%}
   .img-prevwrap .rm{position:absolute;top:5px;right:5px;background:rgba(255,255,255,.9);border:1px solid var(--line)}
   .img-hint{font-size:11px;color:var(--muted);margin-top:8px}
+  /* image-grid layout picker (up to 3x3) */
+  .gl-wrap{display:inline-flex;align-items:center;gap:8px}
+  .gl-picker{display:grid;grid-template-columns:repeat(3,20px);grid-auto-rows:20px;gap:3px}
+  .gl-cell{border:1px solid var(--line);border-radius:3px;background:#fff;cursor:pointer}
+  .gl-cell.on{background:var(--accent);border-color:var(--accent)}
+  .gl-lbl{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:34px}
   .field-row{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
   .field-row label{color:var(--muted);font-size:13px}
   .ti{border:1px solid var(--line);border-radius:6px;padding:6px 9px;outline:none}
@@ -2124,6 +2130,31 @@ function fileToB64(file){
 /* ============================================================================
    BLOCK EDITOR ⑤  IMAGE GRID  (several images in a borderless grid, one number)
 ============================================================================ */
+// Office-style up-to-3x3 layout picker. Hover to preview an R×C region, click to
+// set it. Drives block.cols (columns); block.rows is stored for the picker's
+// highlight (the engine flows the images into `cols` columns).
+const GRID_LAYOUT_MAX = 3;
+function buildGridLayoutPicker(block, renderGrid){
+  const wrap = el("div",{class:"gl-wrap"});
+  const grid = el("div",{class:"gl-picker"});
+  const lbl  = el("span",{class:"gl-lbl"});
+  const cells = [];
+  const clamp = (v,d)=> Math.min(Math.max(parseInt(v)||d, 1), GRID_LAYOUT_MAX);
+  const curR = ()=> clamp(block.rows, 1);
+  const curC = ()=> clamp(block.cols, 2);
+  const paint = (hr, hc)=>{ cells.forEach(rc=> rc.el.classList.toggle("on", rc.r < hr && rc.c < hc)); lbl.textContent = hr + " × " + hc; };
+  for (let r=0; r<GRID_LAYOUT_MAX; r++) for (let c=0; c<GRID_LAYOUT_MAX; c++){
+    const ce = el("div",{class:"gl-cell", title:(r+1)+" × "+(c+1)});
+    ce.addEventListener("mouseenter",()=> paint(r+1, c+1));
+    ce.addEventListener("click",()=>{ block.rows = r+1; block.cols = c+1;
+      markDirty(); renderGrid(); paint(r+1, c+1); saveProject(true); });
+    cells.push({el:ce, r, c}); grid.appendChild(ce);
+  }
+  grid.addEventListener("mouseleave",()=> paint(curR(), curC()));
+  paint(curR(), curC());
+  wrap.appendChild(grid); wrap.appendChild(lbl);
+  return wrap;
+}
 function editImageGrid(host, block, node){
   block.items = Array.isArray(block.items) ? block.items : [];
   block.cols = block.cols || 2;
@@ -2152,11 +2183,8 @@ function editImageGrid(host, block, node){
   host.appendChild(grid);
 
   const ctl = el("div",{class:"field-row"});
-  ctl.appendChild(el("label",{text:T("imagegrid.cols","Columns")}));
-  const colsSel = el("select",{class:"ti", style:{width:"70px"},
-    onchange:(e)=>{ block.cols = parseInt(e.target.value)||2; markDirty(); renderGrid(); saveProject(true); }});
-  [2,3].forEach(c=>{ const o = el("option",{value:c, text:String(c)}); if ((block.cols||2)===c) o.selected=true; colsSel.appendChild(o); });
-  ctl.appendChild(colsSel);
+  ctl.appendChild(el("label",{text:T("imagegrid.layout","Layout")}));
+  ctl.appendChild(buildGridLayoutPicker(block, renderGrid));
   const subWrap = el("label",{class:"chk"});
   const subCb = el("input",{type:"checkbox",
     onchange:(e)=>{ block.sub_captions = e.target.checked; markDirty(); saveProject(true); }});
