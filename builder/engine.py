@@ -920,7 +920,13 @@ def _render_image_grid(doc, block, project_dir, chap, seq, cfg, warn=None):
 
     n = len(items)
     if n:
-        rows = (n + cols - 1) // cols
+        # Honor the layout picker's chosen row count as a MINIMUM: a taller pick
+        # pads blank trailing cells; adding more images than the pick grows extra
+        # rows so nothing is dropped. Old projects have no block["rows"] -> picked
+        # 0 -> falls back to just enough rows for the images (prior behavior).
+        need_rows = (n + cols - 1) // cols
+        picked_rows = max(0, _as_int(block.get("rows", 0), 0))
+        rows = max(need_rows, picked_rows)
         table = doc.add_table(rows=rows, cols=cols)
         tables._table_fixed_layout(table)
         tables._table_borders(table, val="none")

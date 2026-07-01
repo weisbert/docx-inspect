@@ -193,7 +193,9 @@
   .chk{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px}
   .imgrid{display:grid;gap:8px;margin-bottom:4px}
   .imgrid .cellimg{border:1px solid var(--line);border-radius:6px;position:relative;background:#fafbfc;
-    display:flex;align-items:center;justify-content:center;min-height:90px;overflow:hidden;padding:4px}
+    display:flex;align-items:center;justify-content:center;min-height:90px;overflow:hidden;padding:4px;
+    cursor:pointer;outline:none}
+  .imgrid .cellimg:focus,.imgrid .cellimg.focused{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
   .imgrid .cellimg img{max-width:100%;max-height:170px;display:block}
   .imgrid .cellimg .rm{position:absolute;top:3px;right:3px;background:rgba(255,255,255,.85)}
   .imgrid-add{border:2px dashed var(--line);border-radius:6px;min-height:90px;display:flex;
@@ -1760,6 +1762,25 @@ function openRefPicker(onPick){
   showOverlay();
 }
 
+// Structural deep-equality (order-independent for object keys). Used to skip
+// no-op serialize()/markDirty() churn -- e.g. focusing a prose editor and
+// blurring it without typing must not trigger an autosave + status flicker.
+function deepEqual(a, b){
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const aArr = Array.isArray(a), bArr = Array.isArray(b);
+  if (aArr !== bArr) return false;
+  if (aArr){
+    if (a.length !== b.length) return false;
+    for (let i=0; i<a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka){ if (!(k in b) || !deepEqual(a[k], b[k])) return false; }
+  return true;
+}
+
 function buildProseEditor(host, node, seg){
   const tb = el("div",{class:"mini-toolbar prose-toolbar"});
   const editor = el("div",{class:"rich multi", contenteditable:"true", spellcheck:"false"});
@@ -1771,12 +1792,14 @@ function buildProseEditor(host, node, seg){
   let owned = seg.blocks.slice();
   const serialize = ()=>{
     const blocks = proseToBlocks(editor);
+    if (deepEqual(blocks, owned)) return false;   // nothing actually changed -> no dirty, no splice
     let start = node.blocks.indexOf(owned[0]);
     if (start < 0) start = Math.min(seg.start, node.blocks.length);
     node.blocks.splice(start, owned.length, ...blocks);
     owned = blocks;
     seg.blocks = blocks;   // keep seg live so renderProseCard's drop target stays valid
     markDirty();
+    return true;
   };
 
   const mk = (label, title, cmd) => el("button",{class:"mt-btn", title, html:label,
@@ -1914,7 +1937,7 @@ function buildProseEditor(host, node, seg){
     try{ document.execCommand("defaultParagraphSeparator", false, "p"); }catch(_){}
     refresh();
   });
-  editor.addEventListener("blur", ()=>{ serialize(); saveProject(true); });
+  editor.addEventListener("blur", ()=>{ if (serialize()) saveProject(true); });
   // sanitize paste -> plain text (strip foreign styles/structure)
   editor.addEventListener("paste",(e)=>{
     e.preventDefault();
@@ -2131,8 +2154,9 @@ function fileToB64(file){
    BLOCK EDITOR ⑤  IMAGE GRID  (several images in a borderless grid, one number)
 ============================================================================ */
 // Office-style up-to-3x3 layout picker. Hover to preview an R×C region, click to
-// set it. Drives block.cols (columns); block.rows is stored for the picker's
-// highlight (the engine flows the images into `cols` columns).
+// set it. Sets block.cols (columns) + block.rows (rows). The engine + preview
+// honor block.rows as a MINIMUM row count: a taller pick pads blank trailing
+// cells, adding more images than the pick grows extra rows (nothing dropped).
 const GRID_LAYOUT_MAX = 3;
 function buildGridLayoutPicker(block, renderGrid){
   const wrap = el("div",{class:"gl-wrap"});
@@ -2164,12 +2188,17 @@ function editImageGrid(host, block, node){
     grid.style.gridTemplateColumns = "repeat("+(block.cols||2)+", 1fr)";
     grid.innerHTML="";
     block.items.forEach((it, i)=>{
-      const cell = el("div",{class:"cellimg"});
+      const cell = el("div",{class:"cellimg", tabindex:"0", title:T("imagegrid.replace","Click, then Ctrl+V to replace this image")});
       const img = el("img",{src: imgUrl(it.file), alt:""});
-      img.onerror = ()=>{ cell.innerHTML=""; cell.appendChild(el("div",{style:{fontSize:"11px"}, text:it.file})); };
+      // keep the ✕ + paste target alive even on a broken image (swap just the <img>)
+      img.onerror = ()=>{ img.replaceWith(el("div",{style:{fontSize:"11px"}, text:it.file})); };
       cell.appendChild(img);
       cell.appendChild(el("button",{class:"icon-btn danger rm", text:"✕", title:T("action.delete","Delete"),
-        onclick:()=>{ block.items.splice(i,1); markDirty(); renderGrid(); saveProject(true); }}));
+        onclick:(e)=>{ e.stopPropagation(); block.items.splice(i,1); markDirty(); renderGrid(); saveProject(true); }}));
+      cell.addEventListener("focus",()=>cell.classList.add("focused"));
+      cell.addEventListener("blur",()=>cell.classList.remove("focused"));
+      cell.addEventListener("click",()=>cell.focus());
+      cell.addEventListener("paste",(e)=>handleGridPaste(e, block, node, renderGrid, i));
       grid.appendChild(cell);
     });
     const add = el("div",{class:"imgrid-add", tabindex:"0", text:T("imagegrid.add","Click, then Ctrl+V an image")});
@@ -2202,7 +2231,9 @@ function editImageGrid(host, block, node){
   host.appendChild(buildSizePresets(block));
 }
 
-async function handleGridPaste(e, block, node, renderGrid){
+// replaceIdx == null -> append a new cell; otherwise replace that cell's image
+// in place (keeps the item's other props, e.g. a per-cell sub-caption).
+async function handleGridPaste(e, block, node, renderGrid, replaceIdx){
   const items = (e.clipboardData||{}).items || [];
   for (const it of items){
     if (it.type && it.type.indexOf("image")===0){
@@ -2215,8 +2246,10 @@ async function handleGridPaste(e, block, node, renderGrid){
         const b64 = await fileToB64(file);
         const r = await api("POST","/api/image",{query:{dir:App.dir, section},
           json:{ png_b64:b64, section }});
-        block.items.push({ file:r.file }); markDirty(); renderGrid();
-        setStatus("saved", T("status.image_added","Image added"));
+        if (replaceIdx!=null && block.items[replaceIdx]) block.items[replaceIdx].file = r.file;
+        else block.items.push({ file:r.file });
+        markDirty(); renderGrid();
+        setStatus("saved", replaceIdx!=null ? T("status.image_replaced","Image replaced") : T("status.image_added","Image added"));
         saveProject(true);
       }catch(err){ setStatus("err","image failed"); toast(T("toast.image_failed","Image upload failed: ")+err.message, true); }
       return;
@@ -3833,21 +3866,32 @@ function previewImage(block, chap, seq){
 function previewImageGrid(block, chap, seq){
   const fig = el("figure",{class:"pv-fig"});
   const grid = el("div",{class:"pv-imgrid"});
-  grid.style.gridTemplateColumns = "repeat(" + (block.cols || 2) + ",1fr)";
-  (block.items || []).forEach((it, i)=>{
+  const cols = block.cols || 2;
+  grid.style.gridTemplateColumns = "repeat(" + cols + ",1fr)";
+  const items = block.items || [];
+  const n = items.length;
+  // Match the engine: honor the picked row count as a minimum, padding blank
+  // trailing cells to fill out the R×C grid (nothing dropped).
+  const needRows = Math.ceil(n / cols) || 0;
+  const rows = Math.max(needRows, Math.max(0, parseInt(block.rows) || 0));
+  const total = Math.max(n, rows * cols);
+  for (let i=0; i<total; i++){
     const cell = el("div",{class:"pv-gcell"});
-    const imgBox = el("div",{class:"pv-gimg"});           // grows + bottom-aligns so sub-labels share a baseline
-    if (it && it.file){
-      const img = el("img",{class:"pv-img", src: imgUrl(it.file), alt:""});
-      img.onerror = ()=>{ const m = previewMissingImg(it.file); if (img.parentNode) img.parentNode.replaceChild(m, img); };
-      imgBox.appendChild(img);
-    } else {
-      imgBox.appendChild(previewMissingImg(""));
-    }
-    cell.appendChild(imgBox);
-    if (block.sub_captions) cell.appendChild(el("div",{class:"pv-sub", text:"(" + String.fromCharCode(97 + i) + ")"}));
+    if (i < n){                                           // a real image cell
+      const it = items[i];
+      const imgBox = el("div",{class:"pv-gimg"});         // grows + bottom-aligns so sub-labels share a baseline
+      if (it && it.file){
+        const img = el("img",{class:"pv-img", src: imgUrl(it.file), alt:""});
+        img.onerror = ()=>{ const m = previewMissingImg(it.file); if (img.parentNode) img.parentNode.replaceChild(m, img); };
+        imgBox.appendChild(img);
+      } else {
+        imgBox.appendChild(previewMissingImg(""));
+      }
+      cell.appendChild(imgBox);
+      if (block.sub_captions) cell.appendChild(el("div",{class:"pv-sub", text:"(" + String.fromCharCode(97 + i) + ")"}));
+    }                                                     // else: structural blank cell (like a Word blank grid cell)
     grid.appendChild(cell);
-  });
+  }
   fig.appendChild(grid);
   fig.appendChild(previewCaption(figLabel(chap, seq), block.caption));
   return fig;

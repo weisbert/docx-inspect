@@ -211,8 +211,10 @@ def golden_project():
                      "caption": "Compliance results", "data": data},
                     # two (missing) side-by-side images with (a)(b) sub-captions:
                     # cells must be bottom-aligned so unequal heights keep the
-                    # sub-labels on one baseline.
-                    {"type": "imagegrid", "id": "grid-gold-1", "cols": 2,
+                    # sub-labels on one baseline. rows=2 with 2 images exercises
+                    # the layout picker's min-rows padding: the grid must render 2
+                    # rows (top filled, bottom row blank), not just 1.
+                    {"type": "imagegrid", "id": "grid-gold-1", "cols": 2, "rows": 2,
                      "caption": "Side-by-side comparison", "sub_captions": True,
                      "width_cm": 15.5,
                      "items": [{"file": "images/left.png"},
@@ -544,6 +546,10 @@ def main():
     grid_tbl = find_imagegrid_table(doc)
     check(grid_tbl is not None, "image-grid table present (bottom-aligned cells)")
     if grid_tbl is not None:
+        # min-rows padding: picker chose rows=2 with 2 images -> 2 rows x 2 cols
+        check(len(grid_tbl.rows) == 2,
+              "image-grid honors picked rows as a minimum (2 rows, bottom blank)",
+              "rows=%d" % len(grid_tbl.rows))
         cells = [c for row in grid_tbl.rows for c in row.cells]
         bottom = 0
         for cell in cells:
