@@ -909,6 +909,7 @@ function buildNodes(nodes, parentEl, numPath, depth){
     const row = el("div", {
       class:"node-row"+(App.selId===n.id?" sel":""), draggable:"true",
       "data-id":n.id,
+      title:T("outline.drag_hint","Drag onto a row's middle = make it a sub-section; top/bottom edge = reorder. Right-click for copy / indent / more."),
       onclick:(e)=>{ e.stopPropagation(); selectNode(n.id); },
       oncontextmenu:(e)=>{ e.preventDefault(); selectNode(n.id); openCtx(e, n.id); },
     });
@@ -934,22 +935,63 @@ function hasDatatable(n){ return (n.blocks||[]).some(b=>b.type==="datatable"); }
 
 function selectNode(id){ App.selId = id; renderTree(); renderEditor(); }
 
-/* ---- drag reorder (siblings only) ----------------------------------------- */
-let dragSrc = null;
+/* ---- drag reorder + re-nest (change level, cross-parent) ------------------ */
+// Drop zone by vertical position in the target row: top edge = sibling BEFORE,
+// bottom edge = sibling AFTER, middle = CHILD (nest one level deeper). This makes
+// promote/demote and moving across parents a pure drag gesture.
+let dragSrc = null, dragSrcIds = null;
+function collectIds(node, set){ set.add(node.id); (node.children||[]).forEach(c=>collectIds(c,set)); return set; }
+function dropModeFor(row, clientY){
+  const r = row.getBoundingClientRect(); const y = clientY - r.top;
+  if (y < r.height*0.30) return "before";
+  if (y > r.height*0.70) return "after";
+  return "child";
+}
+function paintDrop(row, mode){
+  row.style.boxShadow = mode==="child" ? "inset 0 0 0 2px var(--accent)"
+    : mode==="before" ? "inset 0 2px 0 var(--accent)" : "inset 0 -2px 0 var(--accent)";
+  row.style.background = mode==="child" ? "var(--accent-soft)" : "";
+}
+function clearDrop(row){ row.style.boxShadow=""; row.style.background=""; }
+// Move a node to a new place: mode "before"/"after" (sibling of target) or "child"
+// (last child of target). Rejects dropping a node into its own subtree. Returns bool.
+function moveNodeInTree(srcId, targetId, mode){
+  if (!srcId || srcId===targetId) return false;
+  const src = findNode(srcId), dst = findNode(targetId);
+  if (!src || !dst) return false;
+  if (collectIds(src.node, new Set()).has(targetId)) return false;   // no drop into own subtree
+  src.list.splice(src.idx, 1);
+  if (mode==="child"){
+    (dst.node.children = dst.node.children || []).push(src.node);
+    dst.node._collapsed = false;
+  } else {
+    let at = dst.list.indexOf(dst.node); if (at<0) at = dst.list.length;
+    dst.list.splice(at + (mode==="after"?1:0), 0, src.node);
+  }
+  markDirty(); App.selId = src.node.id; renderTree(); renderEditor();
+  return true;
+}
+function demoteNode(id){                      // make a child of the previous sibling
+  const r = findNode(id); if(!r || r.idx===0) return;
+  moveNodeInTree(id, r.list[r.idx-1].id, "child");
+}
+function promoteNode(id){                      // lift one level: sibling after the parent
+  const r = findNode(id); if(!r || !r.parent) return;
+  moveNodeInTree(id, r.parent.id, "after");
+}
 function wireDrag(row, id){
-  row.addEventListener("dragstart",(e)=>{ dragSrc=id; e.dataTransfer.effectAllowed="move"; row.style.opacity=".4"; });
-  row.addEventListener("dragend",()=>{ row.style.opacity=""; dragSrc=null; });
-  row.addEventListener("dragover",(e)=>{ if(dragSrc&&dragSrc!==id){ e.preventDefault(); row.style.boxShadow="inset 0 -2px 0 var(--accent)"; }});
-  row.addEventListener("dragleave",()=>{ row.style.boxShadow=""; });
+  row.addEventListener("dragstart",(e)=>{ dragSrc=id;
+    const r=findNode(id); dragSrcIds = r ? collectIds(r.node, new Set()) : new Set([id]);
+    e.dataTransfer.effectAllowed="move"; row.style.opacity=".4"; });
+  row.addEventListener("dragend",()=>{ row.style.opacity=""; dragSrc=null; dragSrcIds=null; clearDrop(row); });
+  row.addEventListener("dragover",(e)=>{
+    if(!dragSrc || dragSrc===id || (dragSrcIds && dragSrcIds.has(id))) return;  // invalid target
+    e.preventDefault(); paintDrop(row, dropModeFor(row, e.clientY)); });
+  row.addEventListener("dragleave",()=>clearDrop(row));
   row.addEventListener("drop",(e)=>{
-    e.preventDefault(); row.style.boxShadow="";
-    if (!dragSrc || dragSrc===id) return;
-    const src = findNode(dragSrc), dst = findNode(id);
-    if (!src || !dst || src.list !== dst.list) return; // reorder within same parent only
-    src.list.splice(src.idx,1);
-    const newIdx = dst.list.indexOf(dst.node);
-    dst.list.splice(newIdx + (src.idx<newIdx?0:1), 0, src.node);
-    markDirty(); renderTree();
+    e.preventDefault(); const mode = dropModeFor(row, e.clientY); clearDrop(row);
+    if(!dragSrc || dragSrc===id || (dragSrcIds && dragSrcIds.has(id))) return;
+    moveNodeInTree(dragSrc, id, mode);
   });
 }
 
@@ -963,10 +1005,23 @@ function openCtx(e, id){
   ctx.appendChild(item(T("ctx.add_child","Add child"), ()=>addNode(id,"child")));
   ctx.appendChild(item(T("ctx.add_sibling","Add sibling"), ()=>addNode(id,"sibling")));
   ctx.appendChild(el("div",{class:"ctx-sep"}));
+  // whole-section clipboard (copy the node + all its content/subsections)
+  ctx.appendChild(item(T("ctx.copy_section","Copy section"), ()=>copySection(id)));
+  ctx.appendChild(item(T("ctx.duplicate","Duplicate"), ()=>duplicateSection(id)));
+  const clip = getNodeClip();
+  if (clip && clip.node){
+    ctx.appendChild(item(T("ctx.paste_section","Paste section (after)"), ()=>pasteSection(id,"sibling")));
+    ctx.appendChild(item(T("ctx.paste_section_child","Paste section (as child)"), ()=>pasteSection(id,"child")));
+  }
+  ctx.appendChild(el("div",{class:"ctx-sep"}));
   ctx.appendChild(item(T("ctx.rename","Rename"), ()=>renameNode(id)));
   if (r.node.fixed_body)
     ctx.appendChild(item(T("ctx.unlock","Unlock / override"), ()=>unlockNode(id)));
   ctx.appendChild(el("div",{class:"ctx-sep"}));
+  // change nesting level (drag also does this; menu is the discoverable fallback)
+  const ind = item(T("ctx.indent","Indent (make sub-item)"), ()=>demoteNode(id)); if(!canUp) ind.disabled=true;
+  const out = item(T("ctx.outdent","Outdent (raise a level)"), ()=>promoteNode(id)); if(!r.parent) out.disabled=true;
+  ctx.appendChild(ind); ctx.appendChild(out);
   const up = item(T("ctx.move_up","Move up"), ()=>moveNode(id,-1)); if(!canUp) up.disabled=true;
   const dn = item(T("ctx.move_down","Move down"), ()=>moveNode(id,1)); if(!canDown) dn.disabled=true;
   ctx.appendChild(up); ctx.appendChild(dn);
@@ -1389,6 +1444,65 @@ async function reuploadImage(file, srcDir, node){
   const section = sectionOf(node.id);
   const r = await api("POST","/api/image",{query:{dir:App.dir, section}, json:{ png_b64:b64, section }});
   return r.file;
+}
+
+/* ============================================================================
+   SECTION CLIPBOARD  (copy / paste / duplicate a whole outline node)
+   Deep-copies a node (title + blocks + all descendants). Pasted nodes get FRESH
+   ids for every node AND media block so selection and caption bookmarks never
+   collide. Clipboard is in localStorage (survives project switching); a cross-
+   project paste re-uploads the subtree's images. Mirrors the block clipboard.
+============================================================================ */
+const NODE_CLIP_KEY = "docbuilder.nodeclip.v1";
+function setNodeClip(payload){
+  App._nodeClip = payload;
+  try{ localStorage.setItem(NODE_CLIP_KEY, JSON.stringify(payload)); }catch(_){}
+}
+function getNodeClip(){
+  try{ const s = localStorage.getItem(NODE_CLIP_KEY); if (s) return JSON.parse(s); }catch(_){}
+  return App._nodeClip || null;
+}
+// Deep clone a node subtree with fresh node + media-block ids.
+function cloneNodeFresh(node){
+  const c = JSON.parse(JSON.stringify(node));
+  (function walk(n){
+    n.id = uid();
+    n.origin = "user";                       // a pasted section is a new, user-owned node
+    n._collapsed = false;
+    (n.blocks || []).forEach(b => { if (b && b.id) b.id = uid(); });
+    (n.children || []).forEach(walk);
+  })(c);
+  return c;
+}
+function collectNodeImages(node, out){
+  out = out || [];
+  (node.blocks || []).forEach(b => { if (b && (b.type==="image" || b.type==="imagegrid")) out.push(b); });
+  (node.children || []).forEach(c => collectNodeImages(c, out));
+  return out;
+}
+function copySection(id){
+  const r = findNode(id); if (!r) return;
+  flushActiveGrid();
+  setNodeClip({ v:1, dir: App.dir||"", node: JSON.parse(JSON.stringify(r.node)) });
+  renderTree();                              // rebuild so "Paste section" becomes available
+  toast(T("toast.section_copied","Section copied (paste in any section or project)"));
+}
+function pasteSection(id, where){            // where: "sibling" (after id) | "child"
+  const clip = getNodeClip();
+  if (!clip || !clip.node){ toast(T("toast.clip_empty_section","No section copied yet"), true); return; }
+  const r = findNode(id); if (!r) return;
+  const fresh = cloneNodeFresh(clip.node);
+  if (where==="child"){ (r.node.children = r.node.children||[]).push(fresh); r.node._collapsed=false; }
+  else { r.list.splice(r.idx+1, 0, fresh); }
+  markDirty(); App.selId = fresh.id; renderTree(); renderEditor(); saveProject(true);
+  toast(T("toast.section_pasted","Section pasted"));
+  if (clip.dir && App.dir && clip.dir !== App.dir){          // cross-project: bring images along
+    const imgs = collectNodeImages(fresh);
+    if (imgs.length) importPastedImages(imgs, clip.dir, fresh);
+  }
+}
+function duplicateSection(id){               // copy + paste-as-sibling in one step
+  copySection(id); pasteSection(id, "sibling");
 }
 
 function buildAddBlock(node, atIndex){
