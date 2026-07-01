@@ -221,6 +221,13 @@
   .grid-tools{display:flex;gap:6px;margin:8px 0;flex-wrap:wrap;align-items:center}
   .sm-btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 9px;font-size:13px}
   .sm-btn:hover{background:var(--accent-soft);border-color:var(--accent)}
+  /* markdown table editor panel */
+  .md-wrap{margin-top:8px;border:1px solid var(--line);border-radius:6px;padding:8px;background:#fafbfc}
+  .md-bar{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .md-hint{color:var(--muted);font-size:12px}
+  .md-area{width:100%;min-height:150px;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;
+    padding:8px;font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:12.5px;line-height:1.5;
+    white-space:pre;overflow:auto;resize:vertical}
 
   /* shared grid interaction (select vs edit) */
   table.grid.gi-grid{user-select:none;}                 /* select mode: no native text drag-select */
@@ -2053,10 +2060,10 @@ function editTable(host, block){
 
   const tools = el("div",{class:"grid-tools"});
   const mkBtn=(t,fn)=>el("button",{class:"sm-btn",text:t,onclick:fn});
-  tools.appendChild(mkBtn("+ "+T("table.row","Row"), ()=>{ block.rows.push(new Array(colCount(block)).fill("")); markDirty(); rebuild(); }));
-  tools.appendChild(mkBtn("+ "+T("table.col","Col"), ()=>{ block.rows.forEach(r=>r.push("")); if(block.col_w) block.col_w.push(2); markDirty(); rebuild(); }));
-  tools.appendChild(mkBtn("− "+T("table.row","Row"), ()=>{ if(block.rows.length>1){ block.rows.pop(); markDirty(); rebuild(); } }));
-  tools.appendChild(mkBtn("− "+T("table.col","Col"), ()=>{ if(colCount(block)>1){ block.rows.forEach(r=>r.pop()); if(block.col_w) block.col_w.pop(); markDirty(); rebuild(); } }));
+  tools.appendChild(mkBtn("+ "+T("table.row","Row"), ()=>{ insertTableRow(block, block.rows.length); markDirty(); rebuild(); }));
+  tools.appendChild(mkBtn("+ "+T("table.col","Col"), ()=>{ insertTableCol(block, colCount(block)); markDirty(); rebuild(); }));
+  tools.appendChild(mkBtn("− "+T("table.row","Row"), ()=>{ if(deleteTableRow(block, block.rows.length-1)){ markDirty(); rebuild(); } }));
+  tools.appendChild(mkBtn("− "+T("table.col","Col"), ()=>{ if(deleteTableCol(block, colCount(block)-1)){ markDirty(); rebuild(); } }));
   tools.appendChild(el("span",{class:"mt-sep"}));
   tools.appendChild(el("label",{style:{color:"var(--muted)",fontSize:"13px"}, text:T("table.header_rows","Header rows:")}));
   const hdrInput = el("input",{class:"ti num", type:"number", min:"0", value:block.header_rows, style:{width:"64px"},
@@ -2069,6 +2076,33 @@ function editTable(host, block){
   capRow.appendChild(el("label",{text:T("table.caption","Caption")}));
   capRow.appendChild(el("input",{class:"ti grow", value:block.caption||"", placeholder:T("table.caption_ph","Caption (number added automatically)"),
     oninput:(e)=>{ block.caption=e.target.value; markDirty(); }, onblur:()=>saveProject(true)}));
+
+  // Markdown editor: a textarea that live-renders into the grid below. Editing MD
+  // is one-way (MD -> grid); "From table" pulls the current grid back into MD.
+  const mdWrap = el("div",{class:"md-wrap", style:{display:"none"}});
+  const mdArea = el("textarea",{class:"md-area", spellcheck:"false",
+    placeholder:"| Header 1 | Header 2 |\n| --- | --- |\n| a | b |"});
+  const applyMd = ()=>{
+    const parsed = parseMarkdownTable(mdArea.value);
+    if (!parsed || !parsed.rows.length) return;      // ignore incomplete/invalid input
+    block.rows = parsed.rows; block.header_rows = parsed.header_rows;
+    block.col_w = null;                              // column count may change -> equal widths
+    // drop grid selection so the post-rebuild repaint doesn't steal focus from the textarea
+    if (ctx){ ctx.focus=null; ctx.anchor=null; ctx.selected.clear(); ctx.editing=null; }
+    markDirty(); rebuild();
+  };
+  mdArea.addEventListener("input", applyMd);
+  mdArea.addEventListener("blur", ()=>saveProject(true));
+  const mdBar = el("div",{class:"md-bar"});
+  mdBar.appendChild(el("span",{class:"md-hint", text:T("table.md_hint","Edit the Markdown table — the grid below updates live.")}));
+  mdBar.appendChild(el("button",{class:"sm-btn", text:"↻ "+T("table.md_from","From table"),
+    onclick:()=>{ mdArea.value = tableToMarkdown(block); }}));
+  mdWrap.appendChild(mdBar); mdWrap.appendChild(mdArea);
+  let mdOpen = false;
+  tools.appendChild(mkBtn("⇄ "+T("table.markdown","Markdown"), ()=>{
+    mdOpen = !mdOpen; mdWrap.style.display = mdOpen ? "block" : "none";
+    if (mdOpen) mdArea.value = tableToMarkdown(block);
+  }));
 
   const rebuild = ()=>{
     wrap.innerHTML="";
@@ -2088,6 +2122,7 @@ function editTable(host, block){
       row.forEach((val, ci)=>{
         const cellDiv = el("div",{class:"cell", text:val});   // NOTE: not contenteditable in select mode
         const td = el("td",{},[cellDiv]);
+        td.addEventListener("contextmenu",(e)=> openTableCellMenu(e, block, ri, ci, rebuild));
         if (ci < nCols-1){                                    // grip on every interior border (skip last col)
           const grip = el("div",{class:"col-grip", title:T("table.resize_col","Drag to resize column width")});
           grip.addEventListener("mousedown",(e)=> startColResize(e, ctx, block, ci));
@@ -2116,6 +2151,7 @@ function editTable(host, block){
   host.appendChild(capRow);
   host.appendChild(tools);
   host.appendChild(wrap);
+  host.appendChild(mdWrap);
 }
 function colCount(block){ return block.rows.reduce((m,r)=>Math.max(m,r.length),0); }
 // toggle the .hdr class on existing rows without a full rebuild (preserves caret/selection)
@@ -2124,6 +2160,90 @@ function restyleHeaderRows(ctx, block){
   ctx.table.querySelectorAll("tr").forEach((tr, i)=>{
     tr.classList.toggle("hdr", i < (block.header_rows||0));
   });
+}
+
+/* ---- free-table structural edits (shared by the +/- tools and the cell menu) --- */
+function insertTableRow(block, at){
+  const n = colCount(block);
+  block.rows.splice(Math.max(0, Math.min(at, block.rows.length)), 0, new Array(n).fill(""));
+}
+function deleteTableRow(block, r){
+  if (block.rows.length <= 1) return false;
+  block.rows.splice(r, 1);
+  if ((block.header_rows||0) > block.rows.length) block.header_rows = block.rows.length;
+  return true;
+}
+function insertTableCol(block, at){
+  block.rows.forEach(row => { const a = Math.max(0, Math.min(at, row.length)); row.splice(a, 0, ""); });
+  if (Array.isArray(block.col_w)){
+    const avg = block.col_w.reduce((a,b)=>a+(Number(b)||0),0) / (block.col_w.length||1)
+              || (FREE_TBL_TOTAL_CM / (colCount(block)||1));
+    block.col_w.splice(Math.min(at, block.col_w.length), 0, Math.round(avg*100)/100 || 2);
+  }
+}
+function deleteTableCol(block, c){
+  if (colCount(block) <= 1) return false;
+  block.rows.forEach(row => { if (c < row.length) row.splice(c, 1); });
+  if (Array.isArray(block.col_w)) block.col_w.splice(c, 1);
+  return true;
+}
+// Right-click a free-table cell: insert / delete rows and columns relative to it.
+function openTableCellMenu(e, block, r, c, rebuild){
+  e.preventDefault(); e.stopPropagation();
+  const menu = $("#ctx"); menu.innerHTML = "";
+  const item = (label, fn, danger)=> menu.appendChild(
+    el("button",{class:danger?"danger":"", onclick:()=>{ closeCtx(); fn(); }}, label));
+  const done = ()=>{ markDirty(); rebuild(); saveProject(true); };
+  item(T("tbl.ins_row_above","Insert row above"), ()=>{ insertTableRow(block, r);   done(); });
+  item(T("tbl.ins_row_below","Insert row below"), ()=>{ insertTableRow(block, r+1); done(); });
+  menu.appendChild(el("div",{class:"ctx-sep"}));
+  item(T("tbl.ins_col_left","Insert column left"),  ()=>{ insertTableCol(block, c);   done(); });
+  item(T("tbl.ins_col_right","Insert column right"), ()=>{ insertTableCol(block, c+1); done(); });
+  menu.appendChild(el("div",{class:"ctx-sep"}));
+  const delR = item(T("tbl.del_row","Delete row"),    ()=>{ if(deleteTableRow(block, r)) done(); }, true);
+  const delC = item(T("tbl.del_col","Delete column"), ()=>{ if(deleteTableCol(block, c)) done(); }, true);
+  if (block.rows.length <= 1) delR.disabled = true;
+  if (colCount(block) <= 1)   delC.disabled = true;
+  menu.style.display = "block";
+  const vw=window.innerWidth, vh=window.innerHeight, w=menu.offsetWidth, h=menu.offsetHeight;
+  menu.style.left = Math.min(e.clientX, vw-w-6) + "px";
+  menu.style.top  = Math.min(e.clientY, vh-h-6) + "px";
+}
+
+/* ---- Markdown <-> free table -------------------------------------------------- */
+function tableToMarkdown(block){
+  const rows = block.rows || []; if (!rows.length) return "";
+  const ncols = colCount(block);
+  const esc = s => String(s==null?"":s).replace(/\\/g,"\\\\").replace(/\|/g,"\\|").replace(/\n/g," ");
+  const fmt = r => "| " + Array.from({length:ncols}, (_,c)=>esc((r||[])[c])).join(" | ") + " |";
+  const hc = Math.min(Math.max(block.header_rows||0, 1), rows.length);   // a Markdown table needs >=1 header row
+  const out = [];
+  for (let i=0;i<hc;i++) out.push(fmt(rows[i]));
+  out.push("| " + Array.from({length:ncols}, ()=>"---").join(" | ") + " |");
+  for (let i=hc;i<rows.length;i++) out.push(fmt(rows[i]));
+  return out.join("\n");
+}
+function parseMarkdownTable(md){
+  const raw = (md||"").replace(/\r/g,"").split("\n").map(l=>l.trim()).filter(Boolean);
+  const isSep = l => /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/.test(l);
+  const splitRow = l => {
+    let s = l.trim(); if (s.startsWith("|")) s = s.slice(1); if (s.endsWith("|")) s = s.slice(0,-1);
+    const cells=[]; let cur="";
+    for (let i=0;i<s.length;i++){ const ch=s[i];
+      if (ch==="\\"){ cur += (s[i+1]||""); i++; continue; }   // \| -> |, \\ -> \
+      if (ch==="|"){ cells.push(cur.trim()); cur=""; continue; }
+      cur += ch;
+    }
+    cells.push(cur.trim()); return cells;
+  };
+  const dataLines=[]; let sepAt=-1;
+  raw.forEach(l => { if (isSep(l)){ if (sepAt<0) sepAt = dataLines.length; return; } dataLines.push(l); });
+  if (!dataLines.length) return null;
+  const rows = dataLines.map(splitRow);
+  const ncols = rows.reduce((m,r)=>Math.max(m,r.length),0);
+  rows.forEach(r => { while (r.length < ncols) r.push(""); });
+  const header_rows = sepAt>=0 ? Math.min(sepAt, rows.length) : (rows.length>1 ? 1 : 0);
+  return { rows, header_rows };
 }
 // Free-table column widths. col_w is stored in cm (the engine reads it as Cm());
 // preview + editor only use the ratios. When unset/mismatched, columns are equal
@@ -2779,6 +2899,7 @@ function wireGridEvents(ctx){
   ctx._mouseDown = false;
 
   host.addEventListener("mousedown",(e)=>{
+    if (e.button===2) return;                              // right-click: leave selection alone (cell menu handles it)
     const cell = e.target.closest(".cell"); if(!cell || cell.__gi!==ctx) return;
     const [r,c]=cell.__rc;
     const ad = adapterAt(ctx,r,c); if(!ad) return;
