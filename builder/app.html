@@ -2892,7 +2892,7 @@ function editDatatable(host, block){
       let flat=0;
       data.sims.forEach((s, si)=>{
         (s.axes||[]).forEach((ax, ai)=>{
-          tr.appendChild(simAxisCell(ctx, row, ax, ri, flat, DT_FIXED_COLS+flat, ()=>validate()));
+          tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, DT_FIXED_COLS+flat, ()=>validate()));
           flat++;
         });
       });
@@ -2994,10 +2994,20 @@ function numArrCell(ctx, row, key, idx, ri, c, after){
 // TODO: sim_ntwc is a single scalar, so 2+ non-MTM axes would overwrite each
 // other. Real fix is a model migration (sim_ntwc -> per-axis scalar map) in
 // engine.py/tables.py; until then addAxisTo()/paste block a 2nd non-MTM axis.
-function simAxisCell(ctx, row, axisLabel, ri, flatIdx, c, after){
+function simAxisCell(ctx, row, axisLabel, gkey, ri, flatIdx, c, after){
   const mtmIdx = MTM_AXES[String(axisLabel).toUpperCase()];
-  const get = ()=> (mtmIdx!=null) ? (row.sim_mtm||[])[mtmIdx] : row.sim_ntwc;
-  const set = (v)=>{ if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v; };
+  // per-sim rows store values under row.sims[gkey]={mtm,ntwc}; legacy single-sim
+  // rows use the flat row.sim_mtm/sim_ntwc. Mirrors tables.py _axis_value.
+  const perSim = !!row.sims;
+  const svStore = ()=>{ row.sims = row.sims || {}; return (row.sims[gkey] = row.sims[gkey] || {mtm:[null,null,null], ntwc:null}); };
+  const get = ()=>{
+    if (perSim){ const sv=row.sims[gkey]||{}; return (mtmIdx!=null) ? (sv.mtm||[])[mtmIdx] : sv.ntwc; }
+    return (mtmIdx!=null) ? (row.sim_mtm||[])[mtmIdx] : row.sim_ntwc;
+  };
+  const set = (v)=>{
+    if (perSim){ const sv=svStore(); if (mtmIdx!=null){ sv.mtm=sv.mtm||[null,null,null]; sv.mtm[mtmIdx]=v; } else sv.ntwc=v; }
+    else if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v;
+  };
   const cell = el("div",{class:"cell", text:fmtAxis(get())});
   // data-mtm = semantic [MIN,TYP,MAX] slot (0/1/2); blank for non-MTM axes. The
   // validator returns flags by MTM slot, so paintFlags locates cells by this, not
