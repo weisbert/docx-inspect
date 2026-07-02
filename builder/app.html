@@ -3976,9 +3976,17 @@ function dtFlagPositions(row){
   return flags;
 }
 function dtAxisValue(row, gkey, ai){
-  const arr = (gkey === "spec")
-    ? (row.spec_mtm || [null, null, null]).concat([row.spec_ntwc])
-    : (row.sim_mtm  || [null, null, null]).concat([row.sim_ntwc]);
+  let arr;
+  if (gkey === "spec"){
+    arr = (row.spec_mtm || [null, null, null]).concat([row.spec_ntwc]);
+  } else if (row.sims && row.sims[gkey]){
+    // per-sim values (multi-simulation rows) -> {mtm:[...], ntwc:...}; mirrors
+    // tables.py _axis_value. Falls back to flat sim_mtm/sim_ntwc below.
+    const sv = row.sims[gkey] || {};
+    arr = (sv.mtm || [null, null, null]).concat([sv.ntwc]);
+  } else {
+    arr = (row.sim_mtm || [null, null, null]).concat([row.sim_ntwc]);
+  }
   return ai < arr.length ? arr[ai] : null;
 }
 
@@ -4013,10 +4021,12 @@ function previewDatatable(block, chap, seq){
   ]));
 
   // spec group first, then one group per simulation (matches make_groups)
-  const groups = [{ key:"spec", title: data.spec_name || "Spec", role:"spec", stage:null, axes: axesDefault.slice() }];
+  const groups = [];
+  if (data.show_spec !== false)   // data.show_spec===false hides the Spec group (mirrors make_groups)
+    groups.push({ key:"spec", title: data.spec_name || "Spec", role:"spec", stage:null, axes: axesDefault.slice() });
   (data.sims || []).forEach(s => groups.push({
     key: s.key, title: s.title || s.key, role:"sim", stage: s.stage || null, axes:(s.axes || axesDefault).slice() }));
-  const showSpec = !groups.some(g => g.role === "spec");   // spec group always present -> false
+  const showSpec = (data.show_spec !== false) && !groups.some(g => g.role === "spec");
   const firstSim = groups.find(g => g.role === "sim");      // sim_span merges this group's first 3 axes
   const plan = dtPlan(groups, showSpec, w);
 
