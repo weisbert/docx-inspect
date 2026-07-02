@@ -299,6 +299,20 @@
   .pick .ico{font-size:20px}
   .paste-pick{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
   .paste-pick span:last-child{white-space:nowrap}
+  /* hover-to-insert a block between two cards (floats in the inter-card gap;
+     zero layout height until its picker is opened) */
+  .block-list{padding-top:16px}
+  .insert-wrap{position:relative}
+  .insert-bar{position:absolute;left:0;right:0;top:-14px;height:14px;display:flex;
+    align-items:center;justify-content:center;cursor:pointer;opacity:0;transition:opacity .12s;z-index:3}
+  .insert-bar:hover,.insert-bar.open{opacity:1}
+  .insert-bar::before{content:"";position:absolute;left:0;right:0;top:50%;height:2px;
+    transform:translateY(-50%);background:var(--accent);opacity:.3;border-radius:2px}
+  .insert-bar .ins-plus{position:relative;z-index:1;width:20px;height:20px;border-radius:50%;
+    background:var(--accent);color:#fff;font-weight:700;font-size:14px;line-height:1;
+    display:flex;align-items:center;justify-content:center;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+  .insert-picker{position:relative;z-index:2;margin:0 0 12px;padding:8px;
+    background:var(--panel,#fff);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 
   /* cover form */
   .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
@@ -1353,12 +1367,13 @@ function renderNodeEditor(host, node){
   // Consecutive paragraphs render as ONE continuous rich-text editor; media
   // blocks (image/grid/table/datatable) stay standalone and split the prose
   // into separate editing regions.
-  groupBlocks(node.blocks).forEach(seg=>{
+  groupBlocks(node.blocks).forEach((seg, si)=>{
+    listHost.appendChild(buildInsertBar(node, si));   // hover-to-insert a block before this card
     if (seg.kind==="prose") listHost.appendChild(renderProseCard(node, seg));
     else listHost.appendChild(renderBlockCard(node, seg.block, seg.idx));
   });
   host.appendChild(listHost);
-  host.appendChild(buildAddBlock(node, node.blocks.length));
+  host.appendChild(buildAddBlock(node));
 }
 
 function nodePath(id){
@@ -1670,20 +1685,22 @@ function duplicateSection(id){               // copy + paste-as-sibling in one s
   copySection(id); pasteSection(id, "sibling");
 }
 
-function buildAddBlock(node, atIndex){
-  const wrap = el("div",{class:"add-block"});
-  const picker = el("div",{class:"picker hidden"});
-  const trigger = el("button",{class:"add-trigger", html:"+ "+T("block.add","Add block"),
-    onclick:()=>picker.classList.toggle("hidden")});
+// Fill a `.picker` with the block-type choices (paragraph / image / grid / table
+// presets / paste). `getAt()` returns the insert index and is called at CLICK
+// time, so the position stays correct even after prose edits shift block indices.
+function populateBlockPicker(picker, node, getAt){
+  const insertAt = (block)=>{
+    const at = Math.max(0, Math.min(getAt(), node.blocks.length));
+    node.blocks.splice(at, 0, block); markDirty(); renderEditor();
+  };
   const defs = [
     ["para","¶","block.add.para","Paragraph"],
     ["image","🖼","block.add.image","Image"],
     ["imagegrid","▤","block.add.imagegrid","Image grid"],
   ];
   defs.forEach(([type,ico,uik,fb])=>{
-    picker.appendChild(el("button",{class:"pick", onclick:()=>{
-      node.blocks.splice(atIndex,0,newBlock(type)); markDirty(); renderEditor();
-    }},[ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
+    picker.appendChild(el("button",{class:"pick", onclick:()=>insertAt(newBlock(type))},
+      [ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
   });
   // "Table" template group -- presets over the base table / datatable types
   picker.appendChild(el("div",{class:"pick-group",
@@ -1695,19 +1712,52 @@ function buildAddBlock(node, atIndex){
     ["compare","▥","block.add.table.compare","Comparison (no spec)"],
   ];
   tplDefs.forEach(([tkey,ico,uik,fb])=>{
-    picker.appendChild(el("button",{class:"pick", onclick:()=>{
-      node.blocks.splice(atIndex,0,tableTemplate(tkey)); markDirty(); renderEditor();
-    }},[ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
+    picker.appendChild(el("button",{class:"pick", onclick:()=>insertAt(tableTemplate(tkey))},
+      [ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
   });
   // paste entry -- only when the clipboard holds something (works cross-project)
   const clip = getBlockClip();
   if (clip && Array.isArray(clip.blocks) && clip.blocks.length){
     const lbl = T("block.paste","Paste") + ": "
               + (clip.label || (clip.blocks.length + " " + blockWord(clip.blocks.length)));
-    picker.appendChild(el("button",{class:"pick paste-pick", onclick:()=> pasteBlocks(node, atIndex)},
+    picker.appendChild(el("button",{class:"pick paste-pick",
+      onclick:()=> pasteBlocks(node, Math.max(0, Math.min(getAt(), node.blocks.length)))},
       [ el("span",{class:"ico",text:"📋"}), el("span",{text: lbl}) ]));
   }
+}
+
+function buildAddBlock(node){
+  const wrap = el("div",{class:"add-block"});
+  const picker = el("div",{class:"picker hidden"});
+  const trigger = el("button",{class:"add-trigger", html:"+ "+T("block.add","Add block"),
+    onclick:()=>picker.classList.toggle("hidden")});
+  populateBlockPicker(picker, node, ()=> node.blocks.length);   // always append at the end
   wrap.appendChild(trigger); wrap.appendChild(picker);
+  return wrap;
+}
+
+// Live insert index for the gap BEFORE segment `si`. Segment count/order only
+// change via block insert/delete/move (all of which re-render, keeping `si`
+// valid); prose typing only shifts absolute indices, recomputed here from a
+// fresh grouping.
+function segStartIndex(node, si){
+  const segs = groupBlocks(node.blocks);
+  const s = segs[si];
+  if (!s) return node.blocks.length;
+  return s.kind === "prose" ? s.start : s.idx;
+}
+
+// A slim hover strip between two block cards: hovering reveals a "+"; clicking it
+// opens the same block picker inline and inserts right there -- no more "add at
+// the bottom, then drag it all the way up".
+function buildInsertBar(node, si){
+  const wrap = el("div",{class:"insert-wrap"});
+  const picker = el("div",{class:"picker hidden insert-picker"});
+  populateBlockPicker(picker, node, ()=> segStartIndex(node, si));
+  const bar = el("div",{class:"insert-bar", title:T("block.insert_here","Insert a block here"),
+    onclick:()=>{ const closed = picker.classList.toggle("hidden"); bar.classList.toggle("open", !closed); }});
+  bar.appendChild(el("span",{class:"ins-plus", text:"+"}));
+  wrap.appendChild(bar); wrap.appendChild(picker);
   return wrap;
 }
 
