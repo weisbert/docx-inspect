@@ -2614,6 +2614,11 @@ function editDatatable(host, block){
   const defaultAxes = cfg.axis_labels || ["MIN","TYP","MAX","NTWC"];
   // stage presets are config-driven (neutral fallback); used for quick-add + the stage dropdown
   const stagePresets = (cfg.stages && cfg.stages.length) ? cfg.stages : ["S1","S2"];
+  // Spec column is hideable (comparison tables). Mirrors data.show_spec used by the
+  // engine/preview; the editor drops the Spec + Spec-MTM columns and shifts the sim
+  // axis column indices so the select/paste layer stays gap-free.
+  const specShown = ()=> data.show_spec !== false;
+  const fixedCols = ()=> specShown() ? DT_FIXED_COLS : DT_FIXED_COLS - 4;
 
   // caption + spec name
   const top = el("div",{class:"field-row"});
@@ -2623,6 +2628,11 @@ function editDatatable(host, block){
   top.appendChild(el("label",{text:T("datatable.spec_name","Spec name")}));
   top.appendChild(el("input",{class:"ti", value:data.spec_name||"", style:{width:"160px"},
     oninput:(e)=>{ data.spec_name=e.target.value; markDirty(); }, onblur:()=>saveProject(true)}));
+  const specToggle = el("input",{type:"checkbox",
+    onchange:(e)=>{ data.show_spec=e.target.checked; markDirty(); rebuildMetrics(); validate(); saveProject(true); }});
+  specToggle.checked = specShown();
+  top.appendChild(el("label",{text:T("datatable.show_spec","Show Spec"), style:{marginLeft:"10px"}}));
+  top.appendChild(specToggle);
   host.appendChild(top);
 
   // import row
@@ -2819,7 +2829,7 @@ function editDatatable(host, block){
   const ctx = makeGridContext({
     block, host:metricWrap, kind:"compliance",
     rows:()=> data.rows.length,
-    cols:()=> DT_FIXED_COLS + data.sims.reduce((n,s)=>n+(s.axes||[]).length,0),
+    cols:()=> fixedCols() + data.sims.reduce((n,s)=>n+(s.axes||[]).length,0),
     // re-sync `data` after an undo swaps block.data, then rebuild BOTH layers so the
     // group/axis chip strip and its index-bound handlers match the restored data.
     rerender:()=>{ data = block.data; redrawSims(); rebuildMetrics(); },
@@ -2906,14 +2916,17 @@ function editDatatable(host, block){
     hr1.appendChild(el("th",{html:T("datatable.col.unit","Unit")}));
     hr1.appendChild(el("th",{html:T("datatable.col.kind","Kind")}));
     hr1.appendChild(el("th",{html:T("datatable.col.limit","Limit")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.spec","Spec")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.spec_mtm","Spec MIN/TYP/MAX"), colspan:3}));
+    if (specShown()){
+      hr1.appendChild(el("th",{html:T("datatable.col.spec","Spec")}));
+      hr1.appendChild(el("th",{html:T("datatable.col.spec_mtm","Spec MIN/TYP/MAX"), colspan:3}));
+    }
     data.sims.forEach(s=> hr1.appendChild(el("th",{text:(s.title||s.stage||s.key||"sim"), colspan:(s.axes||[]).length})));
     thead.appendChild(hr1);
 
     const hr2 = el("tr",{class:"hdr"});
-    ["","","","","","",""].forEach(()=>hr2.appendChild(el("th",{})));   // actions + 6 fixed
-    ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
+    const hr2empty = specShown() ? 7 : 6;   // actions + cat/item/unit/kind/limit[/spec]
+    for (let i=0;i<hr2empty;i++) hr2.appendChild(el("th",{}));
+    if (specShown()) ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
     flatAxes.forEach(fa=> hr2.appendChild(el("th",{text:fa.label})));
     thead.appendChild(hr2);
     tbl.appendChild(thead);
@@ -2937,13 +2950,15 @@ function editDatatable(host, block){
         ["common_setting","module_setting","tb","result"], "result", ()=>validate()));
       tr.appendChild(selectCell(ctx, row, ri, 4, "limit", true,
         ["le","ge","range"], null, ()=>validate()));
-      tr.appendChild(numCell(ctx, row,"spec", ri, 5, ()=>validate()));
-      [0,1,2].forEach(k=> tr.appendChild(numArrCell(ctx, row,"spec_mtm", k, ri, DT_FIXED_COLS-3+k, ()=>validate())));
+      if (specShown()){
+        tr.appendChild(numCell(ctx, row,"spec", ri, 5, ()=>validate()));
+        [0,1,2].forEach(k=> tr.appendChild(numArrCell(ctx, row,"spec_mtm", k, ri, DT_FIXED_COLS-3+k, ()=>validate())));
+      }
       // sim axes (flat) — map axis label to sim_mtm[0..2] or sim_ntwc
       let flat=0;
       data.sims.forEach((s, si)=>{
         (s.axes||[]).forEach((ax, ai)=>{
-          tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, DT_FIXED_COLS+flat, ()=>validate()));
+          tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate()));
           flat++;
         });
       });
