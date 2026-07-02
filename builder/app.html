@@ -958,6 +958,45 @@ function newComplianceRow(){
            spec:null, spec_mtm:[null,null,null], sim_mtm:[null,null,null],
            spec_ntwc:null, sim_ntwc:null, limit:null, sim_span:false };
 }
+// ---- table insert templates (hybrid architecture) --------------------------
+// The block picker's "Table" group. Each template only PRE-FILLS one of the two
+// base block types -- `table` (plain grid, no semantics) or `datatable`
+// (compliance semantics) -- with a starter config. No new block type, so the
+// engine / preview / editor renderers stay unchanged. New table kinds later =
+// just another template entry here.
+function tplSettingRowsFlat(){
+  const mk = (cat,item,unit)=>({ cat, item, unit, kind:"common_setting",
+    spec:null, spec_mtm:[null,null,null], sim_mtm:[null,null,null],
+    spec_ntwc:null, sim_ntwc:null, limit:null, sim_span:false });
+  return [ mk("PVT_Setting","Process",""), mk("PVT_Setting","Temperature","℃"),
+           mk("PVT_Setting","Voltage","V") ];
+}
+function tplCmpRow(cat, item, unit, kind, simKeys){
+  const sims = {};
+  simKeys.forEach(k=> sims[k] = { mtm:[null,null,null], ntwc:null });
+  return { cat, item, unit, kind, spec:null, spec_mtm:[null,null,null], limit:null, sims };
+}
+function tableTemplate(key){
+  if (key === "plain") return newBlock("table");
+  const cc = App.config.compliance || {};
+  const axes = (cc.axis_labels || ["MIN","TYP","MAX","NTWC"]).slice();
+  if (key === "compliance"){
+    const sims = [{ key:"sim", title:"", stage:(cc.stages&&cc.stages[0])||"", axes: axes.slice() }];
+    return { type:"datatable", id:uid(), kind:"compliance",
+      caption: T("datatable.default_caption","Compliance Table"),
+      data: { spec_name:"Spec", show_spec:true, sims,
+              rows: tplSettingRowsFlat().concat([ newComplianceRow() ]) } };
+  }
+  // "compare": two sim groups, NO spec column, per-sim row values
+  const simKeys = ["a","b"];
+  const sims = [{ key:"a", title:"A", stage:"", axes: axes.slice() },
+                { key:"b", title:"B", stage:"", axes: axes.slice() }];
+  const settingCmp = tplSettingRowsFlat().map(r=> tplCmpRow(r.cat, r.item, r.unit, r.kind, simKeys));
+  return { type:"datatable", id:uid(), kind:"compliance",
+    caption: T("datatable.compare_caption","Comparison Table"),
+    data: { spec_name:"", show_spec:false, sims,
+            rows: settingCmp.concat([ tplCmpRow("","","","result", simKeys) ]) } };
+}
 // MIN/TYP/MAX map onto sim_mtm[0..2]; every OTHER axis collapses to the single
 // scalar sim_ntwc. Until the model is migrated (see TODO at simAxisCell), a group
 // may carry at most ONE non-MTM axis or values silently overwrite each other.
@@ -1640,12 +1679,24 @@ function buildAddBlock(node, atIndex){
     ["para","¶","block.add.para","Paragraph"],
     ["image","🖼","block.add.image","Image"],
     ["imagegrid","▤","block.add.imagegrid","Image grid"],
-    ["datatable","▦","block.add.datatable","Data table"],
-    ["table","⊞","block.add.table","Table"],
   ];
   defs.forEach(([type,ico,uik,fb])=>{
     picker.appendChild(el("button",{class:"pick", onclick:()=>{
       node.blocks.splice(atIndex,0,newBlock(type)); markDirty(); renderEditor();
+    }},[ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
+  });
+  // "Table" template group -- presets over the base table / datatable types
+  picker.appendChild(el("div",{class:"pick-group",
+    style:{padding:"5px 10px 2px", fontSize:"11px", opacity:"0.55"},
+    text:T("block.add.table_group","Table")}));
+  const tplDefs = [
+    ["plain","⊞","block.add.table.plain","Plain table"],
+    ["compliance","▦","block.add.table.compliance","Compliance table"],
+    ["compare","▥","block.add.table.compare","Comparison (no spec)"],
+  ];
+  tplDefs.forEach(([tkey,ico,uik,fb])=>{
+    picker.appendChild(el("button",{class:"pick", onclick:()=>{
+      node.blocks.splice(atIndex,0,tableTemplate(tkey)); markDirty(); renderEditor();
     }},[ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
   });
   // paste entry -- only when the clipboard holds something (works cross-project)
