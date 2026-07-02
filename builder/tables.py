@@ -274,8 +274,10 @@ def _clip_capacity(width_cm, font_pt):
 def make_groups(data, cfg):
     """Build the ordered list of value groups: one ``spec`` group + one per simulation."""
     default_axes = _default_axes(cfg)
-    groups = [dict(key="spec", title=data.get("spec_name", "Spec"), stage=None,
-                   role="spec", axes=list(default_axes))]
+    groups = []
+    if data.get("show_spec", True):
+        groups.append(dict(key="spec", title=data.get("spec_name", "Spec"), stage=None,
+                           role="spec", axes=list(default_axes)))
     sims = data.get("sims") or [{"key": "sim", "title": "Sim", "stage": None}]
     for sim in sims:
         groups.append(dict(key=sim["key"], title=sim.get("title", sim["key"]),
@@ -288,7 +290,15 @@ def _axis_value(row, gkey, ai):
     if gkey == "spec":
         arr = list(row.get("spec_mtm") or [None, None, None]) + [row.get("spec_ntwc")]
     else:
-        arr = list(row.get("sim_mtm") or [None, None, None]) + [row.get("sim_ntwc")]
+        # Per-sim values (multi-simulation rows) live under row["sims"][gkey] =
+        # {"mtm": [...], "ntwc": ...}; fall back to the flat single-sim schema
+        # (sim_mtm / sim_ntwc) so existing single-simulation tables are unchanged.
+        sims = row.get("sims")
+        if isinstance(sims, dict) and gkey in sims:
+            sv = sims.get(gkey) or {}
+            arr = list(sv.get("mtm") or [None, None, None]) + [sv.get("ntwc")]
+        else:
+            arr = list(row.get("sim_mtm") or [None, None, None]) + [row.get("sim_ntwc")]
     return arr[ai] if ai < len(arr) else None
 
 
@@ -327,7 +337,7 @@ def render_datatable(doc, data, cfg):
     bd = cfg.get("borders", {"val": "single", "sz": 4, "color": "000000"})
 
     groups = make_groups(data, cfg)
-    show_spec_col = not any(g["role"] == "spec" for g in groups)
+    show_spec_col = data.get("show_spec", True) and not any(g["role"] == "spec" for g in groups)
     plan = _plan_columns(groups, show_spec_col, w)
     ncols = len(plan)
     rows = data["rows"]

@@ -646,6 +646,33 @@ def main():
     check(footer_has_field(doc, "NUMPAGES"), "footer has a NUMPAGES field")
     check(doc_has_field_anywhere(doc, "TOC"), "document has a TOC field")
 
+    # --- multi-simulation datatable: per-sim row values + hideable Spec group ---
+    comp_cfg = golden_config()["compliance"]
+    ms_data = {
+        "show_spec": False,
+        "sims": [
+            {"key": "post", "title": "Post", "axes": ["MIN", "TYP", "MAX", "NTWC"]},
+            {"key": "pre", "title": "Pre", "axes": ["MIN", "TYP", "MAX", "NTWC"]},
+        ],
+        "rows": [
+            {"cat": "Current", "item": "I_x", "kind": "result", "unit": "uA",
+             "limit": None, "spec_mtm": [None, None, None],
+             "sims": {"post": {"mtm": [160.6, 173.6, 198.7], "ntwc": 186.7},
+                      "pre": {"mtm": [212.3, 227.8, 252.6], "ntwc": None}}},
+        ],
+    }
+    ms_groups = tables.make_groups(ms_data, comp_cfg)
+    check([g["key"] for g in ms_groups] == ["post", "pre"],
+          "show_spec=False suppresses Spec group; sims kept in order",
+          "groups=%r" % [g["key"] for g in ms_groups])
+    ms_tbl = tables.render_datatable(Document(), ms_data, comp_cfg)["table"]
+    ms_texts = [c.text.strip() for row in ms_tbl.rows for c in row.cells]
+    check("160.6" in ms_texts and "212.3" in ms_texts,
+          "per-sim values render distinctly (post 160.6 AND pre 212.3)",
+          "texts=%r" % ms_texts)
+    check(ms_texts.count("186.7") == 1,
+          "post NTWC (186.7) shown once; pre NTWC blank (not duplicated across sims)")
+
     return _finish()
 
 
