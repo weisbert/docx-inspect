@@ -85,16 +85,6 @@
   .badge.user{background:#dcfce7;color:#166534}
   .badge.data{background:#e0e7ff;color:#3730a3}
   .children{margin-left:14px;border-left:1px dashed var(--line)}
-  /* hover-to-insert affordance between sibling sections (no scroll-to-bottom+drag) */
-  .node-gap{position:relative;height:0;padding:3px 0;margin:-1px 0;opacity:0;
-    cursor:pointer;transition:opacity .12s;z-index:1}
-  .node-gap:hover{opacity:1}
-  .node-gap .ln{position:absolute;left:24px;right:8px;top:50%;height:2px;
-    transform:translateY(-50%);background:var(--accent);border-radius:2px}
-  .node-gap .pl{position:absolute;left:4px;top:50%;transform:translateY(-50%);
-    width:15px;height:15px;display:flex;align-items:center;justify-content:center;
-    color:#fff;background:var(--accent);border-radius:50%;font-size:11px;font-weight:700;
-    line-height:1;box-shadow:0 1px 2px rgba(0,0,0,.2)}
 
   /* context menu */
   #ctx{position:fixed;z-index:1000;background:#fff;border:1px solid var(--line);
@@ -1053,7 +1043,6 @@ function renderTree(){
   root.appendChild(frag);
 }
 function buildNodes(nodes, parentEl, numPath, depth){
-  if (depth===0) parentEl.appendChild(insertGapRow(nodes, 0));   // insert before the very first section
   nodes.forEach((n, i)=>{
     const num = numPath.concat(i+1).join(".");
     const hasKids = (n.children && n.children.length);
@@ -1081,24 +1070,7 @@ function buildNodes(nodes, parentEl, numPath, depth){
       buildNodes(n.children, kidsWrap, numPath.concat(i+1), depth+1);
       parentEl.appendChild(kidsWrap);
     }
-    // hover-to-insert gap after this section's whole subtree, at this level
-    parentEl.appendChild(insertGapRow(nodes, i+1));
   });
-}
-// A thin gap between rows: hover reveals a "+" line; click inserts a new section
-// into `list` at `idx` (same nesting level as the surrounding rows). Lets the user
-// add a section right where they are instead of appending at the end + dragging up.
-function insertGapRow(list, idx){
-  const gap = el("div",{class:"node-gap", title:T("outline.insert_here","Add a section here")});
-  gap.appendChild(el("span",{class:"pl", text:"+"}));
-  gap.appendChild(el("span",{class:"ln"}));
-  gap.addEventListener("click",(e)=>{ e.stopPropagation(); insertSectionAt(list, idx); });
-  return gap;
-}
-function insertSectionAt(list, idx){
-  const n = { id: uid(), title: T("node.new","New section"), origin:"user", blocks:[newBlock("para")], children:[] };
-  list.splice(Math.max(0, Math.min(idx, list.length)), 0, n);
-  markDirty(); App.selId=n.id; renderTree(); renderEditor();
 }
 function hasDatatable(n){ return (n.blocks||[]).some(b=>b.type==="datatable"); }
 
