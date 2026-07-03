@@ -163,6 +163,13 @@ def _apply_ops(project, ops):
         elif kind == "set_title":
             node["title"] = op.get("value", node.get("title"))
             log.append("  ~ set title -> '%s'" % node["title"])
+        elif kind == "set_children":
+            # Replace the matched node's child sub-tree wholesale. Each entry is a
+            # full node dict (id/title/blocks/children/...). Lets a bundle add or
+            # restructure sub-sections, which set_blocks/set_title cannot.
+            node["children"] = op.get("children", [])
+            log.append("  ~ set %d child section(s) of '%s'"
+                       % (len(node["children"]), node.get("title", "")))
         else:
             log.append("  ! unknown op '%s' -- skipped" % kind)
     return log
