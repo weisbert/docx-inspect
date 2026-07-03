@@ -458,6 +458,57 @@
     #editor.pv-mode>#editor-inner{height:auto}
     .pv-doc{box-shadow:none;margin:0;max-width:none;padding:0}
   }
+
+  /* ---- notes / revision-note channel (never rendered into the Word body) ---- */
+  /* Notes ride inside project.json as `notes:[{by,at,status,text}]` on the report
+     (meta), on any section (node) and on any block. The engine ignores them, so
+     they travel over Copy text / Apply update but never reach the document. */
+  .notes-panel{border:1px solid var(--line2);border-radius:6px;background:#fbfcfe;margin:8px 0}
+  .notes-panel[open]{background:#fff}
+  .notes-panel.has-open{border-color:var(--warn)}
+  .notes-panel>summary{list-style:none;cursor:pointer;padding:6px 10px;display:flex;
+    align-items:center;gap:8px;user-select:none;color:var(--muted);font-size:13px}
+  .notes-panel>summary::-webkit-details-marker{display:none}
+  .notes-panel>summary:hover{color:var(--ink)}
+  .notes-lbl{font-weight:600}
+  .notes-badge{margin-left:auto;min-width:18px;height:18px;padding:0 6px;border-radius:9px;
+    background:var(--warn);color:#fff;font-size:11px;font-weight:700;display:inline-flex;
+    align-items:center;justify-content:center}
+  .notes-badge.zero{background:var(--line);color:var(--muted)}
+  .notes-body{padding:4px 10px 10px}
+  .note-row{display:flex;gap:8px;padding:7px 0;border-top:1px solid var(--line2)}
+  .note-row:first-child{border-top:none}
+  .note-row.done{opacity:.55}
+  .note-meta{flex:0 0 auto;display:flex;flex-direction:column;gap:3px;align-items:flex-start;min-width:74px}
+  .note-by{font-size:11px;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap}
+  .note-by.user{background:var(--accent-soft);color:var(--accent)}
+  .note-by.claude{background:#ede9fe;color:#6d28d9}
+  .note-at{font-size:10px;color:var(--muted)}
+  .note-main{flex:1 1 auto;display:flex;flex-direction:column;gap:4px}
+  .note-text{width:100%;min-height:38px;resize:vertical;border:1px solid var(--line);
+    border-radius:5px;padding:5px 7px;font:inherit;line-height:1.4}
+  .note-text[readonly]{background:#faf9ff;border-color:#e5e0f5;color:#3b3357}
+  .note-actions{display:flex;gap:6px;align-items:center}
+  .note-toggle{border:1px solid var(--line);background:#fff;border-radius:5px;padding:2px 8px;
+    font-size:12px;color:var(--muted)}
+  .note-toggle.open{border-color:var(--warn);color:var(--warn)}
+  .note-toggle.done{border-color:var(--ok);color:var(--ok)}
+  .note-add{display:flex;gap:6px;margin-top:8px}
+  .note-add textarea{flex:1 1 auto;min-height:34px;resize:vertical;border:1px solid var(--line);
+    border-radius:5px;padding:5px 7px;font:inherit}
+  /* toolbar Notes button open-count badge */
+  #btn-notes .nb-count{min-width:16px;height:16px;padding:0 5px;border-radius:8px;
+    background:var(--warn);color:#fff;font-size:11px;font-weight:700;display:none;
+    align-items:center;justify-content:center}
+  #btn-notes.has-open .nb-count{display:inline-flex}
+  /* notes overview overlay */
+  .notes-ov{max-height:64vh;overflow:auto;margin:8px 0}
+  .notes-ov-item{border:1px solid var(--line2);border-radius:6px;padding:8px 10px;margin-bottom:8px;cursor:pointer}
+  .notes-ov-item:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .notes-ov-loc{font-size:12px;color:var(--muted);margin-bottom:3px}
+  .notes-ov-note{display:flex;gap:8px;align-items:flex-start;padding:3px 0}
+  .notes-ov-empty{color:var(--muted);padding:12px;text-align:center}
+</style>
 </style>
 </head>
 <body>
@@ -477,6 +528,7 @@
     <span class="tb-sep"></span>
     <button class="tb-btn" id="btn-preview" data-ui="toolbar.preview" title="Preview the report in the browser (no file, no Word needed)">Preview</button>
     <button class="tb-btn" id="btn-checklist" data-ui="toolbar.checklist">Checklist</button>
+    <button class="tb-btn" id="btn-notes" data-ui="toolbar.notes" title="All notes / revision remarks in this report (yours and Claude's) — never printed into the Word body"><span>📝 Notes</span><span class="nb-count" id="notes-count">0</span></button>
     <button class="tb-btn" id="btn-copytext" data-ui="toolbar.copytext" title="Copy the whole report as text to paste back over a text-only channel">Copy text</button>
     <div id="status">
       <span class="dot" id="status-dot"></span>
@@ -1268,6 +1320,10 @@ function renderCoverForm(host){
   // revisions grid (always shown)
   host.appendChild(el("div",{class:"section-h", text:T("cover.revisions","Revisions")}));
   host.appendChild(buildRevisionGrid(meta));
+
+  // report-level notes (instructions/replies about the whole report)
+  host.appendChild(el("div",{class:"section-h", text:T("notes.report","Report notes")}));
+  host.appendChild(buildNotesPanel(meta, T("notes.report.panel","Notes for Claude (whole report)")));
 }
 
 function coverFieldEl(f, meta){
@@ -1338,6 +1394,179 @@ function buildRevisionGrid(meta){
   return wrap;
 }
 
+/* ============================================================================
+   NOTES / REVISION-REMARK CHANNEL
+   A note lives inside project.json as an entry of an owner's `notes` array, where
+   an owner is the report (App.project.meta), a section (outline node) or a block:
+       { by:"user"|"claude", at:"YYYY-MM-DD", status:"open"|"done", text:"..." }
+   Notes ride along with Copy text (whole project.json) and Apply update (patch by
+   title), so the user leaves instructions for Claude and Claude leaves replies —
+   both in the same channel. The engine renders only known block types/fields, so
+   notes NEVER reach the Word body (guarded by test_render_golden). `by` marks the
+   author: GUI-authored notes are "user"; Claude writes "claude" entries directly
+   into the JSON when answering a Copy-text paste.
+============================================================================ */
+const NOTE_SELF = "user";   // notes written in this GUI are the user's
+function noteStamp(){
+  const d = new Date();
+  const p = (x)=>String(x).padStart(2,"0");
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate());
+}
+function noteList(owner){ return (owner && Array.isArray(owner.notes)) ? owner.notes : []; }
+function openNotes(owner){ return noteList(owner).filter(n => n && n.status !== "done"); }
+function addNoteTo(owner){
+  if (!Array.isArray(owner.notes)) owner.notes = [];
+  const n = { by:NOTE_SELF, at:noteStamp(), status:"open", text:"" };
+  owner.notes.push(n); return n;
+}
+// Count every open note across the whole project (report + all sections + blocks).
+function countAllOpenNotes(){
+  if (!App.project) return 0;
+  let n = openNotes(App.project.meta || {}).length;
+  const walk = (node)=>{
+    n += openNotes(node).length;
+    (node.blocks || []).forEach(b => { if (b) n += openNotes(b).length; });
+    (node.children || []).forEach(walk);
+  };
+  (App.project.outline || []).forEach(walk);
+  return n;
+}
+function refreshNotesBadge(){
+  const btn = $("#btn-notes"), cnt = $("#notes-count");
+  if (!btn || !cnt) return;
+  const has = !!App.project;
+  btn.style.display = has ? "" : "none";
+  if (!has) return;
+  const n = countAllOpenNotes();
+  cnt.textContent = String(n);
+  btn.classList.toggle("has-open", n > 0);
+}
+
+// Build a collapsible notes panel bound to `owner` (mutated in place). `title`
+// labels the section; `startOpen` forces the <details> open (used when the owner
+// already has open notes so the user sees them without a click).
+function buildNotesPanel(owner, title){
+  const det = el("details",{class:"notes-panel"});
+  const badge = el("span",{class:"notes-badge"});
+  const sum = el("summary",{},[
+    el("span",{text:"📝"}),
+    el("span",{class:"notes-lbl", text: title || T("notes.title","Notes")}),
+    badge,
+  ]);
+  det.appendChild(sum);
+  const body = el("div",{class:"notes-body"});
+  det.appendChild(body);
+
+  const syncBadge = ()=>{
+    const open = openNotes(owner).length, total = noteList(owner).length;
+    badge.textContent = total ? (open ? String(open) : "✓") : "0";
+    badge.classList.toggle("zero", open === 0);
+    det.classList.toggle("has-open", open > 0);
+  };
+  const redraw = ()=>{
+    body.innerHTML = "";
+    const list = noteList(owner);
+    list.forEach((note, i)=>{
+      const isClaude = note.by === "claude";
+      const done = note.status === "done";
+      const row = el("div",{class:"note-row"+(done?" done":"")});
+      row.appendChild(el("div",{class:"note-meta"},[
+        el("span",{class:"note-by "+(isClaude?"claude":"user"),
+          text: isClaude ? T("notes.by_claude","Claude") : T("notes.by_you","You")}),
+        note.at ? el("span",{class:"note-at", text:note.at}) : null,
+      ]));
+      const main = el("div",{class:"note-main"});
+      // Claude's replies are read-only here so authorship stays honest; the user
+      // still toggles their status and can delete them.
+      const ta = el("textarea",{class:"note-text", value:note.text||"",
+        placeholder:T("notes.placeholder","Write a note or instruction…")});
+      if (isClaude) ta.setAttribute("readonly","");
+      else {
+        ta.addEventListener("input",()=>{ note.text = ta.value; markDirty(); });
+        ta.addEventListener("blur",()=>saveProject(true));
+      }
+      main.appendChild(ta);
+      const acts = el("div",{class:"note-actions"});
+      const tog = el("button",{class:"note-toggle "+(done?"done":"open"),
+        text: done ? "✓ "+T("notes.done","Done") : "○ "+T("notes.open","Open"),
+        onclick:()=>{ note.status = done ? "open" : "done"; markDirty();
+          redraw(); syncBadge(); refreshNotesBadge(); }});
+      acts.appendChild(tog);
+      acts.appendChild(el("button",{class:"icon-btn danger", text:"✕", title:T("action.delete","Delete"),
+        onclick:()=>{ list.splice(i,1); if(!list.length) delete owner.notes;
+          markDirty(); redraw(); syncBadge(); refreshNotesBadge(); }}));
+      main.appendChild(acts);
+      row.appendChild(main);
+      body.appendChild(row);
+    });
+    // add-note affordance
+    const addWrap = el("div",{class:"note-add"});
+    const nta = el("textarea",{placeholder:T("notes.add","Add a note / instruction for Claude…")});
+    const commit = ()=>{ const v=nta.value.trim(); if(!v) return;
+      const n = addNoteTo(owner); n.text = v; markDirty();
+      redraw(); syncBadge(); refreshNotesBadge(); };
+    nta.addEventListener("keydown",(e)=>{ if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault(); commit(); }});
+    addWrap.appendChild(nta);
+    addWrap.appendChild(el("button",{class:"sm-btn", text:"+ "+T("notes.add_btn","Add"), onclick:commit}));
+    body.appendChild(addWrap);
+  };
+  redraw(); syncBadge();
+  if (openNotes(owner).length) det.setAttribute("open","");
+  return det;
+}
+
+/* ---- notes overview (scan every note before Copy text) -------------------- */
+function openNotesOverview(){
+  if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("notes.overview.title","All notes")}));
+  m.appendChild(el("p",{text:T("notes.overview.sub","Every note in this report. Click one to jump to it. Notes travel with Copy text but are never printed into the Word body.")}));
+
+  // gather {owner, loc, jump} entries that actually carry notes
+  const entries = [];
+  const meta = App.project.meta || {};
+  if (noteList(meta).length) entries.push({owner:meta, loc:T("notes.loc.report","Report (cover)"), jump:()=>{ App.selId=COVER_ID; renderTree(); renderEditor(); }});
+  const walk = (node)=>{
+    if (noteList(node).length){
+      const path = nodePath(node.id);
+      entries.push({owner:node, loc:(path?path+" ":"")+(node.title||T("node.untitled","(untitled)")),
+        jump:()=>{ App.selId=node.id; renderTree(); renderEditor(); }});
+    }
+    (node.blocks || []).forEach((b, bi)=>{ if (b && noteList(b).length){
+      const path = nodePath(node.id);
+      const kind = ({para:"Paragraph",image:"Image",imagegrid:"Image grid",datatable:"Data table",table:"Table"}[b.type]||b.type);
+      entries.push({owner:b, loc:(path?path+" ":"")+(node.title||"")+" › "+kind+" #"+(bi+1),
+        jump:()=>{ App.selId=node.id; renderTree(); renderEditor(); }});
+    }});
+    (node.children || []).forEach(walk);
+  };
+  (App.project.outline || []).forEach(walk);
+
+  const box = el("div",{class:"notes-ov"});
+  if (!entries.length){
+    box.appendChild(el("div",{class:"notes-ov-empty", text:T("notes.overview.empty","No notes yet. Add one from any section, block, or the cover.")}));
+  } else {
+    entries.forEach(e=>{
+      const item = el("div",{class:"notes-ov-item", onclick:()=>{ closeOverlay(); e.jump(); }});
+      item.appendChild(el("div",{class:"notes-ov-loc", text:e.loc}));
+      noteList(e.owner).forEach(note=>{
+        const done = note.status === "done";
+        item.appendChild(el("div",{class:"notes-ov-note"+(done?" done":""), style:done?{opacity:.55}:{}},[
+          el("span",{class:"note-by "+(note.by==="claude"?"claude":"user"),
+            text:note.by==="claude"?T("notes.by_claude","Claude"):T("notes.by_you","You")}),
+          el("span",{text:(note.text||"").slice(0,160) + (done?"  ✓":"")}),
+        ]));
+      });
+      box.appendChild(item);
+    });
+  }
+  m.appendChild(box);
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"tb-btn primary", text:T("action.close","Close"), onclick:closeOverlay}),
+  ]));
+  showOverlay();
+}
+
 /* ---- node (section) editor ------------------------------------------------ */
 function renderNodeEditor(host, node){
   const path = nodePath(node.id);
@@ -1350,6 +1579,9 @@ function renderNodeEditor(host, node){
       el("button",{class:"sm-btn", text:T("ctx.rename","Rename"), onclick:()=>renameNode(node.id)})
     ])
   ]));
+
+  // section-level notes (instructions/replies for this section as a whole)
+  host.appendChild(buildNotesPanel(node, T("notes.section","Section notes")));
 
   // fixed-body (read-only with unlock affordance)
   if (node.fixed_body){
@@ -1447,6 +1679,9 @@ function renderProseCard(node, seg){
   const body = el("div",{class:"card-body"});
   buildProseEditor(body, node, seg);
   card.appendChild(body);
+  // notes for this text run attach to its first paragraph block (stable owner)
+  if (seg.blocks && seg.blocks[0])
+    card.appendChild(buildNotesPanel(seg.blocks[0], T("notes.block","Block notes")));
   return card;
 }
 
@@ -1495,6 +1730,7 @@ function renderBlockCard(node, block, idx){
   else if (block.type==="table") editTable(body, block);
   else if (block.type==="datatable") editDatatable(body, block);
   card.appendChild(body);
+  card.appendChild(buildNotesPanel(block, T("notes.block","Block notes")));
 
   wireBlockDrag(card, node, block);
   return card;
@@ -3687,6 +3923,9 @@ function syncChrome(){
   if (bc) bc.classList.toggle("hidden", !inProject);
   const bt = $("#btn-copytext");
   if (bt) bt.classList.toggle("hidden", !inProject);
+  const bn = $("#btn-notes");
+  if (bn) bn.classList.toggle("hidden", !inProject);
+  refreshNotesBadge();
   if (App.view === "home") setStatus("", T("status.no_project","No project open"));
   if (inTemplate) setStatus("", T("status.template_mode","Editing template"));
   if (inChecklist) setStatus("", T("status.checklist_mode","Simulation checklist"));
@@ -4955,6 +5194,7 @@ function wireToolbar(){
   $("#btn-preview").onclick = enterPreview;
   $("#btn-checklist").onclick = enterChecklist;
   $("#btn-copytext").onclick = copyProjectText;
+  $("#btn-notes").onclick = openNotesOverview;
 }
 
 /* ============================================================================

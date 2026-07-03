@@ -159,6 +159,13 @@ def golden_config():
     }
 
 
+# Sentinel strings planted in `notes` fields at every level; the render must
+# never emit any of them (notes are a side channel, not document content).
+NOTE_SENTINEL_REPORT = "ZZNOTESENTINELREPORTZZ"
+NOTE_SENTINEL_SECTION = "ZZNOTESENTINELSECTIONZZ"
+NOTE_SENTINEL_BLOCK = "ZZNOTESENTINELBLOCKZZ"
+
+
 def golden_project():
     """One chapter with a (missing) captioned image and a compliance datatable.
 
@@ -194,14 +201,24 @@ def golden_project():
     return {
         "schema_version": 1,
         "template": "golden_tpl_v1",
+        # meta carries a report-level note (the revision-remark channel). The
+        # engine must NEVER render it into the Word body (asserted below).
         "meta": {"title": "Golden Render Test", "author": "Tester",
-                 "reviewers": [], "revisions": []},
+                 "reviewers": [], "revisions": [],
+                 "notes": [{"by": "user", "at": "2026-07-03", "status": "open",
+                            "text": NOTE_SENTINEL_REPORT}]},
         "outline": [
             {
                 "title": "Results",
                 "level": 1,
+                # section-level note -- also must not reach the body.
+                "notes": [{"by": "claude", "at": "2026-07-03", "status": "done",
+                           "text": NOTE_SENTINEL_SECTION}],
                 "blocks": [
                     {"type": "para", "list": None,
+                     # block-level note on a real block -- must not reach the body.
+                     "notes": [{"by": "user", "at": "2026-07-03", "status": "open",
+                                "text": NOTE_SENTINEL_BLOCK}],
                      "runs": [{"t": "See "}, {"ref": "img-gold-1"},
                               {"t": " and "}, {"ref": "dt-gold-1"}, {"t": "."}]},
                     {"type": "image", "id": "img-gold-1",
@@ -478,6 +495,23 @@ def main():
           "stats=%r" % stats)
 
     doc = Document(rp)
+
+    # --- notes channel never leaks into the rendered document ---
+    # Read the raw document.xml (+ headers/footers) and assert no sentinel from
+    # any meta/section/block `notes` field appears. This locks the iron rule that
+    # the revision-remark side channel is stripped from the Word body.
+    import zipfile
+    xml_blob = ""
+    with zipfile.ZipFile(rp) as zf:
+        for name in zf.namelist():
+            if name.endswith(".xml"):
+                xml_blob += zf.read(name).decode("utf-8", "replace")
+    for sentinel, where in ((NOTE_SENTINEL_REPORT, "meta"),
+                            (NOTE_SENTINEL_SECTION, "section"),
+                            (NOTE_SENTINEL_BLOCK, "block")):
+        check(sentinel not in xml_blob,
+              "notes are NOT rendered (%s-level note absent from docx)" % where,
+              "sentinel %r leaked into the document" % sentinel)
 
     # --- compliance table located + header band ---
     ctbl = find_compliance_table(doc)
