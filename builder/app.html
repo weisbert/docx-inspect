@@ -1478,8 +1478,11 @@ function buildNotesPanel(owner, title){
       const main = el("div",{class:"note-main"});
       // Claude's replies are read-only here so authorship stays honest; the user
       // still toggles their status and can delete them.
-      const ta = el("textarea",{class:"note-text", value:note.text||"",
+      // NB: a <textarea>'s content is its .value property, NOT a "value" attribute
+      // (el() would set the ignored attribute) -- so seed it via .value directly.
+      const ta = el("textarea",{class:"note-text",
         placeholder:T("notes.placeholder","Write a note or instruction…")});
+      ta.value = note.text || "";
       if (isClaude) ta.setAttribute("readonly","");
       else {
         ta.addEventListener("input",()=>{ note.text = ta.value; markDirty(); });
