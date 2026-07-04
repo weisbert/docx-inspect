@@ -487,9 +487,17 @@ def validate_compliance(data):
 
 
 def _import_engine():
+    # Reload on every export so a `git pull` of engine.py/tables.py takes effect
+    # without restarting this long-running server (same rationale as the
+    # apply_update reload). engine imports tables at module scope, so tables must
+    # be reloaded first, otherwise engine keeps binding the stale module.
+    import importlib
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
+    import tables  # type: ignore
+    importlib.reload(tables)
     import engine  # type: ignore
+    importlib.reload(engine)
     return engine
 
 
