@@ -495,9 +495,14 @@ def render_datatable(doc, data, cfg):
 # ---------------------------------------------------------------------------
 # Public: free-table renderer (arbitrary rows/cols)
 # ---------------------------------------------------------------------------
-def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
+def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
+                      row_fills=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
         header_fill, border{val,sz,color}, font_pt(optional).
+
+    ``row_fills`` (optional): map of row-index -> hex6 fill, letting a caller shade
+    whole rows (e.g. band condition rows vs result rows). Header rows keep the header
+    fill; a row_fills entry on a non-header row overrides to that colour.
 
     RETURN SHAPE (CONTRACT): the same result-dict shape as render_datatable --
     {"table": <Table or None>, "total_rows": int, "flagged_rows": 0,
@@ -511,6 +516,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
     header_fill = cfg.get("header_fill", "D9D9D9")
     bd = cfg.get("border", {"val": "single", "sz": 4, "color": "000000"})
     font_pt = cfg.get("font_pt")
+    rfills = {int(k): v for k, v in (row_fills or {}).items()}
 
     table = doc.add_table(rows=nrows, cols=ncols)
     table.alignment = 1
@@ -531,6 +537,8 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None):
             cell = table.cell(r, c)
             if r < header_rows:
                 _shade(cell, header_fill)
+            elif r in rfills:
+                _shade(cell, rfills[r])
             runs = val.get("runs") if isinstance(val, dict) else None
             if isinstance(runs, list):
                 _set_cell_runs(cell, runs, font_pt, header_bold=(r < header_rows))

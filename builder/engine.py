@@ -1230,7 +1230,8 @@ def _build_outline(doc, cfg, outline, names):
                             doc, block.get("rows", []), free_cfg,
                             header_rows=block.get("header_rows", 1),
                             merges=block.get("merges"),
-                            col_w=block.get("col_w"))
+                            col_w=block.get("col_w"),
+                            row_fills=block.get("row_fills"))
                         _collect_table_result(
                             res, warn, "chapter %d / table / block %d" % (chap, idx))
                 except Exception as ex:

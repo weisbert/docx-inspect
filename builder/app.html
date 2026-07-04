@@ -2677,11 +2677,14 @@ function editTable(host, block){
     for (let ci=0; ci<nCols; ci++)
       cg.appendChild(el("col",{style:{width:(100*(Number(weights[ci])||0)/wsum)+"%"}}));
     tbl.appendChild(cg);
+    const rfills = block.row_fills || null;                 // {rowIndex: "RRGGBB"} band fills
     block.rows.forEach((row, ri)=>{
       const tr = el("tr",{class: ri<block.header_rows?"hdr":""});
+      const band = (rfills && ri >= (block.header_rows||0) && rfills[ri] != null) ? ("#" + rfills[ri]) : null;
       row.forEach((val, ci)=>{
         const cellDiv = el("div",{class:"cell", html: cellHtml(val)});   // rich: styled runs render as HTML
         const td = el("td",{},[cellDiv]);
+        if (band) td.style.background = band;
         td.addEventListener("contextmenu",(e)=> openTableCellMenu(e, block, ri, ci, rebuild));
         if (ci < nCols-1){                                    // grip on every interior border (skip last col)
           const grip = el("div",{class:"col-grip", title:T("table.resize_col","Drag to resize column width")});
@@ -4293,11 +4296,14 @@ function previewFreeTable(block, chap, seq){
     }
     tbl.appendChild(cg);
   }
+  const rfills = block.row_fills || null;            // {rowIndex: "RRGGBB"} band fills
   (block.rows || []).forEach((row, ri)=>{
     const tr = el("tr",{class: ri < hr ? "pv-hdr" : ""});
+    const band = (rfills && ri >= hr && rfills[ri] != null) ? ("#" + rfills[ri]) : null;
     (row || []).forEach(cell=>{
       const td = el(ri < hr ? "th" : "td", {class:"pv-td"});
       td.innerHTML = cellHtml(cell);                 // styled runs render as HTML
+      if (band) td.style.background = band;
       tr.appendChild(td);
     });
     tbl.appendChild(tr);
