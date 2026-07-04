@@ -2465,25 +2465,54 @@ function buildSizePresets(block){
   return outer;
 }
 
-async function handleImagePaste(e, block, node, renderPrev){
-  const items = (e.clipboardData||{}).items || [];
-  for (const it of items){
+// Pull an image blob straight off a paste event (screenshots, drag-drop, and any
+// source that exposes an image/* item or file). Returns a Blob/File or null.
+function imageFromClipboardEvent(e){
+  const cd = e.clipboardData || {};
+  for (const it of (cd.items || [])){
     if (it.type && it.type.indexOf("image")===0){
-      e.preventDefault();
-      const file = it.getAsFile();
-      const b64 = await fileToB64(file);
-      const section = sectionOf(node.id);
-      try{
-        setStatus("saving", T("status.uploading","Uploading image…"));
-        const r = await api("POST","/api/image",{query:{dir:App.dir, section},
-          json:{ png_b64:b64, section }});
-        block.file = r.file; markDirty(); renderPrev();
-        setStatus("saved", T("status.image_added","Image added"));
-        saveProject(true);
-      }catch(err){ setStatus("err","image failed"); toast("Image upload failed: "+err.message, true); }
-      return;
+      const f = it.getAsFile();
+      if (f) return f;
     }
   }
+  for (const f of (cd.files || [])){
+    if (f.type && f.type.indexOf("image")===0) return f;
+  }
+  return null;
+}
+
+async function handleImagePaste(e, block, node, renderPrev){
+  // 1) Fast path: an image directly on the paste event (screenshots / files).
+  let file = imageFromClipboardEvent(e);
+  // 2) Fallback: PowerPoint & other Office apps often put the picture on the
+  //    clipboard as a DIB/EMF that Chrome does NOT surface as an image item in the
+  //    sync paste event (it only exposes text/html pointing at a file:// temp).
+  //    The async Clipboard API can still read it back as image/png.
+  if (!file && navigator.clipboard && navigator.clipboard.read){
+    e.preventDefault();
+    try{
+      for (const ci of await navigator.clipboard.read()){
+        const t = (ci.types || []).find(x => x.indexOf("image/")===0);
+        if (t){ file = await ci.getType(t); break; }
+      }
+    }catch(_){ /* permission denied / nothing readable -> fall through to the hint */ }
+  }
+  if (!file){
+    toast(T("toast.no_clip_image",
+      "No pasteable image on the clipboard. From PowerPoint: right-click the picture -> Save as Picture, or paste a screenshot instead."), true);
+    return;
+  }
+  e.preventDefault();
+  const b64 = await fileToB64(file);
+  const section = sectionOf(node.id);
+  try{
+    setStatus("saving", T("status.uploading","Uploading image…"));
+    const r = await api("POST","/api/image",{query:{dir:App.dir, section},
+      json:{ png_b64:b64, section }});
+    block.file = r.file; markDirty(); renderPrev();
+    setStatus("saved", T("status.image_added","Image added"));
+    saveProject(true);
+  }catch(err){ setStatus("err","image failed"); toast("Image upload failed: "+err.message, true); }
 }
 function fileToB64(file){
   return new Promise((res,rej)=>{
