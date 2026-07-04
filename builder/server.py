@@ -1185,12 +1185,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _import_apply_update():
-    """Import the repo-root apply_update module (shared with the CLI)."""
+    """Import the repo-root apply_update module (shared with the CLI).
+
+    Reload on every call so a long-running server picks up an updated
+    apply_update.py after a ``git pull`` WITHOUT needing a restart (Python caches
+    modules in sys.modules; a running server would otherwise keep the stale code).
+    """
+    import importlib
     repo_root = os.path.abspath(os.path.join(HERE, ".."))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     import apply_update  # noqa: E402  (repo-root sibling of builder/)
-    return apply_update
+    return importlib.reload(apply_update)
 
 
 def _rmtree_quiet(path):
