@@ -257,6 +257,9 @@
   /* paint selection/focus/invalid on the TD (not the inner div) so the highlight
      fills the full row height even for empty cells, whose div only grows to its
      content and would otherwise leave a white strip below */
+  /* row_fills band: set via a CSS var + class (NOT inline background) so the
+     selection rule below — higher specificity via :has() — still paints over it */
+  table.grid td.band-fill{background:var(--band-c)}
   table.grid td:has(>.cell.cell-selected){background:var(--accent-soft)}
   table.grid td:has(>.cell.cell-focus){box-shadow:inset 0 0 0 2px var(--accent)}
   table.grid td:has(>.cell.cell-invalid){background:#fff7ed;box-shadow:inset 0 0 0 1px var(--warn)}
@@ -2684,7 +2687,7 @@ function editTable(host, block){
       row.forEach((val, ci)=>{
         const cellDiv = el("div",{class:"cell", html: cellHtml(val)});   // rich: styled runs render as HTML
         const td = el("td",{},[cellDiv]);
-        if (band) td.style.background = band;
+        if (band){ td.style.setProperty("--band-c", band); td.classList.add("band-fill"); }
         td.addEventListener("contextmenu",(e)=> openTableCellMenu(e, block, ri, ci, rebuild));
         if (ci < nCols-1){                                    // grip on every interior border (skip last col)
           const grip = el("div",{class:"col-grip", title:T("table.resize_col","Drag to resize column width")});
@@ -2729,15 +2732,34 @@ function restyleHeaderRows(ctx, block){
 }
 
 /* ---- free-table structural edits (shared by the +/- tools and the cell menu) --- */
+// Rebuild block.row_fills (keyed by absolute row index) after a structural row edit.
+// `map` returns the new index for an old index, or null to drop that band.
+function remapRowFills(block, map){
+  if (!block.row_fills) return;
+  const next = {};
+  for (const k in block.row_fills){
+    const ni = map(parseInt(k, 10));
+    if (ni != null) next[ni] = block.row_fills[k];
+  }
+  if (Object.keys(next).length) block.row_fills = next; else delete block.row_fills;
+}
 function insertTableRow(block, at){
   const n = colCount(block);
-  block.rows.splice(Math.max(0, Math.min(at, block.rows.length)), 0, new Array(n).fill(""));
+  const a = Math.max(0, Math.min(at, block.rows.length));
+  block.rows.splice(a, 0, new Array(n).fill(""));
+  remapRowFills(block, (i)=> i >= a ? i + 1 : i);
 }
 function deleteTableRow(block, r){
   if (block.rows.length <= 1) return false;
   block.rows.splice(r, 1);
   if ((block.header_rows||0) > block.rows.length) block.header_rows = block.rows.length;
+  remapRowFills(block, (i)=> i === r ? null : (i > r ? i - 1 : i));
   return true;
+}
+// Set (hex without '#') or clear (null) the band fill on a whole row.
+function setRowFill(block, r, hex){
+  if (hex){ block.row_fills = block.row_fills || {}; block.row_fills[r] = hex; }
+  else if (block.row_fills){ delete block.row_fills[r]; if (!Object.keys(block.row_fills).length) delete block.row_fills; }
 }
 function insertTableCol(block, at){
   block.rows.forEach(row => { const a = Math.max(0, Math.min(at, row.length)); row.splice(a, 0, ""); });
@@ -2770,6 +2792,18 @@ function openTableCellMenu(e, block, r, c, rebuild){
   const delC = item(T("tbl.del_col","Delete column"), ()=>{ if(deleteTableCol(block, c)) done(); }, true);
   if (block.rows.length <= 1) delR.disabled = true;
   if (colCount(block) <= 1)   delC.disabled = true;
+  // Row fill (band) — only meaningful on body rows, not header rows.
+  if (r >= (block.header_rows||0)){
+    menu.appendChild(el("div",{class:"ctx-sep"}));
+    const swatch = (hex)=> el("span",{style:{display:"inline-block",width:"11px",height:"11px",
+      borderRadius:"2px",border:"1px solid var(--line)",background:"#"+hex,marginRight:"7px",verticalAlign:"-1px"}});
+    const fillItem = (label, hex)=> menu.appendChild(el("button",{onclick:()=>{ closeCtx();
+      setRowFill(block, r, hex); done(); }}, [hex?swatch(hex):document.createTextNode(""), document.createTextNode(label)]));
+    fillItem(T("tbl.fill_beige","Fill row: beige"), "EEECE1");   // compliance setting colour
+    fillItem(T("tbl.fill_blue","Fill row: blue"),   "DCE6F1");
+    fillItem(T("tbl.fill_green","Fill row: green"), "EBF1DE");
+    item(T("tbl.fill_clear","Clear row fill"), ()=>{ setRowFill(block, r, null); done(); });
+  }
   menu.style.display = "block";
   const vw=window.innerWidth, vh=window.innerHeight, w=menu.offsetWidth, h=menu.offsetHeight;
   menu.style.left = Math.min(e.clientX, vw-w-6) + "px";
