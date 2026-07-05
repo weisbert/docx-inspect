@@ -127,23 +127,25 @@ def resolve_project_dir(dir_arg, create=False):
     if not dir_arg:
         raise ValueError("missing 'dir' parameter")
     root = CFG.reports_root
+    # A6: fail CLOSED when no reports root is configured. Previously a missing
+    # root skipped the containment check entirely (fail-open), so any absolute /
+    # relative path resolved unchecked. Mirror _api_apply_update's stance.
+    if not root:
+        raise ValueError("no reports root configured")
     if os.path.isabs(dir_arg):
         target = os.path.abspath(dir_arg)
-    elif root:
-        target = os.path.abspath(os.path.join(root, dir_arg))
     else:
-        target = os.path.abspath(dir_arg)
+        target = os.path.abspath(os.path.join(root, dir_arg))
 
-    if root:
-        root_abs = os.path.abspath(root)
-        # containment check that is robust to case/sep on Windows
-        try:
-            common = os.path.commonpath([root_abs, target])
-        except ValueError:
-            # different drives
-            raise ValueError("path escapes reports_root")
-        if os.path.normcase(common) != os.path.normcase(root_abs):
-            raise ValueError("path escapes reports_root")
+    root_abs = os.path.abspath(root)
+    # containment check that is robust to case/sep on Windows
+    try:
+        common = os.path.commonpath([root_abs, target])
+    except ValueError:
+        # different drives
+        raise ValueError("path escapes reports_root")
+    if os.path.normcase(common) != os.path.normcase(root_abs):
+        raise ValueError("path escapes reports_root")
 
     if create:
         os.makedirs(target, exist_ok=True)
@@ -974,6 +976,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_paste_import(qs)
             if path == "/api/apply-update":
                 return self._api_apply_update()
+            if path == "/api/rollback":
+                return self._api_rollback()
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -1109,6 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_project_put(self, qs):
         dir_arg = (qs.get("dir") or [None])[0]
+        saved_at = (qs.get("saved_at") or [None])[0]
         project_dir = resolve_project_dir(dir_arg, create=True)
         project = self._read_json()
         if not isinstance(project, dict):
@@ -1117,6 +1122,19 @@ class Handler(BaseHTTPRequestHandler):
         if sv is not None and sv != 1:
             return self._send_error_json("unsupported schema_version: %r" % sv)
         pj = os.path.join(project_dir, "project.json")
+        # A4 optimistic concurrency: if the client last saw mtime `saved_at` but the
+        # file changed on disk since (a second tab, or an applied update bundle),
+        # refuse with 409 so a stale autosave cannot clobber / revert it. The client
+        # then reloads or explicitly overwrites (by re-PUTting without saved_at).
+        if saved_at and os.path.isfile(pj):
+            try:
+                if abs(os.path.getmtime(pj) - float(saved_at)) > 1e-6:
+                    return self._send_json(
+                        {"error": "conflict: project.json changed on disk",
+                         "conflict": True, "saved_at": os.path.getmtime(pj)},
+                        status=409)
+            except (ValueError, OSError):
+                pass
         body = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
         atomic_write(pj, body)
         return self._send_json(
@@ -1451,6 +1469,19 @@ class Handler(BaseHTTPRequestHandler):
         apply_update = _import_apply_update()
         summary = apply_update.apply_bundle(CFG.reports_root, dest, dry=False)
         return self._send_json({"ok": True, **summary})
+
+    def _api_rollback(self):
+        """Undo the most recent apply / paste-import by restoring the newest
+        backup (shared history). Non-interactive counterpart of the CLI
+        --rollback. Returns {ok, restored, from, pre} or an error."""
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        apply_update = _import_apply_update()
+        result = apply_update.rollback_last(CFG.reports_root)
+        if not result.get("ok"):
+            return self._send_error_json(result.get("error", "rollback failed"),
+                                         status=400)
+        return self._send_json(result)
 
 
 def _import_apply_update():

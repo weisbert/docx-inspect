@@ -147,6 +147,19 @@ def _find_node(nodes, node_id=None, title=None):
     return None
 
 
+def _count_title_matches(nodes, title):
+    """How many sections carry ``title`` (recursively). Used to warn when a
+    title-addressed op is ambiguous -- it patches only the FIRST match."""
+    if not title:
+        return 0
+    total = 0
+    for n in nodes:
+        if n.get("title") == title:
+            total += 1
+        total += _count_title_matches(n.get("children", []), title)
+    return total
+
+
 def _apply_ops(project, ops):
     log = []
     for op in ops or []:
@@ -157,6 +170,14 @@ def _apply_ops(project, ops):
             log.append("  ! op %s: node not found (%s/%s) -- skipped"
                        % (kind, op.get("node_id"), op.get("title")))
             continue
+        # Ambiguity guard: a title-addressed op with several same-titled sections
+        # silently hit the first one before. Warn so the bundle author can switch
+        # to node_id (or rename) instead of guessing.
+        if not op.get("node_id") and op.get("title"):
+            m = _count_title_matches(project.get("outline", []), op["title"])
+            if m > 1:
+                log.append("  ! op %s: title '%s' matches %d sections -- patched the FIRST"
+                           % (kind, op["title"], m))
         if kind == "set_blocks":
             node["blocks"] = op.get("blocks", [])
             log.append("  ~ set blocks of '%s'" % node.get("title", ""))
@@ -245,28 +266,42 @@ def plan_actions(root, actions):
 
 
 def run_plan(root, plan, state, on_log=None):
-    """Back up + write every planned action. Returns (backup_dir, log_lines)."""
+    """Back up + write every planned action. Returns (backup_dir, log_lines).
+
+    Each item is isolated in try/except so one malformed target does not abort
+    the rest of the bundle, and the applied-state is saved AFTER EACH item so a
+    mid-bundle failure leaves ``.update_state.json`` consistent with what was
+    actually written (never half a step behind). A failed item is annotated with
+    ``it["error"]`` and logged so the summary can report a partial apply."""
     bdir = os.path.join(_backups(root), _ts())
     logs = []
     for it in plan:
-        if it["exists"]:
-            dst = os.path.join(bdir, it["rel"])
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(it["tgt"], dst)
-        if it["kind"] == "replace":
-            _atomic_write(it["tgt"], it["payload"])
-            state[it["rel"]] = _sha(it["payload"])
-        else:
-            base = _read(it["tgt"]) if it["exists"] else b"{}"
-            proj = json.loads(base.decode("utf-8"))
-            for line in _apply_ops(proj, it["payload"]):
-                logs.append(line)
-                if on_log:
-                    on_log(line)
-            out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
-            _atomic_write(it["tgt"], out)
-            state[it["rel"]] = _sha(out)
-    _save_state(root, state)
+        try:
+            if it["exists"]:
+                dst = os.path.join(bdir, it["rel"])
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(it["tgt"], dst)
+            if it["kind"] == "replace":
+                _atomic_write(it["tgt"], it["payload"])
+                state[it["rel"]] = _sha(it["payload"])
+            else:
+                base = _read(it["tgt"]) if it["exists"] else b"{}"
+                proj = json.loads(base.decode("utf-8"))
+                for line in _apply_ops(proj, it["payload"]):
+                    logs.append(line)
+                    if on_log:
+                        on_log(line)
+                out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
+                _atomic_write(it["tgt"], out)
+                state[it["rel"]] = _sha(out)
+            _save_state(root, state)   # persist after each item (partial-safe)
+        except Exception as ex:
+            it["error"] = str(ex)
+            msg = "  ! %s %s FAILED: %s: %s" % (
+                it["verb"], it["rel"], type(ex).__name__, ex)
+            logs.append(msg)
+            if on_log:
+                on_log(msg)
     return bdir, logs
 
 
@@ -293,22 +328,33 @@ def record_replace(root, rel, new_bytes, backup=True):
     return {"backup": bdir, "existed": existed, "rel": rel}
 
 
+_REFRESH_NOTE = ("Applied. In the GUI: make sure the report isn't open with "
+                 "unsaved edits, then hard-refresh (Ctrl+Shift+R) and reopen it.")
+
+
 def apply_bundle(root, bundle_path, dry=False, on_log=None):
-    """Programmatic entry (used by the GUI server). Returns a JSON-able summary."""
+    """Programmatic entry (used by the GUI server). Returns a JSON-able summary
+    with per-item ``error`` fields + a ``failed`` list (partial applies) and a
+    ``refresh`` hint the GUI shows so a stale open tab doesn't autosave the
+    pre-patch state back over what was just applied."""
     manifest, actions = read_bundle(root, bundle_path)
     plan, state = plan_actions(root, actions)
-    summary = {
-        "note": (manifest or {}).get("note", ""),
-        "actions": [{"verb": p["verb"], "rel": p["rel"].replace("\\", "/"),
-                     "warn": p["warn"]} for p in plan],
-        "backup": "", "logs": [],
-    }
+    note = (manifest or {}).get("note", "")
     if not plan or dry:
-        return summary
+        return {"note": note,
+                "actions": [{"verb": p["verb"], "rel": p["rel"].replace("\\", "/"),
+                             "warn": p["warn"]} for p in plan],
+                "backup": "", "logs": [], "failed": [], "refresh": _REFRESH_NOTE}
     bdir, logs = run_plan(root, plan, state, on_log)
-    summary["backup"] = bdir
-    summary["logs"] = logs
-    return summary
+    acts, failed = [], []
+    for p in plan:
+        a = {"verb": p["verb"], "rel": p["rel"].replace("\\", "/"), "warn": p["warn"]}
+        if p.get("error"):
+            a["error"] = p["error"]
+            failed.append({"rel": a["rel"], "error": p["error"]})
+        acts.append(a)
+    return {"note": note, "actions": acts, "backup": bdir, "logs": logs,
+            "failed": failed, "refresh": _REFRESH_NOTE}
 
 
 def cmd_apply(root, arg, dry, yes):
@@ -381,25 +427,18 @@ def _latest_backup(root):
     return max(subs, key=os.path.getmtime) if subs else None
 
 
-def cmd_rollback(root, yes):
+def rollback_last(root):
+    """Programmatic rollback of the most recent backup (used by the GUI's
+    'Undo last apply' button -- no input() prompt). The current state is snapshot
+    to a ``-pre-rollback`` backup first. Returns a JSON-able summary:
+    {ok, restored:[rel...], from, pre} or {ok:False, error}."""
     bdir = _latest_backup(root)
     if not bdir:
-        print("no backups to roll back to.")
-        return 1
-    files = []
-    for dp, _dn, fn in os.walk(bdir):
-        for f in fn:
-            full = os.path.join(dp, f)
-            files.append((full, os.path.relpath(full, bdir)))
-    print("restore from: %s" % bdir)
-    for _full, rel in files:
-        print("  restore", rel)
-    if not yes:
-        ans = input("\nRestore these %d file(s)? [y/N] " % len(files)).strip().lower()
-        if ans not in ("y", "yes"):
-            print("aborted.")
-            return 1
+        return {"ok": False, "error": "no backups to roll back to"}
+    files = [(os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), bdir))
+             for dp, _dn, fn in os.walk(bdir) for f in fn]
     pre = os.path.join(_backups(root), _ts() + "-pre-rollback")
+    restored = []
     for full, rel in files:
         tgt = os.path.join(root, rel)
         if os.path.isfile(tgt):
@@ -407,7 +446,31 @@ def cmd_rollback(root, yes):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(tgt, dst)
         _atomic_write(tgt, _read(full))
-    print("\nOK. Restored. (Current state saved to %s first.)" % pre)
+        restored.append(rel.replace("\\", "/"))
+    return {"ok": True, "restored": restored,
+            "from": bdir.replace("\\", "/"), "pre": pre.replace("\\", "/")}
+
+
+def cmd_rollback(root, yes):
+    bdir = _latest_backup(root)
+    if not bdir:
+        print("no backups to roll back to.")
+        return 1
+    files = [os.path.relpath(os.path.join(dp, f), bdir)
+             for dp, _dn, fn in os.walk(bdir) for f in fn]
+    print("restore from: %s" % bdir)
+    for rel in files:
+        print("  restore", rel)
+    if not yes:
+        ans = input("\nRestore these %d file(s)? [y/N] " % len(files)).strip().lower()
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    res = rollback_last(root)
+    if not res.get("ok"):
+        print("error:", res.get("error"))
+        return 1
+    print("\nOK. Restored. (Current state saved to %s first.)" % res["pre"])
     return 0
 
 

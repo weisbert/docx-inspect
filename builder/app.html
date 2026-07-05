@@ -376,6 +376,8 @@
   .export-warn-row{display:flex;gap:10px;padding:6px 10px;font-size:12px;
     border-bottom:1px solid var(--line2)}
   .export-warn-row:last-child{border-bottom:none}
+  .export-warn-row.jumpable{cursor:pointer}
+  .export-warn-row.jumpable:hover{background:var(--accent-soft)}
   .export-warn-type{flex:0 0 auto;font-weight:600;color:#b45309;white-space:nowrap}
   .export-warn-detail{flex:1 1 auto;color:#475569;word-break:break-word}
   .empty{color:var(--muted);text-align:center;padding:40px 10px}
@@ -648,7 +650,8 @@ async function api(method, path, {query, json, raw, rawType}={}){
   const payload = ct.includes("application/json") ? await res.json().catch(()=>({})) : await res.text();
   if (!res.ok){
     const m = (payload && payload.error) ? payload.error : ("HTTP "+res.status);
-    throw new Error(m);
+    const err = new Error(m); err.status = res.status; err.payload = payload;
+    throw err;
   }
   return payload;
 }
@@ -836,6 +839,7 @@ async function newProject(){
         App.project = newProjectObject();
         App.dir = dir;
         App.selId = COVER_ID;
+        App._savedAt = null;                      // brand-new file: first save has no baseline
         pjResetUndo();
         App.view = "editor";
         render();
@@ -885,6 +889,7 @@ async function openProject(dir){
     App.project.outline = App.project.outline || [];
     ensureProjectIds(App.project.outline);
     App.dir = dir; App.selId = COVER_ID; App.dirty=false;
+    App._savedAt = (r.meta_info && r.meta_info.mtime != null) ? r.meta_info.mtime : null;  // A4 baseline
     App._treeFilter = "";                       // don't carry a filter across projects
     { const sb = document.querySelector(".tree-search"); if (sb) sb.value = ""; }
     pjResetUndo();
@@ -916,11 +921,21 @@ async function saveProject(isAuto){
   App.saving = true;
   setStatus("saving", T("status.saving","Saving…"));
   try{
-    const r = await api("PUT","/api/project",{query:{dir:App.dir}, json:stripInternal(App.project)});
+    const q = {dir:App.dir};
+    if (App._savedAt != null) q.saved_at = App._savedAt;   // A4 optimistic concurrency
+    const r = await api("PUT","/api/project",{query:q, json:stripInternal(App.project)});
     App.dirty=false;
-    App._saveRetry = 0; clearTimeout(App._saveRetryT);   // clear any backoff
+    if (r.saved_at != null) App._savedAt = r.saved_at;     // track the mtime we now own
+    App._saveRetry = 0; clearTimeout(App._saveRetryT);     // clear any backoff
     setStatus("saved", (App.ui["status.autosaved"]||"Autosaved") + (r.saved_at?(" · "+fmtTime(r.saved_at)):""));
   }catch(e){
+    if (e.status === 409){
+      // A4: project.json changed on disk (another tab, or an applied update).
+      // Do NOT clobber -- let the user reload the latest or overwrite explicitly.
+      setStatus("err", T("status.conflict","Save conflict — file changed on disk"));
+      onSaveConflict(e.payload && e.payload.saved_at);
+      return;   // finally still clears App.saving
+    }
     // A3/D7: keep the edits dirty and retry with exponential backoff so a
     // transient failure (server restarting after a git pull, a brief hiccup)
     // never silently loses work behind an 8px red dot. beforeunload still warns.
@@ -936,6 +951,26 @@ async function saveProject(isAuto){
   }
 }
 function fmtTime(s){ try{ return new Date(s).toLocaleTimeString(); }catch(_){ return s; } }
+
+// A4 conflict resolver: project.json changed on disk since we opened it. Offer to
+// reload the latest (discarding local unsaved edits) or overwrite with our copy
+// (which re-PUTs with the current on-disk mtime so it goes through).
+function onSaveConflict(diskMtime){
+  if (App._conflictOpen) return; App._conflictOpen = true;
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("dialog.conflict.title","This report changed on disk")}));
+  m.appendChild(el("p",{text:T("dialog.conflict.msg",
+    "project.json was written by another tab or an applied update after you opened it here. Reload the latest (losing your unsaved edits here), or overwrite it with your version?")}));
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn", text:T("dialog.conflict.reload","Reload latest"),
+      onclick:()=>{ App._conflictOpen=false; closeOverlay(); openProject(App.dir); }}),
+    el("button",{class:"tb-btn primary", style:{background:"var(--danger)",borderColor:"var(--danger)"},
+      text:T("dialog.conflict.overwrite","Overwrite with mine"),
+      onclick:async ()=>{ App._conflictOpen=false; closeOverlay();
+        App._savedAt = (diskMtime!=null ? diskMtime : null); await saveProject(false); }}),
+  ]));
+  showOverlay();
+}
 
 async function exportProject(fmt){
   if (!App.project || !App.dir){ toast(T("toast.need_project","Open a project first"), true); return; }
@@ -989,6 +1024,18 @@ function exportWarningSummary(stats, warnings){
 }
 function fmtCount(n, one, many){ return (n===1?one:many).replace("{n}", String(n)); }
 
+// Resolve a warning's location to a section id so the export panel can jump to it.
+// content_lint locations read `section "<title>" / ...`; match the first section
+// with that title (returns null when there's nothing to jump to).
+function warningJumpTarget(loc){
+  if (!loc || !App.project) return null;
+  const m = /section "([^"]*)"/.exec(loc);
+  if (!m) return null;
+  let hit = null;
+  walk(App.project.outline, (n)=>{ if (!hit && (n.title||"") === m[1]) hit = n; });
+  return hit ? hit.id : null;
+}
+
 // After a successful export, show the render manifest. No warnings -> a quiet
 // toast only (already fired by exportProject). With warnings -> a small panel
 // listing the rolled-up summary and every individual warning so the user knows
@@ -1036,7 +1083,10 @@ function showExportReport(r){
         const type = (w&&w.type)||"warning";
         const detail = (w&&w.detail!=null)?String(w.detail):"";
         const loc = (w&&w.location)?(" — "+w.location):"";
-        list.appendChild(el("div",{class:"export-warn-row"},[
+        const targetId = warningJumpTarget(w && w.location);
+        list.appendChild(el("div",{class:"export-warn-row"+(targetId?" jumpable":""),
+          title: targetId ? T("export.jump_hint","Click to open this section") : null,
+          onclick: targetId ? (()=>{ closeOverlay(); App.view="editor"; App.selId=targetId; render(); }) : null},[
           el("span",{class:"export-warn-type", style:{color:COLOR[lv]||"var(--muted)", fontWeight:"600"},
             text:(LABEL[lv]||"WARN")+"  "+type}),
           el("span",{class:"export-warn-detail", text:detail+loc}),
@@ -5546,12 +5596,43 @@ async function _applyBundle(name, b64){
     toast(msg);
     await refreshHome();
     setStatus("", T("status.no_project","No project open"));
+    showApplyResult(r);
     return r;
   }catch(e){
     setStatus("err", T("status.apply_failed","apply failed"));
     toast(T("toast.apply_failed","Apply failed: ")+e.message, true);
     throw e;
   }
+}
+// Post-apply summary: file count, any partial failures, the "hard-refresh + reopen"
+// hint (so a stale open tab doesn't autosave the pre-patch state back), and an
+// Undo-last-apply button wired to the rollback endpoint.
+function showApplyResult(r){
+  const acts = r.actions || [], failed = r.failed || [];
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("dialog.applied.title","Update applied")}));
+  m.appendChild(el("div",{text: acts.length+T("toast.update_files"," file(s)")
+    + (failed.length ? (" · "+failed.length+T("dialog.applied.failed"," failed")) : "")}));
+  failed.forEach(fr=> m.appendChild(el("div",{style:{color:"var(--danger)",fontSize:"12px"},
+    text:"✕ "+fr.rel+": "+fr.error})));
+  if (r.refresh) m.appendChild(el("p",{style:{color:"var(--warn)",marginTop:"8px"}, text:r.refresh}));
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn", style:{color:"var(--danger)"}, text:T("dialog.applied.undo","Undo last apply"),
+      onclick:()=>{ closeOverlay(); rollbackLastApply(); }}),
+    el("button",{class:"tb-btn primary", text:T("action.close","Close"), onclick:closeOverlay}),
+  ]));
+  showOverlay();
+}
+function rollbackLastApply(){
+  modalConfirm(T("dialog.undo_apply.title","Undo the last apply?"),
+    T("dialog.undo_apply.msg","Restore every file to its state before the most recent apply / paste-import? A pre-rollback backup is saved first."),
+    async ()=>{
+      try{
+        const r = await api("POST","/api/rollback",{json:{}});
+        toast(T("toast.rolled_back","Rolled back ")+(r.restored?r.restored.length:0)+T("toast.update_files"," file(s)"));
+        await refreshHome();
+      }catch(e){ toast(T("toast.rollback_failed","Rollback failed: ")+e.message, true); }
+    });
 }
 function applyUpdate(){
   const m = $("#modal"); m.innerHTML = "";

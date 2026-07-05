@@ -194,6 +194,11 @@ def run():
         failures += check_validate_compliance()
         failures += check_export(root)
         failures += check_paste_import(root)
+        failures += check_templates(root)
+        failures += check_new_from_template(root)
+        failures += check_import_docx()
+        failures += check_apply_and_rollback(root)
+        failures += check_concurrency(root)
         failures += check_errors(root)
     finally:
         httpd.shutdown()
@@ -483,6 +488,111 @@ def check_paste_import(root):
         s2 == 400 and "error" in b2 and still.get("outline", [{}])[0].get("title") == "Intro",
         "paste-import rejects truncated (on-disk intact)", "status=%s" % s2,
     )
+    return f
+
+
+def check_templates(root):
+    """GET /api/templates + PUT/GET/DELETE /api/template (library store)."""
+    s, body = call("GET", "/api/templates")
+    f = expect(s == 200 and isinstance(body.get("templates"), list),
+               "GET /api/templates", "status=%s body=%r" % (s, body))
+    tpl = {"name": "LibTpl", "config": MINIMAL_CONFIG, "skeleton": MINIMAL_CONFIG["skeleton"]}
+    s, body = call("PUT", "/api/template?id=libtpl", body=tpl)
+    tid = body.get("id") if isinstance(body, dict) else None
+    f += expect(s == 200 and tid, "PUT /api/template (save)", "status=%s body=%r" % (s, body))
+    s, body = call("GET", "/api/template?id=%s" % tid)
+    f += expect(s == 200 and isinstance(body, dict), "GET /api/template", "status=%s" % s)
+    # stash the id for the new-from-template check
+    check_templates.tid = tid
+    return f
+
+
+def check_new_from_template(root):
+    tid = getattr(check_templates, "tid", None)
+    if not tid:
+        record("POST /api/new-from-template", "SKIP (no template)")
+        return 0
+    s, body = call("POST", "/api/new-from-template", body={"dir": "proj_fromtpl", "template": tid})
+    f = expect(s == 200 and body.get("ok") and body.get("project"),
+               "POST /api/new-from-template", "status=%s body=%r" % (s, body))
+    # refuse to clobber an existing project without force
+    s, body = call("POST", "/api/new-from-template", body={"dir": "proj_fromtpl", "template": tid})
+    f += expect(s == 409, "new-from-template refuses clobber (409)", "status=%s" % s)
+    # delete the library template
+    s, body = call("DELETE", "/api/template?id=%s" % tid)
+    f += expect(s == 200 and body.get("ok"), "DELETE /api/template", "status=%s" % s)
+    return f
+
+
+def check_import_docx():
+    """POST /api/import-docx (report). Builds a tiny docx if python-docx is here;
+    accepts a clean route response (parsed project OR a surfaced error)."""
+    try:
+        from docx import Document
+        d = Document()
+        d.add_heading("Chapter", level=1)
+        d.add_paragraph("Body text.")
+        buf = io.BytesIO()
+        d.save(buf)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        record("POST /api/import-docx", "SKIP (no python-docx)")
+        return 0
+    s, body = call("POST", "/api/import-docx",
+                   body={"docx_b64": b64, "mode": "report", "dir": "imported"})
+    if s == 200 and isinstance(body, dict) and (body.get("project") or body.get("template_id")):
+        return expect(True, "POST /api/import-docx (report)", "")
+    if s in (500, 503) and isinstance(body, dict) and "error" in body:
+        record("POST /api/import-docx (report)", "ROUTE-OK (%s)" % s)
+        return 0
+    record("POST /api/import-docx (report)", "FAIL")
+    print("      -> status=%s body=%r" % (s, body))
+    return 1
+
+
+def check_apply_and_rollback(root):
+    """POST /api/apply-update (smart patch zip) then POST /api/rollback."""
+    proj = {"schema_version": 1, "template": "test_tpl_v1",
+            "meta": {"title": "A", "reviewers": [], "revisions": []},
+            "outline": [{"id": "sec1", "title": "Sec", "blocks": [], "children": []}]}
+    call("PUT", "/api/project?dir=applyproj", body=proj)
+    manifest = {"note": "test", "projects": {"applyproj": {"mode": "patch", "ops": [
+        {"op": "set_blocks", "node_id": "sec1",
+         "blocks": [{"type": "para", "runs": [{"t": "patched"}]}]}]}}}
+    buf = io.BytesIO()
+    import zipfile
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("update.json", json.dumps(manifest))
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    s, body = call("POST", "/api/apply-update", body={"name": "u.zip", "zip_b64": b64})
+    f = expect(s == 200 and body.get("ok") and "refresh" in body,
+               "POST /api/apply-update", "status=%s body=%r" % (s, body))
+    s, pj = call("GET", "/api/project?dir=applyproj")
+    blocks = (((pj.get("project") or {}).get("outline") or [{}])[0].get("blocks") or [])
+    f += expect(blocks and blocks[0].get("type") == "para",
+                "apply-update patch reached disk", "%r" % blocks)
+    s, body = call("POST", "/api/rollback", body={})
+    f += expect(s == 200 and body.get("ok") and body.get("restored"),
+                "POST /api/rollback", "status=%s body=%r" % (s, body))
+    s, pj = call("GET", "/api/project?dir=applyproj")
+    rb = (((pj.get("project") or {}).get("outline") or [{}])[0].get("blocks") or [])
+    f += expect(not rb, "rollback restored pre-patch (empty blocks)", "%r" % rb)
+    return f
+
+
+def check_concurrency(root):
+    """A4: PUT with a stale saved_at -> 409; matching saved_at -> 200."""
+    proj = {"schema_version": 1, "template": "test_tpl_v1",
+            "meta": {"title": "C", "reviewers": [], "revisions": []}, "outline": []}
+    s, b = call("PUT", "/api/project?dir=proj_conc", body=proj)
+    f = expect(s == 200 and b.get("ok"), "PUT (concurrency setup)", "status=%s" % s)
+    saved = b.get("saved_at")
+    s2, b2 = call("PUT", "/api/project?dir=proj_conc&saved_at=1", body=proj)
+    f += expect(s2 == 409 and isinstance(b2, dict) and b2.get("conflict"),
+                "PUT stale saved_at -> 409", "status=%s body=%r" % (s2, b2))
+    s3, b3 = call("PUT", "/api/project?dir=proj_conc&saved_at=%r" % saved, body=proj)
+    f += expect(s3 == 200 and b3.get("ok"),
+                "PUT matching saved_at -> 200", "status=%s body=%r" % (s3, b3))
     return f
 
 

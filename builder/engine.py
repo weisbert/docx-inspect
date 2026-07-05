@@ -1123,8 +1123,13 @@ def _collect_ref_targets(outline):
             bid = block.get("id")
             cap = block.get("caption", "")
             if btype in ("image", "imagegrid"):
+                # An image ALWAYS consumes a figure number (the seq increments here
+                # and _render_caption_with_seq bookmarks it) even with an empty
+                # caption -- so an uncaptioned image is still a valid xref target.
+                # Register on ``bid`` alone (B5: the render created the bookmark, so
+                # the ref must resolve instead of reporting a spurious dangling_ref).
                 state["img"][chap] += 1
-                if bid and cap:
+                if bid:
                     targets[bid] = "%d-%d" % (chap, state["img"][chap])
             elif btype in ("datatable", "table"):
                 if cap:
