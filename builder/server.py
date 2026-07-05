@@ -495,6 +495,8 @@ def _import_engine():
     import importlib
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
+    import content_lint  # type: ignore  # engine imports this at module scope
+    importlib.reload(content_lint)
     import tables  # type: ignore
     importlib.reload(tables)
     import engine  # type: ignore
@@ -535,6 +537,23 @@ def run_export(project_dir, fmt, save_first=False):
     docx_abs = os.path.abspath(out_path)
     warnings = render_result.get("warnings", []) if isinstance(render_result, dict) else []
     stats = render_result.get("stats", {}) if isinstance(render_result, dict) else {}
+
+    # Merge pre-render content-lint findings into the SAME manifest so the export
+    # panel surfaces structural issues (missing condition rows, never-flagging
+    # rows, sim_span axis problems, bad image paths, ...) next to the render
+    # warnings -- all carrying a level. no_caption is split (engine owns
+    # datatable/table, lint owns image/imagegrid) so there is no double-report.
+    try:
+        import content_lint  # already reloaded by _import_engine
+        lint_findings = content_lint.lint_project(project, cfg)
+    except Exception:
+        lint_findings = []
+    if lint_findings:
+        warnings = list(lint_findings) + list(warnings)
+        stats = dict(stats)
+        stats["errors"] = sum(1 for w in warnings if w.get("level") == "error")
+        stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
+        stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
 
     if fmt == "docx":
         rel = os.path.relpath(docx_abs, project_dir).replace("\\", "/")

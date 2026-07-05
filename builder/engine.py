@@ -31,6 +31,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 import tables
+import content_lint
 
 
 # ===========================================================================
@@ -1312,8 +1313,14 @@ def render_report(project, cfg, project_dir, out_path):
     doc.save(out_path)
 
     warnings.extend(outline_result.get("warnings", []))
+    # Stamp a level (error|warn|info) onto every warning so the manifest schema is
+    # uniform for the GUI panel + CLI (block_error -> error, the rest -> warn).
+    content_lint.stamp_levels(warnings)
     stats = dict(outline_result.get("stats", {}))
     stats["missing_logos"] = sum(1 for w in warnings if w["type"] == "missing_logo")
+    stats["errors"] = sum(1 for w in warnings if w.get("level") == "error")
+    stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
+    stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
     return {"out_path": out_path, "warnings": warnings, "stats": stats}
 
 

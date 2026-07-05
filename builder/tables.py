@@ -399,13 +399,20 @@ def render_datatable(doc, data, cfg):
     i = 0
     while i < len(rows):
         j = i
-        while j + 1 < len(rows) and rows[j + 1]["cat"] == rows[i]["cat"]:
+        while j + 1 < len(rows) and rows[j + 1].get("cat") == rows[i].get("cat"):
             j += 1
         catg.append((i, j))
         i = j + 1
 
     warnings = []
     flagged_rows = 0
+    # sim_span support: a row that spans its sim axes merges the FIRST sim
+    # group's cells. Precompute the sim groups so the merge is bounded by the
+    # group's actual axis count -- a group with <3 axis columns would otherwise
+    # IndexError on cc[2] and drop the ENTIRE table (only red text would remain).
+    sim_groups = [g for g in groups if g["role"] == "sim"]
+    first_sim = sim_groups[0] if sim_groups else None
+    saw_sim_span = False
 
     def _clip_check(val, width_cm, kind, row_label):
         """Record a row_clip_risk warning when a cell value is too long for one
@@ -427,7 +434,7 @@ def render_datatable(doc, data, cfg):
         for gi in range(g0, g1 + 1):
             row = rows[gi]
             r = start + gi
-            band = fills["setting"] if row["kind"] in setting_kinds else fills["result"]
+            band = fills["setting"] if row.get("kind") in setting_kinds else fills["result"]
             flags = flag_positions(row)
             if flags:
                 flagged_rows += 1
@@ -441,10 +448,10 @@ def render_datatable(doc, data, cfg):
                     continue
                 _shade(table.cell(r, idx), band)
                 if p["kind"] == "item":
-                    _set_cell_text(table.cell(r, idx), row["item"], font_pt)
+                    _set_cell_text(table.cell(r, idx), row.get("item", ""), font_pt)
                     _clip_check(row.get("item"), p["w"], "item", row_label)
                 elif p["kind"] == "unit":
-                    _set_cell_text(table.cell(r, idx), row["unit"], font_pt)
+                    _set_cell_text(table.cell(r, idx), row.get("unit", ""), font_pt)
                     _clip_check(row.get("unit"), p["w"], "unit", row_label)
                 elif p["kind"] == "spec":
                     _set_cell_text(table.cell(r, idx), row.get("spec"), font_pt)
@@ -462,19 +469,38 @@ def render_datatable(doc, data, cfg):
                     if not (span and p["role"] == "sim"):
                         _clip_check(_fmt_val(v), p["w"],
                                     "%s.%s" % (p["group"], p["label"]), row_label)
-            if row.get("sim_span"):
-                for g in groups:
-                    if g["role"] == "sim":
-                        cc = group_axis_cols[g["key"]]
-                        table.cell(r, cc[0]).merge(table.cell(r, cc[2]))
-                        break
+            if row.get("sim_span") and first_sim is not None:
+                saw_sim_span = True
+                cc = group_axis_cols[first_sim["key"]]
+                # merge the MTM triple (cols 0..2); never index past the group's
+                # axes -- a <3-axis group merges only what it has instead of
+                # raising IndexError and dropping the whole table.
+                end = min(2, len(cc) - 1)
+                if end >= 1:
+                    table.cell(r, cc[0]).merge(table.cell(r, cc[end]))
         # vertical merge of the category column
         cc = col_of["cat"]
         r0, r1 = start + g0, start + g1
-        band = fills["setting"] if rows[g0]["kind"] in setting_kinds else fills["result"]
+        band = fills["setting"] if rows[g0].get("kind") in setting_kinds else fills["result"]
         table.cell(r0, cc).merge(table.cell(r1, cc))
         _shade(table.cell(r0, cc), band)
-        _set_cell_text(table.cell(r0, cc), rows[g0]["cat"], font_pt, bold=True)
+        _set_cell_text(table.cell(r0, cc), rows[g0].get("cat", ""), font_pt, bold=True)
+
+    # sim_span diagnostics (emitted once per table, not per row).
+    if saw_sim_span and first_sim is not None:
+        cc0 = group_axis_cols[first_sim["key"]]
+        if len(cc0) < 3:
+            warnings.append({
+                "type": "sim_span_unmergeable",
+                "detail": "sim_span row(s) but sim group '%s' has %d axis column(s) "
+                          "(<3); merged only what exists" % (first_sim["key"], len(cc0)),
+                "location": "datatable"})
+        if len(sim_groups) > 1:
+            warnings.append({
+                "type": "sim_span_partial",
+                "detail": "sim_span row(s) with %d sim groups; only the first "
+                          "('%s') is merged" % (len(sim_groups), first_sim["key"]),
+                "location": "datatable"})
 
     # ---- exact fixed row heights: shrink inline, never spill / rotate ----
     for r in range(nrows):

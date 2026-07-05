@@ -979,17 +979,51 @@ function showExportReport(r){
     m.appendChild(el("div",{class:"export-summary", text: summary.join(", ")}));
   }
   if (warnings.length){
+    const RANK = {error:0, warn:1, info:2};
+    const COLOR = {error:"var(--danger)", warn:"var(--warn)", info:"var(--muted)"};
+    const LABEL = {error:"ERROR", warn:"WARN", info:"INFO"};
+    const sorted = warnings.slice().sort((a,b)=>
+      (RANK[(a&&a.level)||"warn"]??1) - (RANK[(b&&b.level)||"warn"]??1));
+    const counts = {error:0, warn:0, info:0};
+    sorted.forEach(w=>{ const lv=(w&&w.level)||"warn"; counts[lv]=(counts[lv]||0)+1; });
+    // level summary line (error-first) so the user sees severity at a glance
+    const lvParts=[];
+    if (counts.error) lvParts.push(counts.error+" error"+(counts.error>1?"s":""));
+    if (counts.warn)  lvParts.push(counts.warn+" warning"+(counts.warn>1?"s":""));
+    if (counts.info)  lvParts.push(counts.info+" info");
+    if (lvParts.length) m.appendChild(el("div",{class:"export-levels",
+      style:{fontWeight:"600", margin:"6px 0"}, text: lvParts.join("  ·  ")}));
+
     const list = el("div",{class:"export-warn-list"});
-    warnings.forEach(w=>{
-      const type = (w&&w.type)||"warning";
-      const detail = (w&&w.detail!=null)?String(w.detail):"";
-      const loc = (w&&w.location)?(" — "+w.location):"";
-      list.appendChild(el("div",{class:"export-warn-row"},[
-        el("span",{class:"export-warn-type", text:type}),
-        el("span",{class:"export-warn-detail", text:detail+loc}),
-      ]));
-    });
+    // info findings are hidden by default (legitimate-but-noteworthy); a toggle
+    // reveals them. If there are ONLY info findings, show them straight away.
+    const onlyInfo = (counts.error + counts.warn === 0);
+    const renderList = (showInfo)=>{
+      list.innerHTML = "";
+      sorted.forEach(w=>{
+        const lv = (w&&w.level)||"warn";
+        if (lv==="info" && !showInfo && !onlyInfo) return;
+        const type = (w&&w.type)||"warning";
+        const detail = (w&&w.detail!=null)?String(w.detail):"";
+        const loc = (w&&w.location)?(" — "+w.location):"";
+        list.appendChild(el("div",{class:"export-warn-row"},[
+          el("span",{class:"export-warn-type", style:{color:COLOR[lv]||"var(--muted)", fontWeight:"600"},
+            text:(LABEL[lv]||"WARN")+"  "+type}),
+          el("span",{class:"export-warn-detail", text:detail+loc}),
+        ]));
+      });
+    };
+    renderList(false);
     m.appendChild(list);
+    if (counts.info && !onlyInfo){
+      const tog = el("button",{class:"sm-btn", style:{marginTop:"6px"},
+        text:T("export.show_info","Show {n} info").replace("{n}", counts.info)});
+      let shown = false;
+      tog.onclick = ()=>{ shown = !shown; renderList(shown);
+        tog.textContent = shown ? T("export.hide_info","Hide info")
+                                 : T("export.show_info","Show {n} info").replace("{n}", counts.info); };
+      m.appendChild(tog);
+    }
   }
   m.appendChild(el("div",{class:"modal-actions"},[
     el("button",{class:"sm-btn primary", text:T("action.close","Close"), onclick:closeOverlay}),
