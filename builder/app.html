@@ -67,7 +67,24 @@
 
   /* outline tree */
   .tree-head{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
-    padding:4px 8px 8px}
+    padding:4px 8px 8px;display:flex;flex-direction:column;gap:6px}
+  .tree-head-row{display:flex;align-items:center;gap:6px}
+  .tree-head-title{flex:1}
+  .tree-head-tools{display:flex;gap:2px}
+  .tree-search{width:100%;box-sizing:border-box;font-size:12px;padding:4px 7px;border:1px solid var(--line);
+    border-radius:6px;background:var(--panel);color:var(--ink);text-transform:none;letter-spacing:normal}
+  .tree-search:focus{border-color:var(--accent);outline:none}
+  .node-title.match{background:#fde68a;border-radius:3px;padding:0 2px}
+  .qj-item{padding:5px 8px;cursor:pointer;border-radius:5px;display:flex;gap:8px}
+  .qj-item .qj-num{color:var(--muted);min-width:44px}
+  .qj-item.sel{background:var(--accent-soft)}
+  .tree-tool{border:1px solid var(--line);background:var(--panel);color:var(--muted);
+    border-radius:4px;cursor:pointer;font-size:12px;line-height:1;padding:2px 5px}
+  .tree-tool:hover{border-color:var(--accent);color:var(--accent)}
+  .span-toggle{display:inline-flex;align-items:center;gap:1px;font-size:10px;color:var(--muted);cursor:pointer;margin-left:2px}
+  .span-toggle input{margin:0;transform:scale(.85)}
+  .span-toggle input:disabled{cursor:not-allowed}
+  .span-toggle .span-lbl{font-size:11px;line-height:1}
   .node-row{
     display:flex;align-items:center;gap:4px;padding:4px 6px;border-radius:6px;
     cursor:pointer;user-select:none;position:relative;
@@ -169,6 +186,7 @@
     text-align:center;padding:18px;outline:none;cursor:pointer;
   }
   .img-drop:focus,.img-drop.focused{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .img-drop.dragover{border-color:var(--ok);background:var(--accent-soft);color:var(--ok);border-style:solid}
   .img-prev{max-width:100%;max-height:340px;border:1px solid var(--line);border-radius:6px;display:block}
   .img-prevwrap{position:relative;display:inline-block;max-width:100%}
   .img-prevwrap .rm{position:absolute;top:5px;right:5px;background:rgba(255,255,255,.9);border:1px solid var(--line)}
@@ -867,6 +885,8 @@ async function openProject(dir){
     App.project.outline = App.project.outline || [];
     ensureProjectIds(App.project.outline);
     App.dir = dir; App.selId = COVER_ID; App.dirty=false;
+    App._treeFilter = "";                       // don't carry a filter across projects
+    { const sb = document.querySelector(".tree-search"); if (sb) sb.value = ""; }
     pjResetUndo();
     App.view = "editor";
     render();
@@ -898,9 +918,19 @@ async function saveProject(isAuto){
   try{
     const r = await api("PUT","/api/project",{query:{dir:App.dir}, json:stripInternal(App.project)});
     App.dirty=false;
+    App._saveRetry = 0; clearTimeout(App._saveRetryT);   // clear any backoff
     setStatus("saved", (App.ui["status.autosaved"]||"Autosaved") + (r.saved_at?(" · "+fmtTime(r.saved_at)):""));
   }catch(e){
-    setStatus("err","save failed"); toast("Save failed: "+e.message, true);
+    // A3/D7: keep the edits dirty and retry with exponential backoff so a
+    // transient failure (server restarting after a git pull, a brief hiccup)
+    // never silently loses work behind an 8px red dot. beforeunload still warns.
+    App._saveRetry = Math.min((App._saveRetry||0) + 1, 6);
+    const delay = Math.min(1000 * Math.pow(2, App._saveRetry - 1), 30000);
+    setStatus("err", T("status.save_failed_retry","Unsaved — save failed, retrying…"));
+    toast(T("toast.save_failed_retry","Save failed: {e} — retrying in {s}s (your edits are kept)")
+      .replace("{e}", e.message).replace("{s}", Math.round(delay/1000)), true);
+    clearTimeout(App._saveRetryT);
+    App._saveRetryT = setTimeout(()=>saveProject(true), delay);
   }finally{
     App.saving=false;
   }
@@ -1215,25 +1245,73 @@ function findNode(id, nodes=App.project.outline, parent=null){
   return null;
 }
 
+// Collapse or expand every parent node in one action (D3).
+function setAllCollapsed(val){
+  if (!App.project) return;
+  walk(App.project.outline, (n)=>{ if (n.children && n.children.length) n._collapsed = val; });
+  renderTree();
+}
 function renderTree(){
-  $("#outline-head").textContent = T("outline.title","Outline");
+  buildOutlineHeader();
+  renderTreeBody();
+}
+// Build the outline header ONCE (title + collapse/expand + a filter box). If it
+// were rebuilt on every renderTree it would steal focus from the filter box mid
+// keystroke, so it is built lazily and reused; renderTreeBody() refreshes just
+// the node list. Detected by the presence of the .tree-search input (the template
+// skeleton view overwrites this header, so re-check rather than a boolean flag).
+function buildOutlineHeader(){
+  const head = $("#outline-head");
+  if (head.querySelector(".tree-search")) return;
+  head.innerHTML = "";
+  const titleRow = el("div",{class:"tree-head-row"});
+  titleRow.appendChild(el("span",{class:"tree-head-title", text:T("outline.title","Outline")}));
+  const tools = el("span",{class:"tree-head-tools"});
+  tools.appendChild(el("button",{class:"tree-tool", title:T("outline.collapse_all","Collapse all"),
+    text:"⊟", onclick:(e)=>{ e.stopPropagation(); setAllCollapsed(true); }}));
+  tools.appendChild(el("button",{class:"tree-tool", title:T("outline.expand_all","Expand all"),
+    text:"⊞", onclick:(e)=>{ e.stopPropagation(); setAllCollapsed(false); }}));
+  titleRow.appendChild(tools);
+  head.appendChild(titleRow);
+  const search = el("input",{class:"tree-search", type:"search",
+    value: App._treeFilter || "",
+    placeholder:T("outline.search","Filter sections…  (Ctrl+P to jump)"),
+    oninput:(e)=>{ App._treeFilter = e.target.value.trim().toLowerCase(); renderTreeBody(); }});
+  head.appendChild(search);
+}
+function renderTreeBody(){
   const root = $("#tree"); root.innerHTML = "";
-  // cover special node
-  const coverRow = el("div", {class:"node-row cover"+(App.selId===COVER_ID?" sel":""),
-      onclick:()=>selectNode(COVER_ID)}, [
-    el("span",{class:"twisty leaf"}), el("span",{class:"node-title", text:T("cover.node","Cover")})
-  ]);
-  root.appendChild(coverRow);
+  const f = App._treeFilter || "";
+  // cover special node (hidden when a filter is active and doesn't match "cover")
+  if (!f || "cover".indexOf(f) >= 0){
+    root.appendChild(el("div", {class:"node-row cover"+(App.selId===COVER_ID?" sel":""),
+        onclick:()=>selectNode(COVER_ID)}, [
+      el("span",{class:"twisty leaf"}), el("span",{class:"node-title", text:T("cover.node","Cover")})
+    ]));
+  }
   if (!App.project) return;
   const frag = document.createDocumentFragment();
   buildNodes(App.project.outline, frag, [], 0);
   root.appendChild(frag);
+  if (f && !frag.childNodes.length)
+    root.appendChild(el("div",{class:"tree-empty", style:{padding:"8px",color:"var(--muted)",fontSize:"12px"},
+      text:T("outline.no_match","No sections match")}));
+}
+// A node stays visible under a filter if it -- or any descendant -- matches.
+function subtreeMatches(n, f){
+  if (!f) return true;
+  if ((n.title||"").toLowerCase().indexOf(f) >= 0) return true;
+  return (n.children||[]).some(c=>subtreeMatches(c, f));
 }
 function buildNodes(nodes, parentEl, numPath, depth){
+  const f = App._treeFilter || "";
   nodes.forEach((n, i)=>{
+    if (f && !subtreeMatches(n, f)) return;             // filtered out of view
     const num = numPath.concat(i+1).join(".");
     const hasKids = (n.children && n.children.length);
     if (n._collapsed === undefined) n._collapsed = false;
+    const selfMatch = f && (n.title||"").toLowerCase().indexOf(f) >= 0;
+    const expanded = hasKids && (!n._collapsed || !!f);  // a filter force-expands
     const row = el("div", {
       class:"node-row"+(App.selId===n.id?" sel":""), draggable:"true",
       "data-id":n.id,
@@ -1242,17 +1320,17 @@ function buildNodes(nodes, parentEl, numPath, depth){
       oncontextmenu:(e)=>{ e.preventDefault(); selectNode(n.id); openCtx(e, n.id); },
     });
     const tw = el("span",{class:"twisty"+(hasKids?"":" leaf"),
-      text: hasKids ? (n._collapsed?"▶":"▼") : "•",
-      onclick:(e)=>{ if(hasKids){ e.stopPropagation(); n._collapsed=!n._collapsed; renderTree(); } }});
+      text: hasKids ? (expanded?"▼":"▶") : "•",
+      onclick:(e)=>{ if(hasKids){ e.stopPropagation(); n._collapsed=!n._collapsed; renderTreeBody(); } }});
     row.appendChild(tw);
     row.appendChild(el("span",{class:"node-num", text:num}));
-    row.appendChild(el("span",{class:"node-title", text:n.title||T("node.untitled","(untitled)")}));
+    row.appendChild(el("span",{class:"node-title"+(selfMatch?" match":""), text:n.title||T("node.untitled","(untitled)")}));
     if (n.fixed_body) row.appendChild(el("span",{class:"badge fixed", text:T("badge.fixed","fixed")}));
     if (hasDatatable(n)) row.appendChild(el("span",{class:"badge data", text:T("badge.data","data")}));
     if (n.origin==="user") row.appendChild(el("span",{class:"badge user", text:T("badge.user","new")}));
     wireDrag(row, n.id);
     parentEl.appendChild(row);
-    if (hasKids && !n._collapsed){
+    if (expanded){
       const kidsWrap = el("div",{class:"children"});
       buildNodes(n.children, kidsWrap, numPath.concat(i+1), depth+1);
       parentEl.appendChild(kidsWrap);
@@ -1262,6 +1340,49 @@ function buildNodes(nodes, parentEl, numPath, depth){
 function hasDatatable(n){ return (n.blocks||[]).some(b=>b.type==="datatable"); }
 
 function selectNode(id){ App.selId = id; renderTree(); renderEditor(); }
+
+// Ctrl+P quick jump: a filterable palette of every section. Type to narrow,
+// Up/Down to move, Enter/click to jump straight to that section's editor.
+function openQuickJump(){
+  if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
+  const items = [];
+  (function walkQ(nodes, path){ (nodes||[]).forEach((n,i)=>{ const num=path.concat(i+1);
+    items.push({id:n.id, num:num.join("."), title:n.title||T("node.untitled","(untitled)")});
+    walkQ(n.children||[], num); }); })(App.project.outline, []);
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("outline.quickjump","Jump to section")}));
+  const input = el("input",{class:"ti", style:{width:"100%"},
+    placeholder:T("outline.quickjump_ph","Type a section name or number…")});
+  const list = el("div",{class:"qj-list", style:{maxHeight:"340px", overflow:"auto", marginTop:"8px"}});
+  m.appendChild(input); m.appendChild(list);
+  let filtered = items.slice(), sel = 0;
+  const jump = (id)=>{ closeOverlay(); App._treeFilter=""; App.view="editor"; App.selId=id; render();
+    const row = $("#tree").querySelector('[data-id="'+id+'"]');
+    if (row) try{ row.scrollIntoView({block:"center"}); }catch(_){} };
+  const draw = ()=>{
+    list.innerHTML="";
+    if (!filtered.length){ list.appendChild(el("div",{class:"qj-item", style:{color:"var(--muted)"},
+      text:T("outline.no_match","No sections match")})); return; }
+    filtered.forEach((it, idx)=>{
+      const row = el("div",{class:"qj-item"+(idx===sel?" sel":""), onclick:()=>jump(it.id)});
+      row.appendChild(el("span",{class:"qj-num", text:it.num}));
+      row.appendChild(el("span",{text:it.title}));
+      list.appendChild(row);
+    });
+  };
+  input.addEventListener("input",()=>{
+    const q = input.value.trim().toLowerCase();
+    filtered = q ? items.filter(it=> it.title.toLowerCase().indexOf(q)>=0 || it.num.indexOf(q)>=0) : items.slice();
+    sel = 0; draw();
+  });
+  input.addEventListener("keydown",(e)=>{
+    if (e.key==="ArrowDown"){ e.preventDefault(); sel=Math.min(sel+1, filtered.length-1); draw(); }
+    else if (e.key==="ArrowUp"){ e.preventDefault(); sel=Math.max(sel-1, 0); draw(); }
+    else if (e.key==="Enter"){ e.preventDefault(); if(filtered[sel]) jump(filtered[sel].id); }
+    else if (e.key==="Escape"){ e.preventDefault(); closeOverlay(); }
+  });
+  draw(); showOverlay(); setTimeout(()=>input.focus(), 30);
+}
 
 /* ---- drag reorder + re-nest (change level, cross-parent) ------------------ */
 // Drop zone by vertical position in the target row: top edge = sibling BEFORE,
@@ -1383,10 +1504,19 @@ function moveNode(id, dir){
 }
 function deleteNode(id){
   const r = findNode(id); if(!r) return;
-  const doDel = ()=>{ r.list.splice(r.idx,1); markDirty(); if(App.selId===id) App.selId=COVER_ID; renderTree(); renderEditor(); };
-  if (r.node.origin==="template"){
-    modalConfirm(T("dialog.del.title","Delete template section?"),
-      T("dialog.del.msg","This section comes from the standard template. Delete it anyway?"), doDel);
+  const node = r.node;
+  const doDel = ()=>{ r.list.splice(r.idx,1); markDirty(); if(App.selId===id) App.selId=COVER_ID;
+    renderTree(); renderEditor(); toast(T("toast.deleted_undo","Deleted — Ctrl+Z to undo")); };
+  // Confirm when the section carries content: a template section, or one with
+  // blocks / sub-sections. An empty user section deletes silently (Ctrl+Z undoes).
+  const nBlocks = (node.blocks||[]).length, nKids = (node.children||[]).length;
+  if (node.origin==="template"){
+    modalConfirm(T("dialog.del.title","Delete section?"),
+      T("dialog.del.msg","This section comes from the standard template. Delete it? (Ctrl+Z undoes it.)"), doDel);
+  } else if (nBlocks || nKids){
+    modalConfirm(T("dialog.del.title","Delete section?"),
+      T("dialog.del.msg_content","Delete this section with its {n} block(s) and {k} sub-section(s)? (Ctrl+Z undoes it.)")
+        .replace("{n}", nBlocks).replace("{k}", nKids), doDel);
   } else doDel();
 }
 function unlockNode(id){
@@ -1691,6 +1821,23 @@ function openNotesOverview(){
   showOverlay();
 }
 
+// D4: after inserting a block, focus + scroll its card so the user can type
+// straight away (no extra click). insertAt sets App._focusBlock; the card
+// builders record the matching element; renderNodeEditor triggers the focus.
+let _pendingFocusEl = null;
+function focusPendingBlock(){
+  if (!App._focusBlock) return;
+  const target = _pendingFocusEl;
+  App._focusBlock = null; _pendingFocusEl = null;
+  if (!target) return;
+  requestAnimationFrame(()=>{
+    try{ target.scrollIntoView({block:"center", behavior:"smooth"}); }
+    catch(_){ try{ target.scrollIntoView(); }catch(__){} }
+    const f = target.querySelector("input,textarea,[contenteditable='true'],.img-drop,select");
+    if (f){ try{ f.focus(); }catch(_){} }
+  });
+}
+
 /* ---- node (section) editor ------------------------------------------------ */
 function renderNodeEditor(host, node){
   const path = nodePath(node.id);
@@ -1730,6 +1877,7 @@ function renderNodeEditor(host, node){
   });
   host.appendChild(listHost);
   host.appendChild(buildAddBlock(node));
+  focusPendingBlock();   // D4: focus a just-inserted block
 }
 
 function nodePath(id){
@@ -1764,6 +1912,7 @@ function groupBlocks(blocks){
 /* ---- prose region card (continuous multi-paragraph editor) --------------- */
 function renderProseCard(node, seg){
   const card = el("div",{class:"card prose-card"});
+  if (App._focusBlock && seg.blocks && seg.blocks.indexOf(App._focusBlock) >= 0) _pendingFocusEl = card;
   const target = ()=> seg.blocks[0];   // the segment's first block (live via serialize)
   // drop target: a dragged block/segment lands just before this prose run
   card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(target())<0){ e.preventDefault(); card.classList.add("dragover"); }});
@@ -1791,10 +1940,10 @@ function renderProseCard(node, seg){
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
     onclick:()=>{
       const del=()=>{ seg.blocks.forEach(b=>{ const i=node.blocks.indexOf(b); if(i>=0) node.blocks.splice(i,1); });
-        markDirty(); renderEditor(); };
+        markDirty(); renderEditor(); toast(T("toast.deleted_undo","Deleted — Ctrl+Z to undo")); };
       const hasText = seg.blocks.some(b=>(b.runs||[]).some(r=>(r.t||"").trim()));
       if (hasText) modalConfirm(T("dialog.del_text.title","Delete this text?"),
-        T("dialog.del_text.msg","Remove this text block and all its paragraphs?"), del);
+        T("dialog.del_text.msg","Remove this text block and all its paragraphs? (Ctrl+Z undoes it.)"), del);
       else del();
     }}));
   bar.appendChild(actions);
@@ -1815,6 +1964,7 @@ function renderBlockCard(node, block, idx){
   // shift this block's position, so a captured idx would go stale.
   const cur = ()=> node.blocks.indexOf(block);
   const card = el("div",{class:"card", draggable:"false"});
+  if (App._focusBlock === block) _pendingFocusEl = card;
   const kindLabel = {
     para:T("block.add.para","Paragraph"), image:T("block.add.image","Image"),
     imagegrid:T("block.add.imagegrid","Image grid"),
@@ -1838,9 +1988,11 @@ function renderBlockCard(node, block, idx){
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
     onclick:()=>{
       const i=cur(); if(i<0) return;
-      const del=()=>{ node.blocks.splice(i,1); markDirty(); renderEditor(); };
-      // Block deletion is not undoable (the grid undo stack dies with the block)
-      // and autosave persists the empty state. Guard the costly/irrecoverable ones.
+      const del=()=>{ node.blocks.splice(i,1); markDirty(); renderEditor();
+        toast(T("toast.deleted_undo","Deleted — Ctrl+Z to undo")); };
+      // Project-level Ctrl+Z DOES restore a deleted block (pjRestore rebuilds the
+      // whole project). Only the block's own grid-granular undo history is lost.
+      // Still confirm the costly ones so a full data table isn't wiped by a misclick.
       const warn = deleteBlockWarning(block);
       if (warn) modalConfirm(T("dialog.del_block.title","Delete this block?"), warn, del);
       else del();
@@ -1865,12 +2017,12 @@ function deleteBlockWarning(block){
   if (!block) return null;
   if (block.type === "datatable"){
     const n = ((block.data && block.data.rows) || []).length;
-    const base = T("dialog.del_datatable.msg","This deletes the whole compliance table and cannot be undone.");
+    const base = T("dialog.del_datatable.msg","This deletes the whole compliance table. Ctrl+Z undoes it, but the table's own edit history is lost.");
     return n ? (base + " (" + n + (n===1?" metric row":" metric rows") + ")") : base;
   }
   if (block.type === "table"){
     const hasData = (block.rows || []).some(r => (r||[]).some(c => String(c==null?"":c).trim()));
-    if (hasData) return T("dialog.del_table.msg","This deletes the table and its contents and cannot be undone.");
+    if (hasData) return T("dialog.del_table.msg","This deletes the table and its contents. Ctrl+Z undoes it.");
   }
   return null;
 }
@@ -2051,7 +2203,8 @@ function duplicateSection(id){               // copy + paste-as-sibling in one s
 function populateBlockPicker(picker, node, getAt){
   const insertAt = (block)=>{
     const at = Math.max(0, Math.min(getAt(), node.blocks.length));
-    node.blocks.splice(at, 0, block); markDirty(); renderEditor();
+    node.blocks.splice(at, 0, block); App._focusBlock = block;   // D4: focus it after render
+    markDirty(); renderEditor();
   };
   const defs = [
     ["para","¶","block.add.para","Paragraph"],
@@ -2536,6 +2689,17 @@ function editImage(host, block, node){
   drop.addEventListener("blur",()=>drop.classList.remove("focused"));
   drop.addEventListener("click",()=>drop.focus());
   drop.addEventListener("paste",(e)=>handleImagePaste(e, block, node, renderPrev));
+  // D5: accept a dropped image file (the class was "img-drop" but only paste
+  // worked). Reuses the same upload path as paste.
+  drop.addEventListener("dragover",(e)=>{ e.preventDefault(); drop.classList.add("dragover"); });
+  drop.addEventListener("dragleave",()=>drop.classList.remove("dragover"));
+  drop.addEventListener("drop",(e)=>{
+    e.preventDefault(); drop.classList.remove("dragover");
+    const files = (e.dataTransfer && e.dataTransfer.files) || [];
+    const img = Array.from(files).find(f=> f.type && f.type.indexOf("image")===0);
+    if (img) uploadImageFile(img, block, node, renderPrev);
+    else toast(T("toast.drop_not_image","Drop an image file (png/jpg)"), true);
+  });
   renderPrev();
   host.appendChild(drop);
 
@@ -2546,7 +2710,19 @@ function editImage(host, block, node){
   host.appendChild(row);
   host.appendChild(buildSizePresets(block));
 }
-function imgUrl(file){ return file + "?dir=" + encodeURIComponent(App.dir||"") + "&_t=" + Date.now(); }
+// Stable image URL: a per-file version query (bumped only when the image is
+// actually replaced) instead of Date.now() on every call -- so a structural
+// re-render or opening Preview no longer cache-busts every <img> and reloads the
+// whole page's images with a visible flicker. (D2 / C4)
+function imgUrl(file){
+  const v = (App._imgVer && App._imgVer[file]) || 0;
+  return file + "?dir=" + encodeURIComponent(App.dir||"") + (v ? ("&v="+v) : "");
+}
+function bumpImgVer(file){
+  if (!file) return;
+  App._imgVer = App._imgVer || {};
+  App._imgVer[file] = (App._imgVer[file]||0) + 1;
+}
 
 // Intent presets (full/half/small) that set block.width_cm; an Advanced toggle
 // exposes the exact cm. The engine caps height automatically, so there is no
@@ -2626,13 +2802,19 @@ async function handleImagePaste(e, block, node, renderPrev){
     return;
   }
   e.preventDefault();
+  await uploadImageFile(file, block, node, renderPrev);
+}
+// Shared image-upload path: POST the file to /api/image and point the block at
+// the saved images/<name>. Used by both paste (handleImagePaste) and drag-drop
+// (editImage's drop handler).
+async function uploadImageFile(file, block, node, renderPrev){
   const b64 = await fileToB64(file);
   const section = sectionOf(node.id);
   try{
     setStatus("saving", T("status.uploading","Uploading image…"));
     const r = await api("POST","/api/image",{query:{dir:App.dir, section},
       json:{ png_b64:b64, section }});
-    block.file = r.file; markDirty(); renderPrev();
+    block.file = r.file; bumpImgVer(r.file); markDirty(); renderPrev();
     setStatus("saved", T("status.image_added","Image added"));
     saveProject(true);
   }catch(err){ setStatus("err","image failed"); toast("Image upload failed: "+err.message, true); }
@@ -3424,6 +3606,23 @@ function editDatatable(host, block){
       rowHandle.addEventListener("mousedown",()=>tr.setAttribute("draggable","true"));
       tr.addEventListener("dragend",()=>tr.setAttribute("draggable","false"));
       actTd.insertBefore(rowHandle, actTd.firstChild);
+      // D9: sim_span toggle (merge this row's sim MIN/TYP/MAX into one wide cell
+      // in the exported table). Guarded by the first sim group's axis count -- a
+      // group with <3 axes cannot span (the WS3 renderer crash fix), so the box
+      // is disabled with an explanatory tooltip rather than producing a warning.
+      const firstSimAxes = (((data.sims||[])[0]||{}).axes || []).length;
+      const spanOk = firstSimAxes >= 3;
+      const spanWrap = el("label",{class:"span-toggle",
+        title: spanOk ? T("datatable.sim_span_hint","Span: merge this row's MIN/TYP/MAX sim cells into one wide cell on export")
+                      : T("datatable.sim_span_blocked","Span needs a sim group with at least 3 axes (MIN/TYP/MAX)")});
+      const spanCb = el("input",{type:"checkbox"});
+      spanCb.checked = !!row.sim_span;
+      if (!spanOk) spanCb.disabled = true;
+      spanCb.addEventListener("change",()=>{ snapshot(ctx); row.sim_span = spanCb.checked;
+        markDirty(); saveProject(true); });
+      spanWrap.appendChild(spanCb);
+      spanWrap.appendChild(el("span",{class:"span-lbl", text:"⇔"}));
+      actTd.appendChild(spanWrap);
       tr.appendChild(actTd);
       wireMetricRowDrag(tr, ri);
       // fixed columns 0..8 (column index = factory arg `c`)
@@ -3871,13 +4070,28 @@ function dropGridEdit(ctx){
   ctx.editing = null;
 }
 
+// D8: grow a compliance grid by one metric row when Enter would move past the
+// last row, so a long manual fill (e.g. 36 rows) doesn't need a click per line.
+// Returns true if a row was appended.
+function gridGrowRow(ctx, wantRow){
+  if (!ctx || ctx.kind !== "compliance") return false;
+  const data = ctx.block && ctx.block.data;
+  if (!data || !Array.isArray(data.rows)) return false;
+  if (wantRow < data.rows.length) return false;
+  snapshot(ctx);
+  data.rows.push(newComplianceRow());
+  markDirty();
+  ctx.rerender();
+  return true;
+}
+
 /* ---- keyboard handler ----------------------------------------------------- */
 function onGridKey(ctx, e){
   // EDIT MODE keys
   if (ctx.editing){
     if (e.key==="Escape"){ e.preventDefault(); cancelEdit(ctx); paintSelection(ctx); ctx.host.focus(); }
     else if (e.key==="Enter" && !e.shiftKey){ e.preventDefault(); commitEdit(ctx);
-      const f=ctx.focus; setAnchor(ctx,f.r+1,f.c); ctx.host.focus(); }
+      const f=ctx.focus; gridGrowRow(ctx,f.r+1); setAnchor(ctx,f.r+1,f.c); ctx.host.focus(); }
     else if (e.key==="Tab"){ e.preventDefault(); commitEdit(ctx);
       const f=ctx.focus; setAnchor(ctx,f.r,f.c+(e.shiftKey?-1:1)); ctx.host.focus(); }
     return; // let other keys reach the contenteditable
@@ -3900,7 +4114,7 @@ function onGridKey(ctx, e){
     case "ArrowDown":  return move(1,0,e.shiftKey);
     case "ArrowLeft":  return move(0,-1,e.shiftKey);
     case "ArrowRight": return move(0,1,e.shiftKey);
-    case "Enter":      e.preventDefault(); return setAnchor(ctx,f.r+1,f.c);
+    case "Enter":      e.preventDefault(); gridGrowRow(ctx,f.r+1); return setAnchor(ctx,f.r+1,f.c);
     case "Tab":        e.preventDefault(); return setAnchor(ctx,f.r,f.c+(e.shiftKey?-1:1));
     case "F2":{ e.preventDefault(); const ad=adapterAt(ctx,f.r,f.c); if(ad) enterEdit(ctx,ad,true); return; }
     case "Delete":
@@ -5556,6 +5770,10 @@ function wireGlobal(){
       e.preventDefault();
       flushActiveGrid();   // commit any in-flight grid cell so a manual save persists it
       if (App.view === "template") persistTemplate({stay:true}); else saveProject(false);
+    }
+    // Ctrl+P: quick jump to a section (overrides browser print in this local app).
+    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="p" && App.view==="editor"){
+      e.preventDefault(); openQuickJump(); return;
     }
     const kz = (e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="z";
     const kredo = (e.ctrlKey||e.metaKey) && (e.key.toLowerCase()==="y" || (e.shiftKey && e.key.toLowerCase()==="z"));
