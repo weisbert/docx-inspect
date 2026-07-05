@@ -193,6 +193,7 @@ def run():
         failures += check_import_xlsx()
         failures += check_validate_compliance()
         failures += check_export(root)
+        failures += check_paste_import(root)
         failures += check_errors(root)
     finally:
         httpd.shutdown()
@@ -438,6 +439,50 @@ def check_export(root):
     f += expect(s2 == 400 and "error" in b2, "export rejects bad fmt", "status=%s" % s2)
     s3, b3 = call("POST", "/api/export?dir=missing_proj&fmt=docx", body={})
     f += expect(s3 == 404 and "error" in b3, "export 404 when no project.json", "status=%s" % s3)
+    return f
+
+
+def check_paste_import(root):
+    """POST /api/paste-import: full-replace from pasted text + structural diff.
+
+    proj_a already has a project.json (from check_project_roundtrip). Paste a
+    modified variant, assert the backup + diff + _paste_diff.md, then assert a
+    truncated paste is rejected 400 without touching the on-disk project.
+    """
+    dirname = "proj_a"
+    project = {
+        "schema_version": 1, "template": "test_tpl_v1",
+        "meta": {"title": "T", "reviewers": [], "revisions": []},
+        "outline": [{"id": "s1", "title": "Intro",
+                     "blocks": [{"type": "para", "runs": [{"t": "pasted body"}]}],
+                     "children": []}],
+    }
+    raw = json.dumps(project).encode("utf-8")
+    s, body = call("POST", "/api/paste-import?dir=%s" % dirname, raw=raw)
+    f = expect(
+        s == 200 and isinstance(body, dict) and body.get("ok") is True
+        and "diff" in body and "diff_file" in body,
+        "POST /api/paste-import (replace)", "status=%s body=%r" % (s, body),
+    )
+    f += expect(
+        os.path.isfile(os.path.join(root, dirname, "_paste_diff.md")),
+        "paste-import writes _paste_diff.md", "missing diff file",
+    )
+    # on-disk project.json now carries the pasted title/section
+    on_disk = json.load(
+        open(os.path.join(root, dirname, "project.json"), encoding="utf-8"))
+    f += expect(
+        on_disk.get("outline", [{}])[0].get("title") == "Intro",
+        "paste-import applied to disk", "outline=%r" % on_disk.get("outline"),
+    )
+    # truncated paste -> 400, on-disk untouched
+    s2, b2 = call("POST", "/api/paste-import?dir=%s" % dirname, raw=raw[: len(raw) // 2])
+    still = json.load(
+        open(os.path.join(root, dirname, "project.json"), encoding="utf-8"))
+    f += expect(
+        s2 == 400 and "error" in b2 and still.get("outline", [{}])[0].get("title") == "Intro",
+        "paste-import rejects truncated (on-disk intact)", "status=%s" % s2,
+    )
     return f
 
 

@@ -876,13 +876,27 @@ async function openProject(dir){
   }
 }
 
+// Deep-clone `v` dropping every object key that starts with "_" (editor-local
+// UI state like node._collapsed). Used before persisting / Copy-text so internal
+// keys never ride along in project.json or the pasted payload (and the payload
+// stays a touch smaller). App.project itself is left untouched.
+function stripInternal(v){
+  if (Array.isArray(v)) return v.map(stripInternal);
+  if (v && typeof v === "object"){
+    const out = {};
+    for (const k in v){ if (k.charAt(0) !== "_") out[k] = stripInternal(v[k]); }
+    return out;
+  }
+  return v;
+}
+
 async function saveProject(isAuto){
   if (!App.project || !App.dir) return;
   if (App.saving){ scheduleAutosave(); return; }
   App.saving = true;
   setStatus("saving", T("status.saving","Saving…"));
   try{
-    const r = await api("PUT","/api/project",{query:{dir:App.dir}, json:App.project});
+    const r = await api("PUT","/api/project",{query:{dir:App.dir}, json:stripInternal(App.project)});
     App.dirty=false;
     setStatus("saved", (App.ui["status.autosaved"]||"Autosaved") + (r.saved_at?(" · "+fmtTime(r.saved_at)):""));
   }catch(e){
@@ -4603,6 +4617,8 @@ function renderProjectsSection(){
       onclick:newFromTemplate}),
     el("button",{class:"tb-btn", text:T("home.import_word","Import Word"),
       onclick:importWord}),
+    el("button",{class:"tb-btn", text:T("home.paste_import","Paste import"),
+      onclick:()=>pasteImport()}),
     el("button",{class:"tb-btn", text:T("home.apply_update","Apply update"),
       onclick:applyUpdate}),
   ]));
@@ -4619,6 +4635,8 @@ function renderProjectsSection(){
       ]),
       el("div",{class:"home-actions"},[
         el("button",{class:"sm-btn", text:T("home.open","Open"), onclick:()=>openFromHome(p.dir)}),
+        el("button",{class:"sm-btn", text:T("home.paste_import","Paste import"),
+          onclick:()=>pasteImport(p.dir)}),
       ]),
     ]));
   });
@@ -5121,13 +5139,83 @@ async function importMaster(){
   });
 }
 
-/* ---- flow: apply an update bundle (.zip from Claude) ---------------------- */
-async function applyUpdate(){
-  const file = await pickFile(".zip"); if (!file) return;
-  const b64 = await fileToB64(file);
+/* ---- flow: paste-import a whole report (de-LLM upstream channel, WS2) ------
+   The work machine's "Copy text" hands over the ENTIRE project.json as text.
+   Importing it is a full replace (user version wins) -- the server backs up the
+   current project first (rollback-compatible) and returns a compact structural
+   diff. Bytes go clipboard/textarea -> HTTP -> disk, never through a model. */
+function pasteImport(presetDir){
+  const m = $("#modal"); m.innerHTML = "";
+  m.appendChild(el("h3",{text:T("dialog.paste.title","Paste import (whole report)")}));
+  m.appendChild(el("p",{text:T("dialog.paste.msg",
+    "Paste the report text (from the work machine's Copy text) to replace the target project. The current version is backed up first; a structural diff is shown below.")}));
+
+  const dl = el("datalist",{id:"paste-dirs"});
+  (App.projects||[]).forEach(p=> dl.appendChild(el("option",{value:p.dir})));
+  const dirInp = el("input",{class:"ti", list:"paste-dirs", style:{width:"100%"},
+    placeholder:T("dialog.paste.dir","project folder"),
+    value: presetDir || App.dir || (App.projects[0]||{}).dir || ""});
+  m.appendChild(el("label",{class:"paste-lbl", text:T("dialog.paste.target","Target project folder")}));
+  m.appendChild(dirInp); m.appendChild(dl);
+
+  const ta = el("textarea",{class:"paste-ta",
+    placeholder:T("dialog.paste.placeholder",'{ "schema_version": 1, ... }'),
+    style:{width:"100%", height:"170px", fontFamily:"monospace", fontSize:"12px", marginTop:"8px"}});
+  m.appendChild(ta);
+
+  const result = el("div",{class:"paste-result",
+    style:{marginTop:"8px", maxHeight:"230px", overflow:"auto"}});
+
+  const readClip = el("button",{class:"sm-btn", text:T("dialog.paste.read_clip","Read clipboard"),
+    onclick: async ()=>{
+      try{
+        const txt = await navigator.clipboard.readText();
+        if (txt){ ta.value = txt; toast(T("toast.clip_read","Clipboard pasted")+" ("+txt.length+" chars)"); }
+        else toast(T("toast.clip_empty","Clipboard empty"), true);
+      }catch(e){ toast(T("toast.clip_denied","Clipboard read blocked -- paste manually (Ctrl+V)"), true); }
+    }});
+  const importBtn = el("button",{class:"tb-btn primary", text:T("dialog.paste.import","Import")});
+  importBtn.onclick = async ()=>{
+    const dir = dirInp.value.trim();
+    const text = ta.value.trim();
+    if (!dir){ toast(T("toast.paste_need_dir","Choose a target folder"), true); return; }
+    if (!text){ toast(T("toast.paste_need_text","Paste the report text first"), true); return; }
+    importBtn.disabled = true;
+    result.innerHTML = "";
+    result.appendChild(el("div",{class:"muted", text:T("dialog.paste.importing","Importing...")}));
+    try{
+      const r = await api("POST","/api/paste-import",{query:{dir}, raw:text, rawType:"application/json"});
+      result.innerHTML = "";
+      (r.warn||[]).forEach(w=> result.appendChild(
+        el("div",{class:"paste-warn", style:{color:"var(--warn)", fontWeight:"600"}, text:"⚠ "+w})));
+      result.appendChild(el("pre",{class:"paste-diff",
+        style:{whiteSpace:"pre-wrap", fontSize:"12px", background:"var(--bg)", padding:"8px", borderRadius:"6px"},
+        text: r.diff||""}));
+      result.appendChild(el("div",{class:"modal-actions"},[
+        el("button",{class:"tb-btn primary", text:T("dialog.paste.open","Open project"),
+          onclick:()=>{ closeOverlay(); openProject(dir); }})]));
+      await refreshHome();
+      toast(T("toast.paste_ok","Imported")+(r.backup?(" · "+T("toast.paste_backed","backed up")):""));
+    }catch(e){
+      result.innerHTML = "";
+      result.appendChild(el("div",{class:"paste-err", style:{color:"var(--danger)", fontWeight:"600"},
+        text:T("toast.paste_failed","Import failed: ")+e.message}));
+    }finally{ importBtn.disabled = false; }
+  };
+  m.appendChild(el("div",{class:"modal-actions"},[
+    readClip, el("div",{style:{flex:"1"}}),
+    el("button",{class:"sm-btn", text:T("action.close","Close"), onclick:closeOverlay}),
+    importBtn,
+  ]));
+  m.appendChild(result);
+  showOverlay(); setTimeout(()=>ta.focus(),30);
+}
+
+/* ---- flow: apply an update bundle (.zip file OR pasted base64) ------------- */
+async function _applyBundle(name, b64){
   setStatus("saving", T("status.applying","Applying update..."));
   try{
-    const r = await api("POST","/api/apply-update",{json:{name:file.name, zip_b64:b64}});
+    const r = await api("POST","/api/apply-update",{json:{name:name||"update.zip", zip_b64:b64}});
     const acts = r.actions || [];
     const warned = acts.filter(a=>a.warn).length;
     let msg = T("toast.update_applied","Update applied: ")+acts.length+T("toast.update_files"," file(s)");
@@ -5135,10 +5223,49 @@ async function applyUpdate(){
     toast(msg);
     await refreshHome();
     setStatus("", T("status.no_project","No project open"));
+    return r;
   }catch(e){
     setStatus("err", T("status.apply_failed","apply failed"));
     toast(T("toast.apply_failed","Apply failed: ")+e.message, true);
+    throw e;
   }
+}
+function applyUpdate(){
+  const m = $("#modal"); m.innerHTML = "";
+  m.appendChild(el("h3",{text:T("dialog.apply.title","Apply update bundle")}));
+  m.appendChild(el("p",{text:T("dialog.apply.msg",
+    "Apply a patch bundle from the dev machine. Choose the .zip, or paste its base64 text if this machine has no file channel.")}));
+  const ta = el("textarea",{class:"paste-ta",
+    placeholder:T("dialog.apply.b64_ph","paste base64 zip text here"),
+    style:{width:"100%", height:"120px", fontFamily:"monospace", fontSize:"12px"}});
+  const readClip = el("button",{class:"sm-btn", text:T("dialog.paste.read_clip","Read clipboard"),
+    onclick: async ()=>{ try{ const t=await navigator.clipboard.readText(); if(t) ta.value=t; }
+                          catch(e){ toast(T("toast.clip_denied","Clipboard read blocked -- paste manually (Ctrl+V)"), true); } }});
+  const fileBtn = el("button",{class:"sm-btn", text:T("dialog.apply.pick","Choose .zip file"),
+    onclick: async ()=>{
+      const file = await pickFile(".zip"); if(!file) return;
+      const b64 = await fileToB64(file);
+      closeOverlay();
+      _applyBundle(file.name, b64).catch(()=>{});
+    }});
+  const applyBtn = el("button",{class:"tb-btn primary", text:T("dialog.apply.apply","Apply")});
+  applyBtn.onclick = async ()=>{
+    let b64 = ta.value.trim();
+    if (!b64){ toast(T("toast.apply_need","Paste base64 text or choose a file"), true); return; }
+    if (b64.slice(0,5).toLowerCase()==="data:"){ const i=b64.indexOf(","); if(i>=0) b64=b64.slice(i+1); }
+    b64 = b64.replace(/\s+/g,"");
+    applyBtn.disabled = true;
+    try{ await _applyBundle("pasted_update.zip", b64); closeOverlay(); }
+    catch(e){}
+    finally{ applyBtn.disabled = false; }
+  };
+  m.appendChild(ta);
+  m.appendChild(el("div",{class:"modal-actions"},[
+    readClip, fileBtn, el("div",{style:{flex:"1"}}),
+    el("button",{class:"sm-btn", text:T("action.close","Close"), onclick:closeOverlay}),
+    applyBtn,
+  ]));
+  showOverlay(); setTimeout(()=>ta.focus(),30);
 }
 
 /* ---- flow: delete template ------------------------------------------------ */
@@ -5284,7 +5411,7 @@ function wireToolbar(){
 function copyProjectText(){
   if (!App.project){ toast(T("toast.need_project","Open a project first"), true); return; }
   flushActiveGrid();   // commit any in-flight grid cell so the copy is current
-  const text = JSON.stringify(App.project);
+  const text = JSON.stringify(stripInternal(App.project));   // drop _collapsed etc.
   const ok = ()=>toast(T("toast.copied_text","Copied report as text")+" ("+text.length+" chars)");
   try{
     if (navigator.clipboard && navigator.clipboard.writeText){

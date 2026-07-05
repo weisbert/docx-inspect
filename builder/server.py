@@ -16,6 +16,7 @@ import argparse
 import base64
 import contextlib
 import copy
+import datetime
 import io
 import json
 import os
@@ -662,6 +663,173 @@ def _empty_meta():
 
 
 # ---------------------------------------------------------------------------
+# Helpers: paste-import structural diff (de-LLM upstream channel, WS2).
+# ---------------------------------------------------------------------------
+#
+# The GUI's Copy-text exports the WHOLE App.project. Re-importing it is a full
+# replace, so there is no three-way merge: "user version wins" == overwrite +
+# backup + a compact diff the assistant can read (structure, not full text).
+
+
+def _short(v, n=60):
+    s = "" if v is None else str(v)
+    s = s.replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "..."
+
+
+def _collect_nodes(outline):
+    """Every outline node in document order (depth-first, children included)."""
+    out = []
+
+    def walk(nodes):
+        for n in nodes or []:
+            if isinstance(n, dict):
+                out.append(n)
+                walk(n.get("children", []))
+
+    walk(outline)
+    return out
+
+
+def _block_types(node):
+    from collections import Counter
+    c = Counter()
+    for b in (node.get("blocks") or []):
+        if isinstance(b, dict):
+            c[b.get("type", "?")] += 1
+    return c
+
+
+def _para_chars(node):
+    total = 0
+    for b in (node.get("blocks") or []):
+        if isinstance(b, dict) and b.get("type") == "para":
+            for r in (b.get("runs") or []):
+                if isinstance(r, dict):
+                    total += len(r.get("t", "") or "")
+    return total
+
+
+def _fmt_multiset_delta(old_c, new_c):
+    parts = []
+    for k in sorted(set(old_c) | set(new_c)):
+        o, n = old_c.get(k, 0), new_c.get(k, 0)
+        if o != n:
+            parts.append("%s %d->%d" % (k, o, n))
+    return ", ".join(parts)
+
+
+def _match_nodes(old_nodes, new_nodes):
+    """Pair old/new outline nodes by title (id as tie-break, robust to node-id
+    drift). Returns (pairs, added, removed)."""
+    from collections import defaultdict
+    by_title = defaultdict(list)
+    for n in old_nodes:
+        by_title[n.get("title", "")].append(n)
+    consumed, pairs, added = set(), [], []
+    for nn in new_nodes:
+        cands = by_title.get(nn.get("title", ""), [])
+        pick = None
+        for c in cands:  # prefer same id, not yet consumed
+            if id(c) not in consumed and nn.get("id") and c.get("id") == nn.get("id"):
+                pick = c
+                break
+        if pick is None:
+            for c in cands:
+                if id(c) not in consumed:
+                    pick = c
+                    break
+        if pick is None:
+            added.append(nn)
+        else:
+            consumed.add(id(pick))
+            pairs.append((pick, nn))
+    removed = [n for n in old_nodes if id(n) not in consumed]
+    return pairs, added, removed
+
+
+def paste_import_diff(old_project, new_project, dir_name, id_warns=None):
+    """Compact structural diff between the on-disk project and the pasted one.
+
+    No full text: meta key changes, top-level key changes (e.g. sim_checklist),
+    and per-section block-type multiset + para char-length deltas. Returns a
+    markdown string (~300-600 tokens) the assistant reads instead of the file."""
+    old = old_project if isinstance(old_project, dict) else {}
+    new = new_project if isinstance(new_project, dict) else {}
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["# Paste-import diff -- %s" % dir_name, "",
+             "_Generated %s. Structural summary only (no full text)._" % ts, ""]
+    for w in (id_warns or []):
+        lines.append("> WARNING: %s" % w)
+    if id_warns:
+        lines.append("")
+
+    # meta
+    om, nm = old.get("meta") or {}, new.get("meta") or {}
+    meta_changes = []
+    for k in sorted(set(om) | set(nm)):
+        ov, nv = om.get(k), nm.get(k)
+        if ov == nv:
+            continue
+        if isinstance(ov, list) or isinstance(nv, list):
+            meta_changes.append("%s %d->%d entries" % (k, len(ov or []), len(nv or [])))
+        else:
+            meta_changes.append("%s %r->%r" % (k, _short(ov), _short(nv)))
+    lines += ["## meta",
+              ("- " + "; ".join(meta_changes)) if meta_changes else "- (unchanged)", ""]
+
+    # top-level keys besides meta/outline (template + sim_checklist etc.)
+    skip = {"meta", "outline", "schema_version"}
+    top_changes = []
+    for k in sorted(set(old) | set(new)):
+        if k in skip:
+            continue
+        ov, nv = old.get(k), new.get(k)
+        if ov == nv:
+            continue
+        if isinstance(ov, list) or isinstance(nv, list):
+            top_changes.append("%s %d->%d items" % (k, len(ov or []), len(nv or [])))
+        else:
+            top_changes.append("%s %r->%r" % (k, _short(ov), _short(nv)))
+    if top_changes:
+        lines += ["## top-level", "- " + "; ".join(top_changes), ""]
+
+    # outline sections
+    old_nodes = _collect_nodes(old.get("outline"))
+    new_nodes = _collect_nodes(new.get("outline"))
+    pairs, added, removed = _match_nodes(old_nodes, new_nodes)
+    changed = []
+    for on, nn in pairs:
+        delta = _fmt_multiset_delta(_block_types(on), _block_types(nn))
+        opl, npl = _para_chars(on), _para_chars(nn)
+        if delta or opl != npl:
+            desc = []
+            if delta:
+                desc.append("blocks " + delta)
+            if opl != npl:
+                desc.append("para chars %d->%d (%+d)" % (opl, npl, npl - opl))
+            changed.append((nn.get("title", ""), "; ".join(desc)))
+    lines += ["## sections",
+              "- %d total (was %d); %d changed, %d added, %d removed"
+              % (len(new_nodes), len(old_nodes), len(changed), len(added), len(removed)), ""]
+    if changed:
+        lines.append("### changed")
+        lines += ['- "%s": %s' % (t, d) for t, d in changed]
+        lines.append("")
+    if added:
+        lines.append("### added")
+        lines += ['- "%s" [%s]' % (n.get("title", ""),
+                                   _fmt_multiset_delta({}, _block_types(n)) or "empty")
+                  for n in added]
+        lines.append("")
+    if removed:
+        lines.append("### removed")
+        lines += ['- "%s"' % n.get("title", "") for n in removed]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler.
 # ---------------------------------------------------------------------------
 
@@ -779,6 +947,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_import_docx()
             if path == "/api/new-from-template":
                 return self._api_new_from_template()
+            if path == "/api/paste-import":
+                return self._api_paste_import(qs)
             if path == "/api/apply-update":
                 return self._api_apply_update()
 
@@ -1160,6 +1330,74 @@ class Handler(BaseHTTPRequestHandler):
             pj, json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
         )
         return self._send_json({"ok": True, "project": project})
+
+    def _api_paste_import(self, qs):
+        """Full-project replace from pasted text (de-LLM upstream channel, WS2).
+
+        Body: the raw pasted project.json text (bytes go browser -> HTTP -> disk,
+        never through a model). Validates, backs up the existing project into the
+        shared rollback history, writes it, and emits a compact structural diff to
+        <project>/_paste_diff.md. A truncated/mangled paste fails to parse and is
+        rejected -- the on-disk project is left untouched. Returns
+        {ok, backup, warn, diff, diff_file}."""
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        dir_arg = (qs.get("dir") or [None])[0]
+        raw = self._read_body()
+        if not raw:
+            return self._send_error_json("empty paste body -- nothing changed")
+        try:
+            project = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            return self._send_error_json(
+                "could not parse pasted JSON (truncated?): %s -- nothing changed" % exc)
+        if not isinstance(project, dict):
+            return self._send_error_json(
+                "pasted JSON must be an object -- nothing changed")
+        sv = project.get("schema_version")
+        if sv is not None and sv != 1:
+            return self._send_error_json(
+                "unsupported schema_version: %r -- nothing changed" % sv)
+
+        project_dir = resolve_project_dir(dir_arg, create=True)
+        pj = os.path.join(project_dir, "project.json")
+        old_project = None
+        if os.path.isfile(pj):
+            try:
+                with open(pj, "r", encoding="utf-8") as fh:
+                    old_project = json.load(fh)
+            except Exception:
+                old_project = None
+
+        # identity check: guard against pasting into the wrong project folder.
+        warns = []
+        if isinstance(old_project, dict):
+            ot = (old_project.get("meta") or {}).get("title")
+            nt = (project.get("meta") or {}).get("title")
+            if ot and nt and ot != nt:
+                warns.append('pasted title "%s" != existing "%s"' % (nt, ot))
+            otpl, ntpl = old_project.get("template"), project.get("template")
+            if otpl and ntpl and otpl != ntpl:
+                warns.append('pasted template "%s" != existing "%s"' % (ntpl, otpl))
+
+        name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
+        diff_md = paste_import_diff(old_project, project, name, warns)
+
+        body = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
+        apply_update = _import_apply_update()
+        rel = os.path.relpath(pj, CFG.reports_root)
+        rec = apply_update.record_replace(CFG.reports_root, rel, body)
+
+        diff_path = os.path.join(project_dir, "_paste_diff.md")
+        atomic_write(diff_path, diff_md.encode("utf-8"))
+
+        return self._send_json({
+            "ok": True,
+            "backup": (rec.get("backup") or "").replace("\\", "/"),
+            "warn": warns,
+            "diff": diff_md,
+            "diff_file": diff_path.replace("\\", "/"),
+        })
 
     def _api_apply_update(self):
         """Apply an uploaded update bundle (.zip) to the reports root.

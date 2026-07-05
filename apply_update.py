@@ -270,6 +270,29 @@ def run_plan(root, plan, state, on_log=None):
     return bdir, logs
 
 
+def record_replace(root, rel, new_bytes, backup=True):
+    """Back up root/rel (if present) into a fresh _backups/<ts>/ dir, write
+    new_bytes atomically, and update the applied-state sha.
+
+    Shared by the GUI paste-import so a full-file replace lands in the SAME
+    rollback history as apply_bundle (``apply_update.py --rollback`` restores it
+    too). ``rel`` is a root-relative path (OS separators). Returns
+    {"backup": <bdir or "">, "existed": bool, "rel": rel}."""
+    tgt = os.path.join(root, rel)
+    existed = os.path.isfile(tgt)
+    bdir = ""
+    if backup and existed:
+        bdir = os.path.join(_backups(root), _ts())
+        dst = os.path.join(bdir, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(tgt, dst)
+    _atomic_write(tgt, new_bytes)
+    st = _load_state(root)
+    st[rel] = _sha(new_bytes)
+    _save_state(root, st)
+    return {"backup": bdir, "existed": existed, "rel": rel}
+
+
 def apply_bundle(root, bundle_path, dry=False, on_log=None):
     """Programmatic entry (used by the GUI server). Returns a JSON-able summary."""
     manifest, actions = read_bundle(root, bundle_path)
