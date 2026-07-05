@@ -87,6 +87,13 @@ def _axis_count(sim, default_axes):
     return len(ax) if isinstance(ax, list) else len(default_axes)
 
 
+def _as_list(v):
+    """A list/tuple as a list, else [] -- so a malformed scalar mtm (e.g.
+    sim_mtm: 5 in a hand-edited project.json) is tolerated instead of crashing
+    the whole lint on list(5)."""
+    return list(v) if isinstance(v, (list, tuple)) else []
+
+
 def _row_sim_values(row):
     """Flat list of a row's simulated axis values (multi-sim or flat schema)."""
     vals = []
@@ -94,10 +101,10 @@ def _row_sim_values(row):
     if isinstance(sims, dict) and sims:
         for sv in sims.values():
             if isinstance(sv, dict):
-                vals += list(sv.get("mtm") or [])
+                vals += _as_list(sv.get("mtm"))
                 vals.append(sv.get("ntwc"))
     else:
-        vals += list(row.get("sim_mtm") or [])
+        vals += _as_list(row.get("sim_mtm"))
         vals.append(row.get("sim_ntwc"))
     return vals
 
@@ -105,7 +112,7 @@ def _row_sim_values(row):
 def _row_has_spec(row):
     if row.get("spec") not in (None, ""):
         return True
-    for v in (row.get("spec_mtm") or []):
+    for v in _as_list(row.get("spec_mtm")):
         if v not in (None, ""):
             return True
     return row.get("spec_ntwc") not in (None, "")

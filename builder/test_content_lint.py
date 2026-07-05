@@ -122,6 +122,19 @@ def main():
     check(cl.lint_project(clean, {}) == [], "clean project -> no findings",
           "%r" % cl.lint_project(clean, {}))
 
+    # regression: a malformed SCALAR sim_mtm / spec_mtm must NOT crash the lint
+    # (a lint gate that blows up on the malformed input it exists to catch is worse
+    # than useless). It should tolerate it and still emit findings for the section.
+    bad = {"schema_version": 1, "outline": [{"title": "S", "blocks": [
+        {"type": "datatable", "data": {"sims": [{"key": "s1"}], "rows": [
+            {"cat": "c", "item": "i", "kind": "result", "unit": "V",
+             "sim_mtm": 5, "spec_mtm": 9, "limit": "le"}]}}], "children": []}]}
+    try:
+        cl.lint_project(bad, {})
+        check(True, "scalar sim_mtm/spec_mtm does not crash the lint")
+    except Exception as e:
+        check(False, "scalar sim_mtm/spec_mtm does not crash the lint", repr(e))
+
     print("\n%d finding(s) from fixture; %d test failure(s)" % (len(findings), fails))
     return 1 if fails else 0
 

@@ -149,10 +149,29 @@ def test_partial_failure():
           "partial failure: the good item still applied")
 
 
+def test_rollback_created():
+    # A create-only op (e.g. paste-import of a brand-new project) must leave a
+    # backup dir so rollback targets THAT op, and rollback must delete the created
+    # file rather than silently reverting an older, unrelated op.
+    root = tempfile.mkdtemp(prefix="au_rbcreate_")
+    rec = au.record_replace(root, os.path.join("newproj", "project.json"),
+                            b'{"schema_version":1}')
+    check(not rec["existed"] and os.path.isdir(rec["backup"]),
+          "record_replace(create) still makes a backup dir")
+    pj = os.path.join(root, "newproj", "project.json")
+    check(os.path.isfile(pj), "created file exists after record_replace")
+    res = au.rollback_last(root)
+    check(res["ok"] and not os.path.isfile(pj),
+          "rollback of a create deletes the created file")
+    check(res.get("deleted") and res["deleted"][0].endswith("newproj/project.json"),
+          "rollback reports the deleted create", str(res.get("deleted")))
+
+
 def main():
     test_find_and_ops()
     test_run_plan_and_bundle()
     test_partial_failure()
+    test_rollback_created()
     print("\n%d test failure(s)" % fails)
     return 1 if fails else 0
 

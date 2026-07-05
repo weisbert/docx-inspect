@@ -975,6 +975,10 @@ function onSaveConflict(diskMtime){
 async function exportProject(fmt){
   if (!App.project || !App.dir){ toast(T("toast.need_project","Open a project first"), true); return; }
   await saveProject(false);
+  // If the save hit a disk conflict (409), saveProject opened the conflict modal
+  // and did NOT persist; exporting now would render the STALE on-disk project and
+  // drop the user's unsaved edits — so bail and let them resolve the conflict.
+  if (App._conflictOpen){ return; }
   setStatus("saving", T("status.exporting","Exporting…"));
   try{
     const r = await api("POST","/api/export",{query:{dir:App.dir, fmt}, json:{save_first:true}});
@@ -1333,7 +1337,8 @@ function renderTreeBody(){
   const root = $("#tree"); root.innerHTML = "";
   const f = App._treeFilter || "";
   // cover special node (hidden when a filter is active and doesn't match "cover")
-  if (!f || "cover".indexOf(f) >= 0){
+  const coverShown = (!f || "cover".indexOf(f) >= 0);
+  if (coverShown){
     root.appendChild(el("div", {class:"node-row cover"+(App.selId===COVER_ID?" sel":""),
         onclick:()=>selectNode(COVER_ID)}, [
       el("span",{class:"twisty leaf"}), el("span",{class:"node-title", text:T("cover.node","Cover")})
@@ -1343,7 +1348,9 @@ function renderTreeBody(){
   const frag = document.createDocumentFragment();
   buildNodes(App.project.outline, frag, [], 0);
   root.appendChild(frag);
-  if (f && !frag.childNodes.length)
+  // "No sections match" only when NOTHING matched (not even the Cover row), so a
+  // filter of "cover" doesn't show the Cover row AND a contradictory empty-state.
+  if (f && !frag.childNodes.length && !coverShown)
     root.appendChild(el("div",{class:"tree-empty", style:{padding:"8px",color:"var(--muted)",fontSize:"12px"},
       text:T("outline.no_match","No sections match")}));
 }
@@ -1406,7 +1413,9 @@ function openQuickJump(){
   const list = el("div",{class:"qj-list", style:{maxHeight:"340px", overflow:"auto", marginTop:"8px"}});
   m.appendChild(input); m.appendChild(list);
   let filtered = items.slice(), sel = 0;
-  const jump = (id)=>{ closeOverlay(); App._treeFilter=""; App.view="editor"; App.selId=id; render();
+  const jump = (id)=>{ closeOverlay(); App._treeFilter="";
+    { const sb=document.querySelector(".tree-search"); if(sb) sb.value=""; }  // clear the filter box too
+    App.view="editor"; App.selId=id; render();
     const row = $("#tree").querySelector('[data-id="'+id+'"]');
     if (row) try{ row.scrollIntoView({block:"center"}); }catch(_){} };
   const draw = ()=>{
@@ -5629,7 +5638,8 @@ function rollbackLastApply(){
     async ()=>{
       try{
         const r = await api("POST","/api/rollback",{json:{}});
-        toast(T("toast.rolled_back","Rolled back ")+(r.restored?r.restored.length:0)+T("toast.update_files"," file(s)"));
+        const nback = (r.restored?r.restored.length:0) + (r.deleted?r.deleted.length:0);
+        toast(T("toast.rolled_back","Rolled back ")+nback+T("toast.update_files"," file(s)"));
         await refreshHome();
       }catch(e){ toast(T("toast.rollback_failed","Rollback failed: ")+e.message, true); }
     });

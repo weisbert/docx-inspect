@@ -891,10 +891,30 @@ def _place_picture(p, path, fname, width_cm, max_height_cm, warn=None):
         warn({"type": "missing_image", "detail": fname or "(no file)"})
 
 
+def _safe_image_path(project_dir, fname):
+    """Resolve a project-relative image path, or "" when it is absolute or escapes
+    ``project_dir`` via ``..`` -- so a project.json ``file`` value can never read an
+    out-of-tree file and bake it into the exported docx (defense-in-depth behind the
+    content_lint image_path check, which warns but does not block export)."""
+    if not fname:
+        return ""
+    f = str(fname).replace("\\", "/")
+    if os.path.isabs(f) or (len(f) >= 2 and f[1] == ":"):
+        return ""
+    target = os.path.abspath(os.path.join(project_dir, f.replace("/", os.sep)))
+    pdir = os.path.abspath(project_dir)
+    try:
+        if os.path.normcase(os.path.commonpath([target, pdir])) != os.path.normcase(pdir):
+            return ""
+    except ValueError:
+        return ""   # different drives
+    return target
+
+
 def _render_image(doc, block, project_dir, chap, seq, cfg, warn=None):
     fname = block.get("file", "")
     width = _as_float(block.get("width_cm", 12.0), 12.0)
-    path = os.path.join(project_dir, fname.replace("/", os.sep)) if fname else ""
+    path = _safe_image_path(project_dir, fname)
     pic_p = doc.add_paragraph()
     pic_p.alignment = ALIGN.CENTER
     _place_picture(pic_p, path, fname, width,
@@ -947,8 +967,7 @@ def _render_image_grid(doc, block, project_dir, chap, seq, cfg, warn=None):
                 if idx < n:
                     it = items[idx]
                     fn = it.get("file", "")
-                    pth = (os.path.join(project_dir, fn.replace("/", os.sep))
-                           if fn else "")
+                    pth = _safe_image_path(project_dir, fn)
                     _place_picture(p, pth, fn, cell_w, max_h, warn=warn)
                     if show_sub:
                         sp = cell.add_paragraph()

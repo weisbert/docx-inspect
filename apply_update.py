@@ -130,6 +130,35 @@ def _save_state(root, st):
                   json.dumps(st, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
+# A backup dir that only CREATED files (no pre-image to restore) still needs to
+# exist so rollback_last targets THAT op, not an older one; this marker inside it
+# lists the created rel paths so rollback deletes them instead of silently
+# reverting an unrelated earlier change.
+_CREATED_MARK = ".op_created"
+
+
+def _write_created(bdir, created):
+    if created:
+        os.makedirs(bdir, exist_ok=True)
+        _atomic_write(os.path.join(bdir, _CREATED_MARK),
+                      "\n".join(created).encode("utf-8"))
+
+
+def _new_backup_dir(root):
+    """A fresh, UNIQUE backup dir. _ts() is 1-second granular, so two ops in the
+    same second would otherwise share a dir and rollback would undo BOTH; a numeric
+    suffix guarantees one op per dir so rollback_last undoes exactly one op."""
+    base = os.path.join(_backups(root), _ts())
+    d, n = base, 1
+    while True:
+        try:
+            os.makedirs(d)          # exist_ok=False -> collision-safe
+            return d
+        except FileExistsError:
+            d = "%s-%d" % (base, n)
+            n += 1
+
+
 # ---------------------------------------------------------------------------
 # project.json section patching (by node id, title fallback).
 # ---------------------------------------------------------------------------
@@ -273,14 +302,17 @@ def run_plan(root, plan, state, on_log=None):
     mid-bundle failure leaves ``.update_state.json`` consistent with what was
     actually written (never half a step behind). A failed item is annotated with
     ``it["error"]`` and logged so the summary can report a partial apply."""
-    bdir = os.path.join(_backups(root), _ts())
+    bdir = _new_backup_dir(root)   # unique per op so rollback undoes exactly one op
     logs = []
+    created = []
     for it in plan:
         try:
             if it["exists"]:
                 dst = os.path.join(bdir, it["rel"])
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(it["tgt"], dst)
+            else:
+                created.append(it["rel"].replace("\\", "/"))
             if it["kind"] == "replace":
                 _atomic_write(it["tgt"], it["payload"])
                 state[it["rel"]] = _sha(it["payload"])
@@ -302,6 +334,7 @@ def run_plan(root, plan, state, on_log=None):
             logs.append(msg)
             if on_log:
                 on_log(msg)
+    _write_created(bdir, created)
     return bdir, logs
 
 
@@ -315,12 +348,16 @@ def record_replace(root, rel, new_bytes, backup=True):
     {"backup": <bdir or "">, "existed": bool, "rel": rel}."""
     tgt = os.path.join(root, rel)
     existed = os.path.isfile(tgt)
-    bdir = ""
+    # ALWAYS create the per-op backup dir so rollback_last targets THIS op. For a
+    # created file there is no pre-image; a .op_created marker records it so rollback
+    # deletes it rather than reverting an older, unrelated op.
+    bdir = _new_backup_dir(root)
     if backup and existed:
-        bdir = os.path.join(_backups(root), _ts())
         dst = os.path.join(bdir, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(tgt, dst)
+    elif not existed:
+        _write_created(bdir, [rel.replace("\\", "/")])
     _atomic_write(tgt, new_bytes)
     st = _load_state(root)
     st[rel] = _sha(new_bytes)
@@ -435,10 +472,16 @@ def rollback_last(root):
     bdir = _latest_backup(root)
     if not bdir:
         return {"ok": False, "error": "no backups to roll back to"}
+    # created files (undo = delete them), read from the marker and excluded from the
+    # restore walk.
+    created = []
+    cmark = os.path.join(bdir, _CREATED_MARK)
+    if os.path.isfile(cmark):
+        created = [ln for ln in _read(cmark).decode("utf-8").splitlines() if ln.strip()]
     files = [(os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), bdir))
-             for dp, _dn, fn in os.walk(bdir) for f in fn]
+             for dp, _dn, fn in os.walk(bdir) for f in fn if f != _CREATED_MARK]
     pre = os.path.join(_backups(root), _ts() + "-pre-rollback")
-    restored = []
+    restored, deleted = [], []
     for full, rel in files:
         tgt = os.path.join(root, rel)
         if os.path.isfile(tgt):
@@ -447,7 +490,15 @@ def rollback_last(root):
             shutil.copy2(tgt, dst)
         _atomic_write(tgt, _read(full))
         restored.append(rel.replace("\\", "/"))
-    return {"ok": True, "restored": restored,
+    for rel in created:   # undo a creation = remove the file (snapshot it first)
+        tgt = os.path.join(root, *rel.split("/"))
+        if os.path.isfile(tgt):
+            dst = os.path.join(pre, *rel.split("/"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(tgt, dst)
+            os.remove(tgt)
+            deleted.append(rel)
+    return {"ok": True, "restored": restored, "deleted": deleted,
             "from": bdir.replace("\\", "/"), "pre": pre.replace("\\", "/")}
 
 
