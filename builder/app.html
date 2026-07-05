@@ -1081,20 +1081,90 @@ function newComplianceRow(){
 // (compliance semantics) -- with a starter config. No new block type, so the
 // engine / preview / editor renderers stay unchanged. New table kinds later =
 // just another template entry here.
+// Build compliance rows from a compact spec list. Each item is
+// {cat,item,unit, kind?, limit?, spec?, spec_mtm?, spec_ntwc?, sim_span?}.
+// `defaultKind` applies when an item omits kind; when `simKeys` is given a
+// per-sim `sims{}` map is built (compare tables) instead of the flat sim_mtm
+// schema. This generalizes the old hardcoded PVT setting-row list so the same
+// code fills built-in AND config-defined table presets (WS4).
+function rowsFromSpec(specList, defaultKind, simKeys){
+  return (specList||[]).map(s=>{
+    const row = {
+      cat: s.cat||"", item: s.item||"", unit: s.unit||"",
+      kind: s.kind || defaultKind,
+      spec: (s.spec!=null ? s.spec : null),
+      spec_mtm: Array.isArray(s.spec_mtm) ? s.spec_mtm.slice() : [null,null,null],
+      spec_ntwc: (s.spec_ntwc!=null ? s.spec_ntwc : null),
+      limit: (s.limit!=null ? s.limit : null),
+      sim_span: !!s.sim_span,
+    };
+    if (simKeys && simKeys.length){
+      row.sims = {};
+      simKeys.forEach(k=> row.sims[k] = { mtm:[null,null,null], ntwc:null });
+    } else {
+      row.sim_mtm = [null,null,null]; row.sim_ntwc = null;
+    }
+    return row;
+  });
+}
+// Built-in PVT condition rows -- now just a spec list fed to rowsFromSpec.
 function tplSettingRowsFlat(){
-  const mk = (cat,item,unit)=>({ cat, item, unit, kind:"common_setting",
-    spec:null, spec_mtm:[null,null,null], sim_mtm:[null,null,null],
-    spec_ntwc:null, sim_ntwc:null, limit:null, sim_span:false });
-  return [ mk("PVT_Setting","Process",""), mk("PVT_Setting","Temperature","℃"),
-           mk("PVT_Setting","Voltage","V") ];
+  return rowsFromSpec([
+    {cat:"PVT_Setting", item:"Process", unit:""},
+    {cat:"PVT_Setting", item:"Temperature", unit:"℃"},
+    {cat:"PVT_Setting", item:"Voltage", unit:"V"},
+  ], "common_setting");
 }
 function tplCmpRow(cat, item, unit, kind, simKeys){
   const sims = {};
   simKeys.forEach(k=> sims[k] = { mtm:[null,null,null], ntwc:null });
   return { cat, item, unit, kind, spec:null, spec_mtm:[null,null,null], limit:null, sims };
 }
+// Config-defined table presets (company content lives in local template config,
+// so the public engine/app stay neutral). Empty when none configured.
+function configTablePresets(){
+  return (App.config && Array.isArray(App.config.table_presets)) ? App.config.table_presets : [];
+}
+// Instantiate a `table_presets` entry into a block. `base` picks the base type:
+// "plain" -> a free table (Parameter/Value style); "compliance"/"compare" -> a
+// datatable whose setting_rows/result_rows come from rowsFromSpec.
+function tableFromPreset(p){
+  const cc = App.config.compliance || {};
+  const defAxes = (cc.axis_labels || ["MIN","TYP","MAX","NTWC"]);
+  const base = p.base || "compliance";
+  if (base === "plain"){
+    const rows = (Array.isArray(p.rows) && p.rows.length)
+      ? p.rows.map(r=> Array.isArray(r) ? r.slice() : [String(r)])
+      : [["",""],["",""]];
+    return { type:"table", id:uid(), caption: p.caption||"",
+             header_rows: (p.header_rows!=null ? p.header_rows : 1),
+             rows, merges: Array.isArray(p.merges) ? JSON.parse(JSON.stringify(p.merges)) : [],
+             col_w: p.col_w || null };
+  }
+  const specSims = (Array.isArray(p.sims) && p.sims.length)
+    ? p.sims : [{title:"", stage:(cc.stages&&cc.stages[0])||"", axes: defAxes.slice()}];
+  const sims = [];
+  specSims.forEach(s=>{
+    sims.push({ key: uniqueSimKey(sims, s.stage||""), title: s.title||"",
+                stage: s.stage||"", axes: (Array.isArray(s.axes)?s.axes:defAxes).slice() });
+  });
+  const compare = (base === "compare") || sims.length > 1;
+  const simKeys = compare ? sims.map(s=>s.key) : null;
+  let rows = rowsFromSpec(p.setting_rows||[], "common_setting", simKeys)
+    .concat(rowsFromSpec(p.result_rows||[], "result", simKeys));
+  if (!(Array.isArray(p.result_rows) && p.result_rows.length)){
+    rows.push(simKeys ? tplCmpRow("","","","result",simKeys) : newComplianceRow());
+  }
+  return { type:"datatable", id:uid(), kind:"compliance",
+    caption: p.caption || T("datatable.default_caption","Compliance Table"),
+    data: { spec_name: (p.spec_name!=null ? p.spec_name : (compare ? "" : "Spec")),
+            show_spec: (p.show_spec!=null ? p.show_spec : !compare),
+            sims, rows } };
+}
 function tableTemplate(key){
   if (key === "plain") return newBlock("table");
+  const preset = configTablePresets().find(p=>p.key===key);
+  if (preset) return tableFromPreset(preset);
   const cc = App.config.compliance || {};
   const axes = (cc.axis_labels || ["MIN","TYP","MAX","NTWC"]).slice();
   if (key === "compliance"){
@@ -2001,9 +2071,14 @@ function populateBlockPicker(picker, node, getAt){
     ["compliance","▦","block.add.table.compliance","Compliance table"],
     ["compare","▥","block.add.table.compare","Comparison (no spec)"],
   ];
+  // Append template-config presets (PN table, condition table, ...). Their
+  // starter rows come with the condition rows built in, so a preset-built table
+  // can never forget them -- the structural fix for the "AI made a table with no
+  // condition rows" bug. [uik=null -> use the config label verbatim.]
+  configTablePresets().forEach(p=> tplDefs.push([p.key, p.icon||"▦", null, p.label||p.key]));
   tplDefs.forEach(([tkey,ico,uik,fb])=>{
     picker.appendChild(el("button",{class:"pick", onclick:()=>insertAt(tableTemplate(tkey))},
-      [ el("span",{class:"ico",text:ico}), el("span",{text:T(uik,fb)}) ]));
+      [ el("span",{class:"ico",text:ico}), el("span",{text: uik ? T(uik,fb) : fb}) ]));
   });
   // paste entry -- only when the clipboard holds something (works cross-project)
   const clip = getBlockClip();

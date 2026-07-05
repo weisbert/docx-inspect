@@ -93,6 +93,10 @@ def config_slice(template_query=None):
         "ui_strings": tc.get("ui_strings", {}),
         "cover": tc.get("cover", {}),
         "compliance": _compliance_defaults(tc.get("compliance", {})),
+        # table_presets: company-defined starter tables (with condition rows
+        # baked in). Content lives in the local template config; the engine/app
+        # stay neutral -- this just forwards the list to the block picker (WS4).
+        "table_presets": tc.get("table_presets", []),
     }
 
 
