@@ -139,6 +139,21 @@ ok(!cn.ignored, "caption: fixed_body media is skipped");
 ok(cn.img2 && cn.img2.num === "3-1", "caption: image after a fixed_body chapter -> 3-1");
 ok(cn.tbl2 && cn.tbl2.num === "3-1", "caption: table after a fixed_body chapter -> 3-1");
 
+// groupBlocks: legacy adjacent paragraphs stay one card (existing reports render
+// unchanged); a cardStart paragraph begins a new card so separately-added text
+// blocks never auto-merge; a media block always breaks the run.
+const gb = sandbox.groupBlocks;
+const gbLegacy = gb([{ type: "para" }, { type: "para" }, { type: "para" }]);
+ok(gbLegacy.length === 1 && gbLegacy[0].kind === "prose" && gbLegacy[0].blocks.length === 3,
+   "groupBlocks: legacy adjacent paragraphs -> one card");
+const gbSplit = gb([{ type: "para" }, { type: "para", cardStart: true }, { type: "para" }]);
+ok(gbSplit.length === 2 && gbSplit[0].blocks.length === 1 && gbSplit[1].blocks.length === 2,
+   "groupBlocks: cardStart begins a new text card");
+const gbMedia = gb([{ type: "para" }, { type: "image" }, { type: "para" }]);
+ok(gbMedia.length === 3 && gbMedia[1].kind === "block" &&
+   gbMedia[0].kind === "prose" && gbMedia[2].kind === "prose",
+   "groupBlocks: a media block breaks the text run");
+
 // renderTree runs without throwing (stubbed DOM)
 vm.runInContext("App.selId='X'; App._treeFilter='';", sandbox);
 try { sandbox.renderTree(); ok(true, "renderTree() runs without throwing"); }

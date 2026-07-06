@@ -1142,7 +1142,10 @@ function newBlock(type){
   // bookmark (engine: bm_<id>_num) that paragraph cross-references target, so it
   // must survive edits and project saves.
   switch(type){
-    case "para":  return { type:"para", list:null, runs:[{t:""}] };
+    // cardStart marks the first block of a text card. A freshly added text block
+    // is its OWN card (never auto-merged into the text above it); paragraphs typed
+    // with Enter inside a card continue it (no cardStart). See groupBlocks.
+    case "para":  return { type:"para", list:null, runs:[{t:""}], cardStart:true };
     case "image": return { type:"image", id:uid(), file:"", caption:"", width_cm: IMG_PRESETS.full, size:"full" };
     case "imagegrid": return { type:"imagegrid", id:uid(), cols:2, caption:"", width_cm: IMG_PRESETS.full,
                                sub_captions:false, items:[] };
@@ -1964,12 +1967,19 @@ function nodePath(id){
   return result;
 }
 
-/* ---- block grouping (consecutive paragraphs -> one prose region) ---------- */
+/* ---- block grouping (paragraphs of ONE text card -> one prose region) ------ */
+// A text card is a contiguous run of para blocks whose first block carries
+// cardStart. A media block always breaks the run. A para WITHOUT cardStart
+// continues the current card (the flowing multi-paragraph editor: Enter adds a
+// paragraph to the same card); a para WITH cardStart begins a new card, so text
+// blocks the user adds separately never auto-merge just because they are adjacent.
+// Legacy paragraphs (no cardStart) still group by adjacency, so existing reports
+// render unchanged until edited.
 function groupBlocks(blocks){
   const segs = []; let cur = null;
   (blocks||[]).forEach((b, i)=>{
     if (b && b.type==="para"){
-      if (!cur){ cur = { kind:"prose", start:i, blocks:[] }; segs.push(cur); }
+      if (!cur || b.cardStart){ cur = { kind:"prose", start:i, blocks:[] }; segs.push(cur); }
       cur.blocks.push(b);
     } else {
       cur = null;
@@ -2205,6 +2215,9 @@ function pasteBlocks(node, atIndex){
     toast(T("toast.clip_empty","Nothing copied yet"), true); return;
   }
   const fresh = clip.blocks.map(cloneBlockFresh);
+  // Pasted text lands as its OWN card (a leading paragraph starts a fresh card,
+  // so it never merges into the text block above the paste point).
+  if (fresh[0] && fresh[0].type==="para") fresh[0].cardStart = true;
   const at = Math.max(0, Math.min(atIndex==null ? node.blocks.length : atIndex, node.blocks.length));
   node.blocks.splice(at, 0, ...fresh);
   markDirty(); renderEditor(); saveProject(true);
@@ -2555,6 +2568,11 @@ function buildProseEditor(host, node, seg){
   let owned = seg.blocks.slice();
   const serialize = ()=>{
     const blocks = proseToBlocks(editor);
+    // This editor is exactly ONE card, so preserve its boundary through edits:
+    // carry cardStart onto the (rebuilt) first block IFF this card had one. Never
+    // ADD a boundary to a legacy card that lacked one -- that would flip an
+    // unchanged card to "dirty" on a mere focus/blur.
+    if (blocks.length && owned[0] && owned[0].cardStart) blocks[0].cardStart = true;
     if (deepEqual(blocks, owned)) return false;   // nothing actually changed -> no dirty, no splice
     let start = node.blocks.indexOf(owned[0]);
     if (start < 0) start = Math.min(seg.start, node.blocks.length);
