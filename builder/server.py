@@ -522,12 +522,24 @@ def _import_xlsx_export():
     return importlib.reload(xlsx_export)
 
 
-def run_export(project_dir, fmt, save_first=False):
+def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=None):
     """Render the project via the engine. fmt in {docx, pdf}.
 
     Returns {out, abs, fmt}. For pdf: render docx then COM-export (Export then
     Close, never a method call after Close). Output lands in <dir>/out/.
+
+    ``on_progress(done, total, label)`` (per heading/block) and ``on_phase(label)``
+    ('preparing'|'rendering'|'converting') drive a live progress bar; both optional
+    and best-effort (their exceptions never break the export).
     """
+    def phase(label):
+        if on_phase:
+            try:
+                on_phase(label)
+            except Exception:
+                pass
+
+    phase("preparing")
     engine = _import_engine()
     out_dir = os.path.join(project_dir, "out")
     os.makedirs(out_dir, exist_ok=True)
@@ -550,7 +562,9 @@ def run_export(project_dir, fmt, save_first=False):
     # bare-string return too. The render manifest (warnings + stats) is surfaced
     # to the frontend as additive keys on the success payload so the user can see
     # missing images / out-of-spec / clip risks after an export.
-    render_result = engine.render_report(project, cfg, project_dir, docx_out)
+    phase("rendering")
+    render_result = engine.render_report(project, cfg, project_dir, docx_out,
+                                         on_progress=on_progress)
     out_path = engine._result_out_path(render_result) or docx_out
     docx_abs = os.path.abspath(out_path)
     warnings = render_result.get("warnings", []) if isinstance(render_result, dict) else []
@@ -580,6 +594,7 @@ def run_export(project_dir, fmt, save_first=False):
 
     if fmt == "pdf":
         pdf_abs = os.path.splitext(docx_abs)[0] + ".pdf"
+        phase("converting")
         _word_export_pdf(docx_abs, pdf_abs)
         rel = os.path.relpath(pdf_abs, project_dir).replace("\\", "/")
         return {"out": rel, "abs": pdf_abs.replace("\\", "/"), "fmt": "pdf",
@@ -980,6 +995,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_validate_compliance()
             if path == "/api/export":
                 return self._api_export(qs)
+            if path == "/api/export-stream":
+                return self._api_export_stream(qs)
             if path == "/api/export-xlsx":
                 return self._api_export_xlsx()
             if path == "/api/import-docx":
@@ -1239,6 +1256,61 @@ class Handler(BaseHTTPRequestHandler):
                 "engine not available: %s" % exc, status=503
             )
         return self._send_json(result)
+
+    def _api_export_stream(self, qs):
+        """Export with a LIVE progress feed as newline-delimited JSON. Emits
+        {type:'phase',label}, {type:'progress',done,total,label} (throttled to
+        ~50 lines), then {type:'done',result} or {type:'error',error}. The body is
+        close-delimited (Connection: close, no Content-Length); the GUI reads the
+        stream to drive a progress bar. /api/export stays as the plain fallback."""
+        dir_arg = (qs.get("dir") or [None])[0]
+        fmt = (qs.get("fmt") or ["docx"])[0]
+        if fmt not in ("docx", "pdf"):
+            return self._send_error_json("fmt must be docx|pdf")
+        try:
+            project_dir = resolve_project_dir(dir_arg, create=False)
+        except ValueError as exc:
+            return self._send_error_json(str(exc))
+        if not os.path.isfile(os.path.join(project_dir, "project.json")):
+            return self._send_error_json("no project.json in dir", status=404)
+        payload = {}
+        if int(self.headers.get("Content-Length") or 0) > 0:
+            payload = self._read_json()
+        save_first = bool(payload.get("save_first"))
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")   # discourage any proxy buffering
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        def emit(obj):
+            try:
+                self.wfile.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+                self.wfile.flush()
+            except Exception:
+                pass   # client gone: writes are ignored, the render still finishes
+
+        last = {"done": -1}
+
+        def on_progress(done, total, label):
+            step = max(1, total // 50)        # ~50 lines max; always send the last
+            if done - last["done"] >= step or done >= total:
+                last["done"] = done
+                emit({"type": "progress", "done": done, "total": total, "label": label or ""})
+
+        try:
+            result = run_export(project_dir, fmt, save_first=save_first,
+                                on_progress=on_progress,
+                                on_phase=lambda label: emit({"type": "phase", "label": label}))
+            emit({"type": "done", "result": result})
+        except (ImportError, ModuleNotFoundError) as exc:
+            emit({"type": "error", "error": "engine not available: %s" % exc})
+        except Exception as exc:
+            sys.stderr.write(traceback.format_exc())
+            emit({"type": "error", "error": str(exc)})
 
     def _api_export_xlsx(self):
         """Export ONE table/datatable block to a .xlsx that visually mirrors the

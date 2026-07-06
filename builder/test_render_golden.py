@@ -479,10 +479,19 @@ def main():
     os.makedirs(os.path.join(tmp, "images"), exist_ok=True)  # intentionally empty
     out_path = os.path.join(tmp, "out", "golden.docx")
 
-    result = engine.render_report(project, cfg, tmp, out_path)
+    prog = []
+    result = engine.render_report(project, cfg, tmp, out_path,
+                                  on_progress=lambda d, t, l: prog.append((d, t, l)))
 
     # --- result manifest shape ---
     check(isinstance(result, dict), "render_report returns a dict manifest")
+
+    # --- export progress callback: one step per heading + block, monotonic 1..total
+    dones = [d for d, t, _l in prog]
+    totals = {t for _d, t, _l in prog}
+    check(prog and len(totals) == 1 and dones == list(range(1, list(totals)[0] + 1)),
+          "on_progress reports 1..total monotonically",
+          "prog=%r" % prog[:3])
     rp = engine._result_out_path(result)
     check(rp and os.path.isfile(rp), "output .docx written", str(rp))
 

@@ -1163,7 +1163,7 @@ def _collect_ref_targets(outline):
     return targets
 
 
-def _build_outline(doc, cfg, outline, names):
+def _build_outline(doc, cfg, outline, names, on_progress=None):
     """Render the outline; returns {"warnings": [...], "stats": {...}}.
 
     Each block renders inside try/except so one malformed block degrades to a
@@ -1182,10 +1182,29 @@ def _build_outline(doc, cfg, outline, names):
 
     # chapter-sequence counters: keyed by chapter number
     state = {"chap": 0, "img_seq": {}, "tbl_seq": {},
-             "warnings": [], "total_blocks": 0}
+             "warnings": [], "total_blocks": 0, "done": 0}
 
     def warn(entry):
         state["warnings"].append(entry)
+
+    # Progress: one step per heading + one per rendered block (a fixed_body counts
+    # as one). Total is pre-counted so the callback reports a real fraction. A
+    # progress sink must NEVER break a render, so its exceptions are swallowed.
+    def _steps(nodes):
+        n = 0
+        for nd in nodes or []:
+            n += 1 + (1 if nd.get("fixed_body") else len(nd.get("blocks") or []))
+            n += _steps(nd.get("children"))
+        return n
+    total_steps = _steps(outline) or 1
+
+    def report(node):
+        state["done"] += 1
+        if on_progress:
+            try:
+                on_progress(state["done"], total_steps, node.get("title", ""))
+            except Exception:
+                pass
 
     def walk(node, depth):
         level = depth + 1
@@ -1204,6 +1223,7 @@ def _build_outline(doc, cfg, outline, names):
             head_p.paragraph_format.page_break_before = True
         if list_ctx:
             list_ctx.new_section()   # numbered lists restart per section
+        report(node)                  # heading rendered
 
         # fixed body wins over blocks
         fb_key = node.get("fixed_body")
@@ -1215,6 +1235,7 @@ def _build_outline(doc, cfg, outline, names):
                 warn({"type": "block_error",
                       "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
                       "location": "chapter %d / fixed_body %s" % (chap, fb_key)})
+            report(node)
         else:
             for idx, block in enumerate(node.get("blocks", [])):
                 btype = block.get("type")
@@ -1272,6 +1293,7 @@ def _build_outline(doc, cfg, outline, names):
                           "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
                           "location": "chapter %d / %s / block %d"
                                       % (chap, btype, idx)})
+                report(node)          # one block rendered
 
         for child in node.get("children", []):
             walk(child, depth + 1)
@@ -1294,8 +1316,11 @@ def _build_outline(doc, cfg, outline, names):
 # ===========================================================================
 # Top-level render
 # ===========================================================================
-def render_report(project, cfg, project_dir, out_path):
+def render_report(project, cfg, project_dir, out_path, on_progress=None):
     """Render the project to ``out_path`` and return a result manifest.
+
+    ``on_progress`` (optional) is called ``on_progress(done, total, label)`` as the
+    outline renders (once per heading + per block), for a live export progress bar.
 
     RETURN SHAPE (CONTRACT, steps 2-4 depend on it):
         {
@@ -1338,7 +1363,8 @@ def render_report(project, cfg, project_dir, out_path):
     _build_footer(doc, styles)
     _build_cover(doc, cfg, meta)
     _build_toc(doc, cfg)
-    outline_result = _build_outline(doc, cfg, project.get("outline", []), names)
+    outline_result = _build_outline(doc, cfg, project.get("outline", []), names,
+                                    on_progress=on_progress)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     doc.save(out_path)
