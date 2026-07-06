@@ -281,6 +281,40 @@ def _node_own(n):
     return {k: v for k, v in n.items() if k != "children"}
 
 
+def _strip_ui(obj):
+    """Recursively drop editor-internal (``_``-prefixed) keys. Mirrors the GUI's
+    stripInternal so transient UI state (e.g. a section's ``_collapsed`` outline
+    flag) never registers as a content change on the upstream diff channel."""
+    if isinstance(obj, list):
+        return [_strip_ui(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _strip_ui(v) for k, v in obj.items() if not str(k).startswith("_")}
+    return obj
+
+
+def _cmp_own(n):
+    """A node's own fields normalized for CHANGE DETECTION only -- the emitted patch
+    still carries the raw values. Drops three kinds of non-content metadata so a
+    section that differs by them alone reads as UNCHANGED (a clean, empty Copy diff
+    right after a sync): (1) ``children`` -- structure travels via set_children;
+    (2) editor ``_``-keys everywhere; (3) the grid editor's cosmetic per-block
+    ``id`` inside ``blocks`` -- the editor stamps a fresh id onto a table on load,
+    which is not report content. Without this, the GUI's stripInternal(current)
+    (no ``_collapsed``, but with freshly-stamped table ids) never matches an
+    un-stripped baseline, so every section re-emits on a no-op diff."""
+    own = {}
+    for k, v in n.items():
+        if k == "children" or str(k).startswith("_"):
+            continue
+        if k == "blocks" and isinstance(v, list):
+            own[k] = [{bk: _strip_ui(bv) for bk, bv in b.items()
+                       if bk != "id" and not str(bk).startswith("_")}
+                      if isinstance(b, dict) else _strip_ui(b) for b in v]
+        else:
+            own[k] = _strip_ui(v)
+    return own
+
+
 def _child_key(n):
     """Stable identity of a child for structure comparison: id when present, else
     ('t', title). A section added in the editor gets a fresh id, so it simply
@@ -299,11 +333,15 @@ def _same_structure(a, b):
 
 def _diff_node(base, cur, ops):
     """Append ops describing base->cur for one matched node pair (already matched
-    by the parent's structure check, so their identities line up)."""
-    b_own, c_own = _node_own(base), _node_own(cur)
-    if b_own != c_own:
-        changed = {k: v for k, v in c_own.items() if base.get(k) != v}
-        removed = [k for k in b_own if k not in c_own]
+    by the parent's structure check, so their identities line up). Change detection
+    runs on the normalized view (_cmp_own): UI keys and cosmetic table ids are
+    ignored, but the emitted fields carry the RAW current values verbatim."""
+    nb, nc = _cmp_own(base), _cmp_own(cur)
+    if nb != nc:
+        changed = {k: cur[k] for k in cur
+                   if k != "children" and not str(k).startswith("_")
+                   and nb.get(k) != nc.get(k)}
+        removed = [k for k in nb if k not in nc]
         op = {"op": "patch_node", "node_id": cur.get("id"),
               "title": cur.get("title"), "fields": changed}
         if removed:
@@ -329,12 +367,12 @@ def make_text_diff(base, cur, dir_name=""):
     base = base if isinstance(base, dict) else {}
     cur = cur if isinstance(cur, dict) else {}
     diff = {"_reportdiff": 1, "dir": dir_name, "base_sha": _sha(_canon(base))}
-    if (base.get("meta") or {}) != (cur.get("meta") or {}):
+    if _strip_ui(base.get("meta") or {}) != _strip_ui(cur.get("meta") or {}):
         diff["meta"] = cur.get("meta") or {}
     skip = {"meta", "outline", "schema_version"}
     top, removed_top = {}, []
     for k in set(base) | set(cur):
-        if k in skip or base.get(k) == cur.get(k):
+        if k in skip or _strip_ui(base.get(k)) == _strip_ui(cur.get(k)):
             continue
         if k in cur:
             top[k] = cur[k]

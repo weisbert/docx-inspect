@@ -136,6 +136,53 @@ def main():
         res = A.apply_text_diff(root, diff, dir_name="demo")
         check(res.get("base_match") is False, "drifted local copy -> base_match False")
 
+    print("== no-op diff ignores editor UI state & cosmetic table ids ==")
+    # The GUI sends stripInternal(current): no _collapsed, but the grid editor has
+    # stamped a fresh per-table id on load. The baseline keeps _collapsed and lacks
+    # those ids. A no-op must still diff to EMPTY -- the real-world bug report.
+    b_col = copy.deepcopy(BASE)
+    b_col["outline"][0]["_collapsed"] = True
+    b_col["outline"][0]["children"][0]["_collapsed"] = False
+    check(A.diff_is_empty(A.make_text_diff(b_col, copy.deepcopy(BASE), "demo")),
+          "baseline _collapsed vs stripped current -> empty diff")
+
+    b_tbl = copy.deepcopy(BASE)
+    b_tbl["outline"][0]["blocks"].append(
+        {"type": "table", "rows": [["a", "b"]], "header_rows": 1})
+    c_tbl = copy.deepcopy(b_tbl)
+    c_tbl["outline"][0]["blocks"][-1]["id"] = "n-abc123-xyz"     # editor-stamped id
+    check(A.diff_is_empty(A.make_text_diff(b_tbl, c_tbl, "demo")),
+          "table id stamped on current only -> empty diff")
+
+    both = copy.deepcopy(b_tbl)
+    for n in both["outline"]:
+        n["_collapsed"] = True
+    c_both = copy.deepcopy(BASE)                                 # stripped, no id
+    c_both["outline"][0]["blocks"].append(
+        {"type": "table", "rows": [["a", "b"]], "header_rows": 1, "id": "n-q9-z"})
+    check(A.diff_is_empty(A.make_text_diff(both, c_both, "demo")),
+          "_collapsed + table id across the tree -> empty diff")
+
+    print("== a real edit still travels through the noise ==")
+    b_mix = copy.deepcopy(BASE)
+    b_mix["outline"][1]["_collapsed"] = True
+    b_mix["outline"][1]["children"][0]["blocks"].append(
+        {"type": "table", "rows": [["x"]], "header_rows": 0})
+    c_mix = copy.deepcopy(b_mix)
+    del c_mix["outline"][1]["_collapsed"]                        # GUI stripped it
+    c_mix["outline"][1]["children"][0]["blocks"][-1]["id"] = "n-t1"   # + table id
+    c_mix["outline"][1]["children"][0]["blocks"][0]["runs"][0]["t"] = "EDITED"  # real
+    diff = A.make_text_diff(b_mix, c_mix, "demo")
+    ops = diff.get("ops") or []
+    check(len(ops) == 1 and ops[0].get("node_id") == "s3",
+          "mixed edit + noise -> exactly the edited section travels")
+    check(all("remove_fields" not in op for op in ops),
+          "mixed edit + noise -> no _collapsed leaks into remove_fields")
+    proj = copy.deepcopy(b_mix)
+    A._apply_text_diff_into(proj, diff)
+    check(proj["outline"][1]["children"][0]["blocks"][0]["runs"][0]["t"] == "EDITED",
+          "mixed edit + noise -> apply lands the real edit")
+
     print("\n== SUMMARY ==  %s" % ("ALL PASSED" if not _fails else "%d FAILED" % len(_fails)))
     return 1 if _fails else 0
 
