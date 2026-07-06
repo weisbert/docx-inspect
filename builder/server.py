@@ -974,6 +974,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_new_from_template()
             if path == "/api/paste-import":
                 return self._api_paste_import(qs)
+            if path == "/api/copy-diff":
+                return self._api_copy_diff(qs)
             if path == "/api/apply-update":
                 return self._api_apply_update()
             if path == "/api/rollback":
@@ -1438,6 +1440,63 @@ class Handler(BaseHTTPRequestHandler):
             "warn": warns,
             "diff": diff_md,
             "diff_file": diff_path.replace("\\", "/"),
+        })
+
+    def _api_copy_diff(self, qs):
+        """Compute the upstream 'Copy diff' delta for a project (WS: incremental
+        upstream). Body: the CURRENT project JSON (the editor's in-memory state,
+        same payload as Copy text). The server diffs it against the last synced
+        <project>/_baseline.json and returns a COMPACT op-diff the user pastes to
+        the assistant instead of the whole report -- only edited sections travel.
+
+        Returns {ok, no_baseline, empty, diff_text, summary, diff_chars,
+        full_chars}. no_baseline=True when the project has never been synced from
+        the assistant yet (the UI falls back to Copy text)."""
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        dir_arg = (qs.get("dir") or [None])[0]
+        raw = self._read_body()
+        if not raw:
+            return self._send_error_json("empty body -- nothing to diff")
+        try:
+            current = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            return self._send_error_json("could not parse current project JSON: %s" % exc)
+        if not isinstance(current, dict):
+            return self._send_error_json("current project must be a JSON object")
+
+        project_dir = resolve_project_dir(dir_arg)
+        name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
+        baseline_path = os.path.join(project_dir, "_baseline.json")
+        if not os.path.isfile(baseline_path):
+            return self._send_json({
+                "ok": True, "no_baseline": True,
+                "hint": ("No sync baseline yet for this project -- Copy diff starts "
+                         "working after the next 'Apply update' from the assistant. "
+                         "Use Copy text this once."),
+            })
+        try:
+            with open(baseline_path, "r", encoding="utf-8") as fh:
+                baseline = json.load(fh)
+        except Exception as exc:
+            return self._send_error_json("baseline unreadable: %s" % exc)
+
+        apply_update = _import_apply_update()
+        diff = apply_update.make_text_diff(baseline, current, name)
+        diff_text = json.dumps(diff, ensure_ascii=False, separators=(",", ":"))
+        full_text = json.dumps(current, ensure_ascii=False, separators=(",", ":"))
+        return self._send_json({
+            "ok": True,
+            "no_baseline": False,
+            "empty": apply_update.diff_is_empty(diff),
+            # Edits spread across a small report (or a datatable-cell change, which
+            # resends its whole section) can make the op-diff bigger than the full
+            # text; surface that so the UI never silently hands over MORE to paste.
+            "smaller": len(diff_text) < len(full_text),
+            "diff_text": diff_text,
+            "summary": apply_update.diff_summary(diff),
+            "diff_chars": len(diff_text),
+            "full_chars": len(full_text),
         })
 
     def _api_apply_update(self):

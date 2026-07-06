@@ -553,6 +553,7 @@
     <button class="tb-btn" id="btn-checklist" data-ui="toolbar.checklist">Checklist</button>
     <button class="tb-btn" id="btn-notes" data-ui="toolbar.notes" title="All notes / revision remarks in this report (yours and Claude's) — never printed into the Word body"><span>📝 Notes</span><span class="nb-count" id="notes-count">0</span></button>
     <button class="tb-btn" id="btn-copytext" data-ui="toolbar.copytext" title="Copy the whole report as text to paste back over a text-only channel">Copy text</button>
+    <button class="tb-btn" id="btn-copydiff" data-ui="toolbar.copydiff" title="Copy ONLY what changed since the last sync — a small patch to paste back, instead of the whole report">Copy diff</button>
     <div id="status">
       <span class="dot" id="status-dot"></span>
       <span id="status-text">—</span>
@@ -4394,6 +4395,8 @@ function syncChrome(){
   if (bc) bc.classList.toggle("hidden", !inProject);
   const bt = $("#btn-copytext");
   if (bt) bt.classList.toggle("hidden", !inProject);
+  const bd = $("#btn-copydiff");
+  if (bd) bd.classList.toggle("hidden", !inProject);
   const bn = $("#btn-notes");
   if (bn) bn.classList.toggle("hidden", !inProject);
   refreshNotesBadge();
@@ -5813,6 +5816,7 @@ function wireToolbar(){
   $("#btn-preview").onclick = enterPreview;
   $("#btn-checklist").onclick = enterChecklist;
   $("#btn-copytext").onclick = copyProjectText;
+  $("#btn-copydiff").onclick = copyProjectDiff;
   $("#btn-notes").onclick = openNotesOverview;
 }
 
@@ -5847,6 +5851,94 @@ function fallbackCopyText(text, ok){
     if (done){ return ok && ok(); }
   }catch(_){}
   toast(T("toast.copy_failed","Copy failed -- open project.json and copy it manually"), true);
+}
+
+/* ============================================================================
+   INCREMENTAL TEXT EXPORT  ("Copy diff")
+   Copy ONLY what changed since the last sync. The baseline (<project>/_baseline
+   .json) is stamped whenever an update is applied / a full text is pasted in; the
+   server diffs the current in-memory project against it and returns a compact
+   op-diff -- a fraction of the whole report -- which the user pastes back to the
+   assistant instead of Copy text. Falls back to Copy text when no baseline exists.
+============================================================================ */
+async function copyProjectDiff(){
+  if (!App.project || !App.dir){ toast(T("toast.need_project","Open a project first"), true); return; }
+  flushActiveGrid();   // commit any in-flight grid cell so the diff is current
+  let r;
+  try{
+    r = await api("POST","/api/copy-diff",{query:{dir:App.dir}, json:stripInternal(App.project)});
+  }catch(e){
+    toast(T("toast.diff_failed","Copy diff failed: ")+e.message, true);
+    return;
+  }
+  if (r.no_baseline){ showDiffNoBaseline(r.hint); return; }
+  if (r.empty){ toast(T("toast.diff_empty","No changes since last sync — nothing to copy")); return; }
+  const pct = Math.round(100 * r.diff_chars / Math.max(1, r.full_chars));
+  // Only auto-copy when the diff is actually smaller than the whole report; if the
+  // edits are spread wide enough that it isn't, let the user choose (Copy text may
+  // be simpler) rather than silently putting a bigger payload on the clipboard.
+  if (r.smaller){
+    _copyToClipboard(r.diff_text, ()=> toast(
+      T("toast.diff_copied","Copied diff")+" ("+r.diff_chars+" chars, "+pct+"% of full)"));
+  }
+  showDiffResult(r, pct);
+}
+
+// Shared clipboard write (navigator.clipboard, textarea fallback) -- same path as
+// copyProjectText, factored so both callers behave identically.
+function _copyToClipboard(text, ok){
+  try{
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(ok, ()=>fallbackCopyText(text, ok));
+    } else { fallbackCopyText(text, ok); }
+  }catch(_){ fallbackCopyText(text, ok); }
+}
+
+// Transparency dialog: what changed + payload savings + a manual-copy fallback.
+function showDiffResult(r, pct){
+  const m = $("#modal"); m.innerHTML = "";
+  m.appendChild(el("h3",{text:T("dialog.diff.title","Copy diff — changes since last sync")}));
+  m.appendChild(el("p",{class:"muted", text: r.smaller
+    ? T("dialog.diff.sub","Only the edited sections travel. Paste this to the assistant instead of the whole report — it's already on your clipboard.")
+    : T("dialog.diff.sub_wide","These edits touch enough of the report (or a whole table) that the diff isn't smaller than the full text. Copy text may be simpler — or copy the diff anyway.")}));
+  m.appendChild(el("div",{class:"muted", style:{fontSize:"12px", marginBottom:"6px",
+      color: r.smaller ? "" : "var(--warn)"},
+    text: r.diff_chars+" chars  ·  "+pct+"% of the full "+r.full_chars+"-char report"}));
+  const sumBox = el("ul",{class:"diff-sum",
+    style:{margin:"6px 0", paddingLeft:"18px", maxHeight:"180px", overflow:"auto", fontSize:"13px"}});
+  (r.summary||[]).forEach(s=> sumBox.appendChild(el("li",{text:s})));
+  if (!(r.summary||[]).length)
+    sumBox.appendChild(el("li",{class:"muted", text:T("dialog.diff.none","(structural change)")}));
+  m.appendChild(sumBox);
+  const ta = el("textarea",{class:"paste-ta", readonly:"readonly",
+    style:{width:"100%", height:"120px", fontFamily:"monospace", fontSize:"11px", marginTop:"6px"}});
+  ta.value = r.diff_text;
+  m.appendChild(ta);
+  const actions = [
+    el("button",{class:"sm-btn", text: r.smaller ? T("dialog.diff.copy_again","Copy again")
+                                                 : T("dialog.diff.copy_anyway","Copy diff anyway"),
+      onclick:()=>{ ta.select(); _copyToClipboard(r.diff_text, ()=>toast(T("toast.diff_copied_short","Copied diff"))); }}),
+    el("div",{style:{flex:"1"}}),
+  ];
+  if (!r.smaller)
+    actions.push(el("button",{class:"sm-btn", text:T("dialog.diff.use_copytext","Copy full text instead"),
+      onclick:()=>{ closeOverlay(); copyProjectText(); }}));
+  actions.push(el("button",{class:"tb-btn primary", text:T("action.close","Close"), onclick:closeOverlay}));
+  m.appendChild(el("div",{class:"modal-actions"}, actions));
+  showOverlay();
+}
+
+function showDiffNoBaseline(hint){
+  const m = $("#modal"); m.innerHTML = "";
+  m.appendChild(el("h3",{text:T("dialog.diff.nb_title","No sync baseline yet")}));
+  m.appendChild(el("p",{text: hint || T("dialog.diff.nb_msg",
+    "Copy diff needs a baseline — it's set the next time you 'Apply update' from the assistant. For now, use Copy text.")}));
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("button",{class:"sm-btn", text:T("action.close","Close"), onclick:closeOverlay}),
+    el("button",{class:"tb-btn primary", text:T("dialog.diff.use_copytext","Copy full text instead"),
+      onclick:()=>{ closeOverlay(); copyProjectText(); }}),
+  ]));
+  showOverlay();
 }
 
 function wireGlobal(){

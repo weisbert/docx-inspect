@@ -104,6 +104,32 @@ def _atomic_write(path, data):
     os.replace(tmp, path)
 
 
+def _canon(obj):
+    """Deterministic JSON bytes (sorted keys, no whitespace) for stable hashing,
+    so a baseline fingerprint matches across machines regardless of key order."""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def _baseline_path(root, rel):
+    """Sibling of a project.json: ``<project dir>/_baseline.json``. Records the
+    last fully-synced project state so the GUI's "Copy diff" can emit only what
+    changed since the assistant and the work machine were last in agreement."""
+    return os.path.join(os.path.dirname(os.path.join(root, rel)), "_baseline.json")
+
+
+def _stamp_baseline(root, rel, project_bytes):
+    """Refresh _baseline.json after a sync event (apply bundle / paste-import /
+    text-diff apply / rollback). No-op for non-project.json targets. Best-effort:
+    the baseline is an optimization, never worth failing an apply over."""
+    if os.path.basename(rel.replace("\\", "/")) != "project.json":
+        return
+    try:
+        _atomic_write(_baseline_path(root, rel), project_bytes)
+    except OSError:
+        pass
+
+
 def _safe_rel(name):
     """Return a root-relative path for a zip member, or None if unsafe."""
     n = name.replace("\\", "/").strip()
@@ -220,9 +246,202 @@ def _apply_ops(project, ops):
             node["children"] = op.get("children", [])
             log.append("  ~ set %d child section(s) of '%s'"
                        % (len(node["children"]), node.get("title", "")))
+        elif kind == "patch_node":
+            # Replace the node's OWN fields (title/blocks/fixed_body/...) wholesale
+            # but never its children -- structure travels via set_children /
+            # set_outline. Emitted by the upstream text-diff (Copy diff) so an
+            # edited section carries only its own content; symmetric with
+            # set_blocks+set_title but covers any node key in one op.
+            fields = op.get("fields") or {}
+            for k, v in fields.items():
+                if k != "children":
+                    node[k] = v
+            for k in op.get("remove_fields") or []:
+                if k not in ("children", "id"):
+                    node.pop(k, None)
+            log.append("  ~ patch node '%s' (%s)"
+                       % (node.get("title", ""),
+                          ", ".join(sorted(fields)) or "no-op"))
         else:
             log.append("  ! unknown op '%s' -- skipped" % kind)
     return log
+
+
+# ---------------------------------------------------------------------------
+# Upstream text-diff (GUI "Copy diff"): baseline project.json -> current, as a
+# compact op list the assistant applies. Only CHANGED sections travel (their own
+# fields wholesale); unchanged prose / images / tables never cross the channel.
+# The op vocabulary is the same one _apply_ops speaks, so the applier is shared.
+# ---------------------------------------------------------------------------
+
+
+def _node_own(n):
+    """A node's own fields (everything but ``children``) -- the unit patch_node
+    addresses."""
+    return {k: v for k, v in n.items() if k != "children"}
+
+
+def _child_key(n):
+    """Stable identity of a child for structure comparison: id when present, else
+    ('t', title). A section added in the editor gets a fresh id, so it simply
+    won't match at its level -> that level is resent wholesale (correct, coarser)."""
+    cid = n.get("id")
+    return ("id", cid) if cid else ("t", n.get("title", ""))
+
+
+def _same_structure(a, b):
+    """True when two child lists carry the same identities in the same order, so a
+    per-child recursive diff is valid. Otherwise the level is resent wholesale."""
+    if len(a) != len(b):
+        return False
+    return [_child_key(n) for n in a] == [_child_key(n) for n in b]
+
+
+def _diff_node(base, cur, ops):
+    """Append ops describing base->cur for one matched node pair (already matched
+    by the parent's structure check, so their identities line up)."""
+    b_own, c_own = _node_own(base), _node_own(cur)
+    if b_own != c_own:
+        changed = {k: v for k, v in c_own.items() if base.get(k) != v}
+        removed = [k for k in b_own if k not in c_own]
+        op = {"op": "patch_node", "node_id": cur.get("id"),
+              "title": cur.get("title"), "fields": changed}
+        if removed:
+            op["remove_fields"] = removed
+        ops.append(op)
+    bch, cch = base.get("children") or [], cur.get("children") or []
+    if _same_structure(bch, cch):
+        for bc, cc in zip(bch, cch):
+            _diff_node(bc, cc, ops)
+    elif bch != cch:
+        # structure changed at this level -> resend this node's whole subtree.
+        ops.append({"op": "set_children", "node_id": cur.get("id"),
+                    "title": cur.get("title"), "children": cch})
+
+
+def make_text_diff(base, cur, dir_name=""):
+    """Compact base->cur delta for the upstream channel. Returns a dict:
+    ``{_reportdiff, dir, base_sha, [meta], [top], [removed_top], [outline]|[ops]}``.
+    meta / top-level keys are resent WHOLE when changed (they are small); outline
+    edits ride node ops, unless the TOP-LEVEL section structure changed (then the
+    whole outline is included -- rare). An empty result (no meta/top/outline/ops)
+    means the two projects are structurally identical."""
+    base = base if isinstance(base, dict) else {}
+    cur = cur if isinstance(cur, dict) else {}
+    diff = {"_reportdiff": 1, "dir": dir_name, "base_sha": _sha(_canon(base))}
+    if (base.get("meta") or {}) != (cur.get("meta") or {}):
+        diff["meta"] = cur.get("meta") or {}
+    skip = {"meta", "outline", "schema_version"}
+    top, removed_top = {}, []
+    for k in set(base) | set(cur):
+        if k in skip or base.get(k) == cur.get(k):
+            continue
+        if k in cur:
+            top[k] = cur[k]
+        else:
+            removed_top.append(k)
+    if top:
+        diff["top"] = top
+    if removed_top:
+        diff["removed_top"] = removed_top
+    b_out, c_out = base.get("outline") or [], cur.get("outline") or []
+    if _same_structure(b_out, c_out):
+        ops = []
+        for bc, cc in zip(b_out, c_out):
+            _diff_node(bc, cc, ops)
+        if ops:
+            diff["ops"] = ops
+    elif b_out != c_out:
+        diff["outline"] = c_out    # top-level structure changed -> full outline
+    return diff
+
+
+def diff_is_empty(diff):
+    """True when a make_text_diff() result conveys no change."""
+    return not any(k in diff for k in
+                   ("meta", "top", "removed_top", "outline", "ops"))
+
+
+def diff_summary(diff):
+    """One-line-per-change human summary of a text-diff (for the GUI preview and
+    the CLI). Reports which sections/keys changed, never their full text."""
+    lines = []
+    if "meta" in diff:
+        lines.append("meta: replaced")
+    for k in (diff.get("top") or {}):
+        lines.append("top-level '%s': replaced" % k)
+    for k in diff.get("removed_top") or []:
+        lines.append("top-level '%s': removed" % k)
+    if "outline" in diff:
+        lines.append("outline: top-level structure changed -> %d section(s) resent"
+                     % len(diff["outline"]))
+    for op in diff.get("ops") or []:
+        title = op.get("title") or op.get("node_id") or "?"
+        if op.get("op") == "patch_node":
+            fields = ", ".join(sorted((op.get("fields") or {}))) or "-"
+            lines.append("section '%s': %s" % (title, fields))
+        elif op.get("op") == "set_children":
+            lines.append("section '%s': sub-structure changed -> %d child(ren) resent"
+                         % (title, len(op.get("children") or [])))
+        else:
+            lines.append("section '%s': %s" % (title, op.get("op")))
+    return lines
+
+
+def _apply_text_diff_into(project, diff):
+    """Mutate ``project`` by a make_text_diff() delta. Returns log lines. meta /
+    top-level keys replace wholesale; outline changes ride node ops, or a full
+    ``outline`` when the top-level structure changed."""
+    logs = []
+    if "meta" in diff:
+        project["meta"] = diff["meta"]
+        logs.append("  ~ meta replaced")
+    for k, v in (diff.get("top") or {}).items():
+        project[k] = v
+        logs.append("  ~ top-level '%s' set" % k)
+    for k in diff.get("removed_top") or []:
+        project.pop(k, None)
+        logs.append("  ~ top-level '%s' removed" % k)
+    if "outline" in diff:
+        project["outline"] = diff["outline"]
+        logs.append("  ~ outline replaced (%d top section(s))"
+                    % len(diff["outline"]))
+    else:
+        logs += _apply_ops(project, diff.get("ops"))
+    return logs
+
+
+def apply_text_diff(root, diff, dir_name=None, backup=True):
+    """Apply an upstream "Copy diff" delta to a local project.json. Backs the
+    target into the shared rollback history, writes atomically, re-stamps the
+    baseline. Returns {ok, backup, logs, rel, base_match} (base_match is None when
+    the diff carried no fingerprint, else whether the local file matched it).
+    Raises FileNotFoundError if the target project.json is absent."""
+    dname = dir_name or diff.get("dir")
+    if not dname:
+        raise ValueError("diff has no project dir; pass dir_name")
+    rel = os.path.join(dname, "project.json")
+    tgt = os.path.join(root, rel)
+    if not os.path.isfile(tgt):
+        raise FileNotFoundError("no project.json at %s" % tgt)
+    project = json.loads(_read(tgt).decode("utf-8"))
+    base_match = None
+    if diff.get("base_sha"):
+        base_match = (diff["base_sha"] == _sha(_canon(project)))
+    logs = _apply_text_diff_into(project, diff)
+    new_bytes = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
+    bdir = _new_backup_dir(root)
+    if backup:
+        dst = os.path.join(bdir, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(tgt, dst)
+    _atomic_write(tgt, new_bytes)
+    st = _load_state(root)
+    st[rel] = _sha(new_bytes)
+    _save_state(root, st)
+    _stamp_baseline(root, rel, new_bytes)
+    return {"ok": True, "backup": bdir.replace("\\", "/"), "logs": logs,
+            "rel": rel.replace("\\", "/"), "base_match": base_match}
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +535,7 @@ def run_plan(root, plan, state, on_log=None):
             if it["kind"] == "replace":
                 _atomic_write(it["tgt"], it["payload"])
                 state[it["rel"]] = _sha(it["payload"])
+                final_bytes = it["payload"]
             else:
                 base = _read(it["tgt"]) if it["exists"] else b"{}"
                 proj = json.loads(base.decode("utf-8"))
@@ -326,6 +546,10 @@ def run_plan(root, plan, state, on_log=None):
                 out = json.dumps(proj, ensure_ascii=False, indent=2).encode("utf-8")
                 _atomic_write(it["tgt"], out)
                 state[it["rel"]] = _sha(out)
+                final_bytes = out
+            # Applying a bundle IS a sync event on the work machine: refresh the
+            # baseline so the next "Copy diff" measures from what was just applied.
+            _stamp_baseline(root, it["rel"], final_bytes)
             _save_state(root, state)   # persist after each item (partial-safe)
         except Exception as ex:
             it["error"] = str(ex)
@@ -362,6 +586,7 @@ def record_replace(root, rel, new_bytes, backup=True):
     st = _load_state(root)
     st[rel] = _sha(new_bytes)
     _save_state(root, st)
+    _stamp_baseline(root, rel, new_bytes)   # full paste-import is a sync event too
     return {"backup": bdir, "existed": existed, "rel": rel}
 
 
@@ -428,6 +653,52 @@ def cmd_apply(root, arg, dry, yes):
     return 0
 
 
+def cmd_apply_diff(root, path, dir_name, yes):
+    """Apply an upstream text-diff JSON (from the GUI's "Copy diff") to a local
+    project.json -- the small-payload counterpart of a full paste-import. The
+    diff is a make_text_diff() object; the work machine pastes it to the assistant
+    who saves it to a file and runs this."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            diff = json.load(fh)
+    except Exception as ex:
+        print("error: could not read diff %s: %s" % (path, ex))
+        return 2
+    if not isinstance(diff, dict) or diff.get("_reportdiff") != 1:
+        print("error: not a report text-diff (missing _reportdiff:1).")
+        return 2
+    dname = dir_name or diff.get("dir")
+    if not dname:
+        print("error: diff has no project dir; pass --dir NAME.")
+        return 2
+    print("root: %s" % root)
+    print("dir:  %s" % dname)
+    if diff_is_empty(diff):
+        print("diff is empty -- nothing to apply.")
+        return 0
+    for line in diff_summary(diff):
+        print("  * " + line)
+    tgt = os.path.join(root, dname, "project.json")
+    if not os.path.isfile(tgt):
+        print("error: no project.json at %s" % tgt)
+        return 2
+    if not yes:
+        ans = input("\nApply this diff to %s? [y/N] " % dname).strip().lower()
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    res = apply_text_diff(root, diff, dir_name=dir_name)
+    for line in res["logs"]:
+        print(line)
+    if res.get("base_match") is False:
+        print("  ! WARNING: local project.json differs from the diff's baseline "
+              "(base_sha mismatch). Changed sections were applied wholesale, but "
+              "any section you never edited on the work machine keeps the local "
+              "version -- verify if you have out-of-band edits here.")
+    print("\nOK. Backed up to: %s" % res["backup"])
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Snapshot / rollback / list.
 # ---------------------------------------------------------------------------
@@ -488,7 +759,9 @@ def rollback_last(root):
             dst = os.path.join(pre, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(tgt, dst)
-        _atomic_write(tgt, _read(full))
+        data = _read(full)
+        _atomic_write(tgt, data)
+        _stamp_baseline(root, rel, data)   # baseline follows the restored state
         restored.append(rel.replace("\\", "/"))
     for rel in created:   # undo a creation = remove the file (snapshot it first)
         tgt = os.path.join(root, *rel.split("/"))
@@ -552,6 +825,9 @@ def main(argv=None):
     ap.add_argument("--snapshot", action="store_true", help="package current project.json to hand back")
     ap.add_argument("--rollback", action="store_true", help="restore the most recent backup")
     ap.add_argument("--list", action="store_true", help="list backups / applied files")
+    ap.add_argument("--apply-diff", metavar="FILE",
+                    help="apply an upstream text-diff JSON (from the GUI 'Copy diff')")
+    ap.add_argument("--dir", help="target project dir for --apply-diff (default: from the diff)")
     a = ap.parse_args(argv)
     root = resolve_root(a.root)
     if a.snapshot:
@@ -560,6 +836,8 @@ def main(argv=None):
         return cmd_rollback(root, a.yes)
     if a.list:
         return cmd_list(root)
+    if a.apply_diff:
+        return cmd_apply_diff(root, a.apply_diff, a.dir, a.yes)
     return cmd_apply(root, a.bundle, a.dry_run, a.yes)
 
 
