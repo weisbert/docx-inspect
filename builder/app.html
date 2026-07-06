@@ -123,7 +123,16 @@
     margin-bottom:14px;box-shadow:var(--shadow);position:relative;
   }
   .card.dragover{outline:2px dashed var(--accent);outline-offset:2px}
+  /* drag insertion seam: a bar in the GAP above/below the target card so it is
+     clear whether the drop lands before or after it (not a whole-card highlight) */
+  .card.drop-before::before, .card.drop-after::after{
+    content:"";position:absolute;left:0;right:0;height:3px;border-radius:2px;
+    background:var(--accent);z-index:3}
+  .card.drop-before::before{top:-8px}
+  .card.drop-after::after{bottom:-8px}
   .card.dragging{opacity:.5}
+  .card-num{font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);
+    border:1px solid var(--accent);border-radius:3px;padding:0 6px;letter-spacing:.02em}
   .card-bar{
     display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line2);
     background:#fafbfc;border-radius:var(--radius) var(--radius) 0 0;
@@ -1926,6 +1935,7 @@ function renderNodeEditor(host, node){
   }
 
   node.blocks = node.blocks || [];
+  App._capNums = computeCaptionNumbers();   // live Figure/Table numbers for this render
   const listHost = el("div",{class:"block-list"});
   // Consecutive paragraphs render as ONE continuous rich-text editor; media
   // blocks (image/grid/table/datatable) stay standalone and split the prose
@@ -1974,13 +1984,17 @@ function renderProseCard(node, seg){
   const card = el("div",{class:"card prose-card"});
   if (App._focusBlock && seg.blocks && seg.blocks.indexOf(App._focusBlock) >= 0) _pendingFocusEl = card;
   const target = ()=> seg.blocks[0];   // the segment's first block (live via serialize)
-  // drop target: a dragged block/segment lands just before this prose run
-  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(target())<0){ e.preventDefault(); card.classList.add("dragover"); }});
-  card.addEventListener("dragleave",()=>card.classList.remove("dragover"));
+  // drop feedback: a seam in the gap above/below this prose card (not a whole-card
+  // highlight) so it's clear whether the drop lands before or after it.
+  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(target())<0){ e.preventDefault(); markDropSeam(card, e); }});
+  card.addEventListener("dragleave",()=>card.classList.remove("drop-before","drop-after"));
   card.addEventListener("drop",(e)=>{
-    e.preventDefault(); card.classList.remove("dragover");
+    e.preventDefault();
+    const after = card.classList.contains("drop-after");
+    card.classList.remove("drop-before","drop-after");
     if (!blockDragSrc||blockDragSrc.node!==node) return;
-    moveBlocksBefore(node, blockDragSrc.blocks, target());
+    const tgt = after ? blockAfter(node, seg.blocks[seg.blocks.length-1]) : target();
+    moveBlocksBefore(node, blockDragSrc.blocks, tgt);
   });
 
   const bar = el("div",{class:"card-bar"});
@@ -1990,8 +2004,7 @@ function renderProseCard(node, seg){
   handle.addEventListener("dragstart",(e)=>{ blockDragSrc={node, blocks: seg.blocks.slice()};
     card.classList.add("dragging"); e.dataTransfer.effectAllowed="move";
     try{ e.dataTransfer.setDragImage(card, 12, 12); }catch(_){} });
-  handle.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null;
-    document.querySelectorAll(".card.dragover").forEach(c=>c.classList.remove("dragover")); });
+  handle.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null; clearDropMarks(); });
   bar.appendChild(handle);
   bar.appendChild(el("span",{class:"card-kind", text:T("block.prose","Text")}));
   const actions = el("div",{class:"card-actions"});
@@ -2037,6 +2050,12 @@ function renderBlockCard(node, block, idx){
   card.addEventListener("dragend",()=>{ card.setAttribute("draggable","false"); });
   bar.appendChild(handle);
   bar.appendChild(el("span",{class:"card-kind", text:kindLabel}));
+  // Live caption number (auto, chapter-scoped) so the user knows exactly what
+  // "Figure/Table N-M" this is when writing a cross-reference in the body text.
+  const numInfo = capNum(block.id);
+  if (numInfo) bar.appendChild(el("span",{class:"card-num",
+    title:T("block.caption_num","Auto caption number — updates itself; reference it from body text via the Ref button"),
+    text: numInfo.kind + " " + numInfo.num}));
   const actions = el("div",{class:"card-actions"});
   const up = el("button",{class:"icon-btn", title:T("action.up","Move up"), text:"↑", onclick:()=>moveBlock(node,cur(),-1)});
   const dn = el("button",{class:"icon-btn", title:T("action.down","Move down"), text:"↓", onclick:()=>moveBlock(node,cur(),1)});
@@ -2105,17 +2124,40 @@ function moveBlocksBefore(node, movingBlocks, targetBlock){
   for (const b of kept) node.blocks.push(b);
   markDirty(); renderEditor();
 }
+// The block just after `block` in node.blocks, or null at the end. Used to turn a
+// "drop after this card" gesture into moveBlocksBefore(the next block).
+function blockAfter(node, block){
+  const i = node.blocks.indexOf(block);
+  return (i>=0 && i+1 < node.blocks.length) ? node.blocks[i+1] : null;
+}
+// Clear every drag insertion seam (belt-and-suspenders on dragend / drop).
+function clearDropMarks(){
+  document.querySelectorAll(".card.drop-before,.card.drop-after")
+    .forEach(c=>c.classList.remove("drop-before","drop-after"));
+}
+// Given a card element and the pointer event, mark the seam ABOVE (top half) or
+// BELOW (bottom half) and return true when the drop should land AFTER the card.
+function markDropSeam(card, e){
+  const rect = card.getBoundingClientRect();
+  const after = (e.clientY - rect.top) > rect.height/2;
+  card.classList.toggle("drop-after", after);
+  card.classList.toggle("drop-before", !after);
+  return after;
+}
 let blockDragSrc=null;
 function wireBlockDrag(card, node, block){
   card.addEventListener("dragstart",(e)=>{ blockDragSrc={node, blocks:[block]}; card.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; });
-  card.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null;
-    document.querySelectorAll(".card.dragover").forEach(c=>c.classList.remove("dragover")); });
-  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(block)<0){ e.preventDefault(); card.classList.add("dragover"); }});
-  card.addEventListener("dragleave",()=>card.classList.remove("dragover"));
+  card.addEventListener("dragend",()=>{ card.classList.remove("dragging"); blockDragSrc=null; clearDropMarks(); });
+  // seam feedback in the gap above/below (top half -> before, bottom half -> after)
+  card.addEventListener("dragover",(e)=>{ if(blockDragSrc&&blockDragSrc.node===node && blockDragSrc.blocks.indexOf(block)<0){ e.preventDefault(); markDropSeam(card, e); }});
+  card.addEventListener("dragleave",()=>card.classList.remove("drop-before","drop-after"));
   card.addEventListener("drop",(e)=>{
-    e.preventDefault(); card.classList.remove("dragover");
+    e.preventDefault();
+    const after = card.classList.contains("drop-after");
+    card.classList.remove("drop-before","drop-after");
     if (!blockDragSrc||blockDragSrc.node!==node) return;
-    moveBlocksBefore(node, blockDragSrc.blocks, block);   // insert before this block
+    const tgt = after ? blockAfter(node, block) : block;   // before this block, or the next
+    moveBlocksBefore(node, blockDragSrc.blocks, tgt);
   });
 }
 
@@ -2394,25 +2436,67 @@ function refKindLabel(type){
   return String(type||"").indexOf("image")===0
     ? T("ref.figure","Figure") : T("ref.table","Table");
 }
-// All captioned, id-bearing media blocks across the project, in document order.
+// Chapter-scoped "<chap>-<seq>" numbers for every captioned figure/table, mirroring
+// the engine's _collect_ref_targets EXACTLY so the editor shows the same numbers
+// Word will render: chapter = 1-based top-level index; images (incl. imagegrid)
+// ALWAYS consume a figure number; a table/datatable only consumes one when it has a
+// caption; both counters reset per chapter; fixed-body sections carry no media.
+// Returns { blockId: {kind, num} }. Recomputed per render into App._capNums.
+function computeCaptionNumbers(){
+  const map = {};
+  if (!App.project) return map;
+  const st = { chap:0, img:{}, tbl:{} };
+  const walkN = (node, depth)=>{
+    if (depth===0){ st.chap++; st.img[st.chap]=0; st.tbl[st.chap]=0; }
+    const chap = st.chap;
+    if (!node.fixed_body){
+      (node.blocks||[]).forEach(b=>{
+        const t = b && b.type;
+        if (t==="image" || t==="imagegrid"){
+          st.img[chap]++;
+          if (b.id) map[b.id] = { kind:T("ref.figure","Figure"), num: chap+"-"+st.img[chap] };
+        } else if ((t==="datatable" || t==="table") && (b.caption||"").trim()){
+          st.tbl[chap]++;
+          if (b.id) map[b.id] = { kind:T("ref.table","Table"), num: chap+"-"+st.tbl[chap] };
+        }
+      });
+    }
+    (node.children||[]).forEach(c=> walkN(c, depth+1));
+  };
+  (App.project.outline||[]).forEach(n=> walkN(n, 0));
+  return map;
+}
+// The caption number for a block id, using the per-render map when available (set
+// in renderNodeEditor) or recomputing on demand (e.g. from the ref picker).
+function capNum(id){
+  const m = App._capNums || computeCaptionNumbers();
+  return id ? m[id] : null;
+}
+// All captioned, id-bearing media blocks across the project, in document order,
+// each carrying its live "<chap>-<seq>" number for display.
 function collectRefTargets(){
   const out = [];
   if (!App.project) return out;
+  const nums = App._capNums || computeCaptionNumbers();
   walk(App.project.outline, (n)=>{
     (n.blocks||[]).forEach(b=>{
       if (isMediaBlock(b) && b.id && (b.caption||"").trim()){
-        out.push({ id:b.id, kind:refKindLabel(b.type), caption:b.caption.trim() });
+        out.push({ id:b.id, kind:refKindLabel(b.type), caption:b.caption.trim(),
+                   num: (nums[b.id]||{}).num || "" });
       }
     });
   });
   return out;
 }
-// Short display label for a reference chip: "[Figure: caption]" or, if the
-// target is gone, a clearly-marked "[ref: missing]".
+// Short display label for a reference chip: "[Figure 2-3: caption]" (live number)
+// or, if the target is gone, a clearly-marked "[ref: missing]".
 function refChipLabel(refId){
   const targets = collectRefTargets();
   for (const t of targets){
-    if (t.id === refId) return "[" + t.kind + ": " + t.caption + "]";
+    if (t.id === refId){
+      const lab = t.num ? (t.kind + " " + t.num) : t.kind;
+      return "[" + lab + ": " + t.caption + "]";
+    }
   }
   return "[" + T("ref.missing","ref: missing") + "]";
 }
@@ -2431,7 +2515,7 @@ function openRefPicker(onPick){
   targets.forEach(t=>{
     listBox.appendChild(el("button",{class:"sm-btn",
       style:{display:"block",width:"100%",textAlign:"left",marginBottom:"6px"},
-      text:t.kind + ": " + t.caption,
+      text:t.kind + (t.num?(" "+t.num):"") + ": " + t.caption,
       onclick:()=>{ closeOverlay(); onPick(t.id); }}));
   });
   m.appendChild(listBox);

@@ -1194,7 +1194,14 @@ def _build_outline(doc, cfg, outline, names):
             state["img_seq"][state["chap"]] = 0
             state["tbl_seq"][state["chap"]] = 0
         chap = state["chap"]
-        doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
+        head_p = doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
+        # Each new top-level chapter starts on a fresh page. Use the paragraph's
+        # "page break before" property (not an explicit break run) so Word/PDF add
+        # no blank page when the heading already sits at a page top, and so it is
+        # honored natively by the PDF conversion. Chapter 1 is skipped: the TOC
+        # already ends with a page break, so it starts fresh without one.
+        if level == 1 and chap > 1 and cfg.get("chapter_page_break", True):
+            head_p.paragraph_format.page_break_before = True
         if list_ctx:
             list_ctx.new_section()   # numbered lists restart per section
 

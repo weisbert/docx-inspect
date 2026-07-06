@@ -513,6 +513,21 @@ def main():
               "notes are NOT rendered (%s-level note absent from docx)" % where,
               "sentinel %r leaked into the document" % sentinel)
 
+    # --- each new top-level chapter starts on a new page ---
+    # "Results" is chapter 1: the TOC already broke the page, so NO break. "Outline
+    # lists" is chapter 2: page-break-before set on its Heading 1 (Word/PDF native,
+    # no blank page). Uses the paragraph property, not an explicit break run.
+    def _h1_page_break(title):
+        for p in doc.paragraphs:
+            if p.style and p.style.name == "Heading 1" and (p.text or "").strip() == title:
+                pPr = p._p.find(qn("w:pPr"))
+                return pPr is not None and pPr.find(qn("w:pageBreakBefore")) is not None
+        return None
+    check(_h1_page_break("Results") is False,
+          "chapter 1 heading has NO page-break-before (TOC already broke)")
+    check(_h1_page_break("Outline lists") is True,
+          "chapter 2 heading HAS page-break-before")
+
     # --- compliance table located + header band ---
     ctbl = find_compliance_table(doc)
     check(ctbl is not None, "compliance table present")

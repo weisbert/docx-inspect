@@ -114,6 +114,31 @@ vm.runInContext("App.project={outline:[{id:'X',title:'Phase Noise',blocks:[],chi
 ok(sandbox.warningJumpTarget('section "Phase Noise" / block 0 (datatable)') === "X", "warningJumpTarget resolves a section title");
 ok(sandbox.warningJumpTarget("chapter 2 / block 1") === null, "warningJumpTarget null for a non-section location");
 
+// caption numbers mirror engine _collect_ref_targets (chapter-scoped Figure/Table:
+// images always number; tables number only when captioned; counters reset per top
+// chapter and continue into children; fixed_body media is skipped)
+vm.runInContext("App.ui={}; App.project={outline:[" +
+  "{id:'c1',title:'Ch1',blocks:[" +
+    "{type:'image',id:'img1',caption:'a'}," +
+    "{type:'datatable',id:'dt1',caption:'t'}," +
+    "{type:'datatable',id:'dtnc'}," +
+    "{type:'imagegrid',id:'grid1',caption:'g'}]," +
+    "children:[{id:'c1a',title:'Ch1a',blocks:[{type:'image',id:'imgc',caption:'c'}],children:[]}]}," +
+  "{id:'fb',title:'Fixed',fixed_body:'std',blocks:[{type:'image',id:'ignored',caption:'x'}],children:[]}," +
+  "{id:'c2',title:'Ch2',blocks:[{type:'image',id:'img2',caption:'i'},{type:'table',id:'tbl2',caption:'tt'}],children:[]}" +
+  "]};", sandbox);
+const cn = sandbox.computeCaptionNumbers();
+ok(cn.img1 && cn.img1.num === "1-1" && cn.img1.kind === "Figure", "caption: image -> Figure 1-1");
+ok(cn.dt1 && cn.dt1.num === "1-1" && cn.dt1.kind === "Table", "caption: captioned datatable -> Table 1-1");
+ok(!cn.dtnc, "caption: uncaptioned table gets no number");
+ok(cn.grid1 && cn.grid1.num === "1-2", "caption: imagegrid continues figure seq (1-2)");
+ok(cn.imgc && cn.imgc.num === "1-3", "caption: child image continues chapter seq (1-3)");
+ok(!cn.ignored, "caption: fixed_body media is skipped");
+// the fixed_body node still consumes chapter 2 (it IS a Heading 1), so c2 is
+// chapter 3 -- matching the engine's per-top-level-node chapter counter.
+ok(cn.img2 && cn.img2.num === "3-1", "caption: image after a fixed_body chapter -> 3-1");
+ok(cn.tbl2 && cn.tbl2.num === "3-1", "caption: table after a fixed_body chapter -> 3-1");
+
 // renderTree runs without throwing (stubbed DOM)
 vm.runInContext("App.selId='X'; App._treeFilter='';", sandbox);
 try { sandbox.renderTree(); ok(true, "renderTree() runs without throwing"); }
