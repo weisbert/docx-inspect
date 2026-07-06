@@ -1000,6 +1000,28 @@ async function exportProject(fmt){
   }
 }
 
+// Export ONE table/datatable block to a .xlsx that visually mirrors the Word
+// table (server builds it from this block + the template config). The live
+// in-memory block is sent, so unsaved edits are included.
+async function exportBlockXlsx(block){
+  if (!App.dir){ toast(T("toast.need_project","Open a project first"), true); return; }
+  flushActiveGrid();   // commit any in-flight grid cell so the export is current
+  try{
+    const r = await api("POST","/api/export-xlsx",{json:{dir:App.dir, block:stripInternal(block)}});
+    downloadB64(r.xlsx_b64, r.filename,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    toast(T("toast.xlsx_ready","Excel ready: ")+(r.filename||""));
+  }catch(e){ toast(T("toast.xlsx_failed","Excel export failed: ")+e.message, true); }
+}
+// Turn a base64 payload into a browser download (Save As), no server file needed.
+function downloadB64(b64, filename, mime){
+  const bytes = Uint8Array.from(atob(b64||""), c=>c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], {type:mime||"application/octet-stream"}));
+  const a = el("a",{href:url, download:filename||"download"});
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ if(a.parentNode) a.parentNode.removeChild(a); URL.revokeObjectURL(url); }, 0);
+}
+
 // Build human-readable lines from the export render manifest (warnings + stats).
 // The engine returns warning dicts {type, detail, location?} plus a stats dict
 // (total_blocks, missing_images, blocks_with_errors, row_clip_risks, ...). We
@@ -2074,6 +2096,9 @@ function renderBlockCard(node, block, idx){
   actions.appendChild(up); actions.appendChild(dn);
   actions.appendChild(el("button",{class:"icon-btn", title:T("action.copy","Copy block (paste in any section or project)"), text:"⧉",
     onclick:()=>copyBlocks([block], kindLabel)}));
+  if (block.type==="table" || block.type==="datatable")
+    actions.appendChild(el("button",{class:"icon-btn", title:T("action.export_xlsx","Export this table to Excel (.xlsx) — mirrors the Word table"), text:"⬇",
+      onclick:()=>exportBlockXlsx(block)}));
   actions.appendChild(el("button",{class:"icon-btn danger", title:T("action.delete","Delete"), text:"✕",
     onclick:()=>{
       const i=cur(); if(i<0) return;

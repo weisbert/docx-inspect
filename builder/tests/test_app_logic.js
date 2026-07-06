@@ -163,10 +163,11 @@ catch (e) { ok(false, "renderTree() runs without throwing", e && e.message); }
 // the new caption-number badge (capNum) and the drag-seam wiring during render.
 vm.runInContext("App.project={outline:[{id:'S',title:'Sec',blocks:[" +
   "{type:'para',runs:[{t:'hi'}],cardStart:true}," +
-  "{type:'image',id:'im1',file:'images/x.png',caption:'a fig'}],children:[]}]};", sandbox);
+  "{type:'image',id:'im1',file:'images/x.png',caption:'a fig'}," +
+  "{type:'table',id:'tb1',caption:'t',rows:[['a','b']],header_rows:1}],children:[]}]};", sandbox);
 try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sandbox);
-  ok(true, "renderNodeEditor runs with a text card + captioned image"); }
-catch (e) { ok(false, "renderNodeEditor runs with a text card + captioned image", e && e.message); }
+  ok(true, "renderNodeEditor runs (text card + image + table w/ xlsx button)"); }
+catch (e) { ok(false, "renderNodeEditor runs (text card + image + table w/ xlsx button)", e && e.message); }
 
 console.log(fails ? ("\nFAILURES: " + fails) : "\nALL APP-LOGIC TESTS PASSED");
 process.exit(fails ? 1 : 0);

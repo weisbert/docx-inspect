@@ -510,6 +510,18 @@ def _import_engine():
     return engine
 
 
+def _import_xlsx_export():
+    # Reload so a git pull of xlsx_export.py / tables.py takes effect without a
+    # restart. xlsx_export imports tables at module scope -> reload tables first.
+    import importlib
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import tables  # type: ignore
+    importlib.reload(tables)
+    import xlsx_export  # type: ignore
+    return importlib.reload(xlsx_export)
+
+
 def run_export(project_dir, fmt, save_first=False):
     """Render the project via the engine. fmt in {docx, pdf}.
 
@@ -968,6 +980,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_validate_compliance()
             if path == "/api/export":
                 return self._api_export(qs)
+            if path == "/api/export-xlsx":
+                return self._api_export_xlsx()
             if path == "/api/import-docx":
                 return self._api_import_docx()
             if path == "/api/new-from-template":
@@ -1225,6 +1239,40 @@ class Handler(BaseHTTPRequestHandler):
                 "engine not available: %s" % exc, status=503
             )
         return self._send_json(result)
+
+    def _api_export_xlsx(self):
+        """Export ONE table/datatable block to a .xlsx that visually mirrors the
+        Word table. Body: {dir, block}. The project's template config supplies the
+        compliance fills/flags (datatable) or the header fill (free table). Returns
+        {ok, filename, xlsx_b64} -- the client turns the base64 into a download."""
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        payload = self._read_json()
+        block = payload.get("block")
+        if not isinstance(block, dict):
+            return self._send_error_json("missing 'block'")
+        project_dir = resolve_project_dir(payload.get("dir"), create=False)
+        pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            return self._send_error_json("no project.json in dir", status=404)
+        with open(pj, "r", encoding="utf-8") as fh:
+            project = json.load(fh)
+        # resolve the template config exactly like run_export (compliance section)
+        engine = _import_engine()
+        tid = project.get("template")
+        tpl_cfg = tstore.template_config_path(CFG.reports_root, tid) if tid else None
+        explicit = tpl_cfg or CFG.template_config_path
+        cfg = engine._load_config(engine._resolve_config_path(project, project_dir, explicit))
+        xe = _import_xlsx_export()
+        try:
+            data = xe.build_block_xlsx(block, cfg)
+        except ValueError as ex:
+            return self._send_error_json(str(ex))
+        return self._send_json({
+            "ok": True,
+            "filename": xe.filename_for(block),
+            "xlsx_b64": base64.b64encode(data).decode("ascii"),
+        })
 
     # --- template library ---
 
