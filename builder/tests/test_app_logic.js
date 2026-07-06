@@ -159,5 +159,14 @@ vm.runInContext("App.selId='X'; App._treeFilter='';", sandbox);
 try { sandbox.renderTree(); ok(true, "renderTree() runs without throwing"); }
 catch (e) { ok(false, "renderTree() runs without throwing", e && e.message); }
 
+// renderNodeEditor smoke: a section with a text card + a captioned image exercises
+// the new caption-number badge (capNum) and the drag-seam wiring during render.
+vm.runInContext("App.project={outline:[{id:'S',title:'Sec',blocks:[" +
+  "{type:'para',runs:[{t:'hi'}],cardStart:true}," +
+  "{type:'image',id:'im1',file:'images/x.png',caption:'a fig'}],children:[]}]};", sandbox);
+try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sandbox);
+  ok(true, "renderNodeEditor runs with a text card + captioned image"); }
+catch (e) { ok(false, "renderNodeEditor runs with a text card + captioned image", e && e.message); }
+
 console.log(fails ? ("\nFAILURES: " + fails) : "\nALL APP-LOGIC TESTS PASSED");
 process.exit(fails ? 1 : 0);
