@@ -1935,11 +1935,14 @@ function buildNotesPanel(owner, title){
     });
     // add-note affordance
     const addWrap = el("div",{class:"note-add"});
-    const nta = el("textarea",{placeholder:T("notes.add","Add a note / instruction for Claude…")});
+    const nta = el("textarea",{placeholder:T("notes.add","Add a note or instruction…")});
     const commit = ()=>{ const v=nta.value.trim(); if(!v) return;
       const n = addNoteTo(owner); n.text = v; markDirty();
       redraw(); syncBadge(); refreshNotesBadge(); };
     nta.addEventListener("keydown",(e)=>{ if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault(); commit(); }});
+    // Auto-commit on blur so a note isn't lost when you click away without pressing
+    // Add. commit() no-ops on empty text, so tabbing past an empty box adds nothing.
+    nta.addEventListener("blur", commit);
     addWrap.appendChild(nta);
     addWrap.appendChild(el("button",{class:"sm-btn", text:"+ "+T("notes.add_btn","Add"), onclick:commit}));
     body.appendChild(addWrap);
