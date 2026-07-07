@@ -522,9 +522,13 @@ def render_datatable(doc, data, cfg):
 # Public: free-table renderer (arbitrary rows/cols)
 # ---------------------------------------------------------------------------
 def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
-                      row_fills=None):
+                      row_fills=None, header_fill=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
         header_fill, border{val,sz,color}, font_pt(optional).
+
+    ``header_fill`` (optional): a per-table hex6 header colour that overrides the
+    config default -- lets a table library preset carry its own header shade (e.g.
+    an amber-headed sign-off summary table) without changing every free table.
 
     ``row_fills`` (optional): map of row-index -> hex6 fill, letting a caller shade
     whole rows (e.g. band condition rows vs result rows). Header rows keep the header
@@ -539,7 +543,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
         return {"table": None, "total_rows": 0, "flagged_rows": 0, "warnings": []}
     ncols = max(len(r) for r in rows)
     nrows = len(rows)
-    header_fill = cfg.get("header_fill", "D9D9D9")
+    hfill = header_fill or cfg.get("header_fill", "D9D9D9")
     bd = cfg.get("border", {"val": "single", "sz": 4, "color": "000000"})
     font_pt = cfg.get("font_pt")
     rfills = {int(k): v for k, v in (row_fills or {}).items()}
@@ -562,7 +566,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
             val = rowvals[c] if c < len(rowvals) else ""
             cell = table.cell(r, c)
             if r < header_rows:
-                _shade(cell, header_fill)
+                _shade(cell, hfill)
             elif r in rfills:
                 _shade(cell, rfills[r])
             runs = val.get("runs") if isinstance(val, dict) else None

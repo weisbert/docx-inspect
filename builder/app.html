@@ -1341,10 +1341,12 @@ function tableFromPreset(p){
     const rows = (Array.isArray(p.rows) && p.rows.length)
       ? p.rows.map(r=> Array.isArray(r) ? r.slice() : [String(r)])
       : [["",""],["",""]];
-    return { type:"table", id:uid(), caption: p.caption||"",
+    const b = { type:"table", id:uid(), caption: p.caption||"",
              header_rows: (p.header_rows!=null ? p.header_rows : 1),
              rows, merges: Array.isArray(p.merges) ? JSON.parse(JSON.stringify(p.merges)) : [],
              col_w: p.col_w || null };
+    if (p.header_fill) b.header_fill = p.header_fill;   // preset-carried header shade
+    return b;
   }
   const specSims = (Array.isArray(p.sims) && p.sims.length)
     ? p.sims : [{title:"", stage:(cc.stages&&cc.stages[0])||"", axes: defAxes.slice()}];
@@ -4981,13 +4983,15 @@ function previewFreeTable(block, chap, seq){
     tbl.appendChild(cg);
   }
   const rfills = block.row_fills || null;            // {rowIndex: "RRGGBB"} band fills
+  const hfill = block.header_fill ? ("#" + block.header_fill) : null;  // per-table header shade
   (block.rows || []).forEach((row, ri)=>{
     const tr = el("tr",{class: ri < hr ? "pv-hdr" : ""});
     const band = (rfills && ri >= hr && rfills[ri] != null) ? ("#" + rfills[ri]) : null;
     (row || []).forEach(cell=>{
       const td = el(ri < hr ? "th" : "td", {class:"pv-td"});
       td.innerHTML = cellHtml(cell);                 // styled runs render as HTML
-      if (band) td.style.background = band;
+      if (ri < hr && hfill) td.style.background = hfill;
+      else if (band) td.style.background = band;
       tr.appendChild(td);
     });
     tbl.appendChild(tr);
