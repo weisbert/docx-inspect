@@ -1346,6 +1346,7 @@ function tableFromPreset(p){
              rows, merges: Array.isArray(p.merges) ? JSON.parse(JSON.stringify(p.merges)) : [],
              col_w: p.col_w || null };
     if (p.header_fill) b.header_fill = p.header_fill;   // preset-carried header shade
+    if (p.row_fills) b.row_fills = JSON.parse(JSON.stringify(p.row_fills));  // preset band fills
     return b;
   }
   const specSims = (Array.isArray(p.sims) && p.sims.length)
