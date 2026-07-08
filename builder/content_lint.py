@@ -228,16 +228,16 @@ def _lint_datatable(data, loc, add, default_axes, setting_kinds):
         add("no_setting_rows",
             "compliance table has no condition/setting rows -- add them (use a "
             "table preset so the condition rows are never forgotten)", loc)
-    # A1: a sim_span row whose sim group has <3 axes crashes the renderer.
-    if any_sim_span and first_sim_axes < 3:
-        add("sim_span_axes",
-            "sim_span row(s) but the sim group has only %d axis column(s) (<3) -- "
-            "would break the table render" % first_sim_axes, loc)
-    # B2: sim_span with several sim groups -- only the first group merges.
-    if any_sim_span and n_sim_groups > 1:
-        add("sim_span_multi",
-            "sim_span row(s) with %d sim groups -- only the first group merges"
-            % n_sim_groups, loc)
+    # A sim_span value now merges across ALL sim groups' axis columns (the whole
+    # sim area), so multiple sim groups are fine. The only genuinely unmergeable
+    # case is a sim area with fewer than 2 axis columns total.
+    if any_sim_span:
+        total_sim_axes = sum(_axis_count(s, default_axes)
+                             for s in sims if isinstance(s, dict)) or first_sim_axes
+        if total_sim_axes < 2:
+            add("sim_span_unmergeable",
+                "sim_span row(s) but the sim area has %d axis column(s) (<2) -- "
+                "nothing to merge" % total_sim_axes, loc)
 
 
 def _lint_block(block, loc, add, default_axes, setting_kinds):

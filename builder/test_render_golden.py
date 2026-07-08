@@ -746,6 +746,28 @@ def main():
     check(2 in tables._flags_from(ps_row2, *tables._sim_axis_vals(ps_row2, "pdr")),
           "per-sim flag: comparison column reds when IT is out of spec")
 
+    # --- sim_span full-span: one value merges across ALL sim groups (CDR+PDR) ---
+    def _span_data(span):
+        return {"show_spec": False,
+                "sims": [{"key": "post", "title": "Post", "axes": ["MIN", "TYP", "MAX"]},
+                         {"key": "pre", "title": "Pre", "axes": ["MIN", "TYP", "MAX"]}],
+                "rows": [{"cat": "PVT", "item": "Process", "kind": "common_setting",
+                          "unit": "", "limit": None, "spec_mtm": [None, None, None],
+                          "sim_span": span, "sim_mtm": ["TT/SS/FF", None, None],
+                          "sims": {"pre": {"mtm": [None, "TT/SS/FF", None], "ntwc": None}}}]}
+    span_on = tables.render_datatable(Document(), _span_data(True), comp_cfg)["table"]
+    span_off = tables.render_datatable(Document(), _span_data(False), comp_cfg)["table"]
+
+    def _row_distinct(tbl, r):
+        return len({id(c._tc) for c in tbl.rows[r].cells})
+    check(_row_distinct(span_on, 3) < _row_distinct(span_off, 3),
+          "sim_span merges sim cells across all groups (fewer distinct cells than unmerged)",
+          "on=%d off=%d" % (_row_distinct(span_on, 3), _row_distinct(span_off, 3)))
+    span_val_cells = {id(c._tc) for c in span_on.rows[3].cells if "TT/SS/FF" in c.text}
+    check(len(span_val_cells) == 1,
+          "sim_span: value shown once in the merged wide cell across CDR + PDR",
+          "value appears in %d distinct cells" % len(span_val_cells))
+
     return _finish()
 
 

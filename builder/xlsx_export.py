@@ -168,6 +168,23 @@ def build_datatable_xlsx(data, comp_cfg):
             xr = start + gi + 1                 # openpyxl row (1-based)
             band = _fill(fills["setting"] if row.get("kind") in setting_kinds else fills["result"])
             flags = tables.flag_positions(row)
+            # full-span: a sim_span value merges across ALL sim groups' axis columns
+            # into one wide cell (mirror render_datatable). Show the first non-null
+            # axis value; blank the covered cells so the merge is clean.
+            span = bool(row.get("sim_span"))
+            span_cols = sorted(c for g in sim_groups
+                               for c in group_axis_cols[g["key"]]) if span else []
+            span_first_col = span_cols[0] if span_cols else None
+            span_val = None
+            if span:
+                for g in sim_groups:
+                    for ai in range(len(g["axes"])):
+                        vv = tables._axis_value(row, g["key"], ai)
+                        if vv is not None and str(vv) != "":
+                            span_val = vv
+                            break
+                    if span_val is not None:
+                        break
             for idx, p in enumerate(plan):
                 cell = ws.cell(row=xr, column=idx + 1)
                 _paint(cell, band)
@@ -180,16 +197,19 @@ def build_datatable_xlsx(data, comp_cfg):
                 elif p["kind"] == "spec":
                     _text(cell, row.get("spec"))
                 elif p["kind"] == "axis":
+                    if span and p["role"] == "sim":
+                        if idx == span_first_col:
+                            _text(cell, tables._fmt_val(span_val))
+                        continue                # covered cells blanked; merged below
                     v = tables._axis_value(row, p["group"], p["axis"])
                     red = (p["role"] == "sim" and p["axis"] in flags)
                     _text(cell, tables._fmt_val(v), bold=red, color=(flag_color if red else None))
                 # spacer: painted, left blank
-            if row.get("sim_span") and first_sim is not None:
-                cc = group_axis_cols[first_sim["key"]]
-                end = min(2, len(cc) - 1)       # never index past a <3-axis group
-                if end >= 1:
-                    ws.merge_cells(start_row=xr, start_column=cc[0] + 1,
-                                   end_row=xr, end_column=cc[end] + 1)
+            if span and span_cols:
+                lo, hi = span_cols[0], span_cols[-1]
+                if hi > lo:
+                    ws.merge_cells(start_row=xr, start_column=lo + 1,
+                                   end_row=xr, end_column=hi + 1)
         # vertical merge of the category column across the run (first row's band)
         cc = col_of["cat"]
         xr0, xr1 = start + g0 + 1, start + g1 + 1
