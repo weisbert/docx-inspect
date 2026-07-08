@@ -937,6 +937,19 @@ async function openProject(dir){
     App.project = r.project;
     App.project.outline = App.project.outline || [];
     ensureProjectIds(App.project.outline);
+    // Load THIS project's own template config (axis_labels, fills, ui strings) so the
+    // editor matches the report's template rather than the server's global --config.
+    // boot() fetched the global config before any project was known; without this a
+    // project bound to a template with different axis_labels (e.g. no NTWC) would
+    // render the wrong compliance columns.
+    const ptpl = App.project.template;
+    if (ptpl && ptpl !== App.template){
+      try{
+        const cfg = await api("GET","/api/config",{query:{template:ptpl}});
+        if (cfg && cfg.compliance){ App.config = cfg; App.template = cfg.template || ptpl;
+          App.ui = cfg.ui_strings || App.ui; applyUiStrings(); }
+      }catch(e){ /* keep the global config if the per-template slice is unavailable */ }
+    }
     App.dir = dir; App.selId = COVER_ID; App.dirty=false;
     App._savedAt = (r.meta_info && r.meta_info.mtime != null) ? r.meta_info.mtime : null;  // A4 baseline
     App._treeFilter = "";                       // don't carry a filter across projects
@@ -3870,7 +3883,7 @@ function editDatatable(host, block){
   rowTools.appendChild(maxBtn);
   host.appendChild(rowTools);
 
-  let flags = {}; // rowIndex -> [axisIndex...] (flat index across sims)
+  let valOk = true;   // is the auto red-flag validator available (server engine reachable)
   // Auto red-flag availability indicator: a badge appended once to the legend
   // (legend is built once, outside rebuildMetrics, so it survives grid rebuilds).
   // It MUST be impossible to confuse "validator could not run" with "all in spec".
@@ -3881,20 +3894,21 @@ function editDatatable(host, block){
   legend.appendChild(valBadge);
   let valToastShown = false;
   const setValAvailable = (ok)=>{
+    valOk = ok;
     valBadge.style.display = ok ? "none" : "";
     if (ok) valToastShown = false;   // re-arm the one-shot toast for the next outage
   };
   const validate = debounce(async ()=>{
     try{
-      const r = await api("POST","/api/validate-compliance",{json:{data}});
-      flags = r.flags || {}; paintFlags();
-      setValAvailable(true);
+      // Probe the server engine for availability; the actual flag positions are
+      // computed per-sim on the client (dtFlagsFor) so a comparison column is judged
+      // by its own values -- the server's flat flag_positions can't distinguish sims.
+      await api("POST","/api/validate-compliance",{json:{data}});
+      setValAvailable(true); paintFlags();
     }catch(err){
-      // Failure modes all mean the same thing: the auto red-flag did NOT run
-      // (server unreachable / 503 'engine not available' / 500). Never swallow:
-      // clear flags so no stale red boxes mislead, and surface the outage loudly.
-      flags = {}; paintFlags();
-      setValAvailable(false);
+      // Failure means the auto red-flag validator did NOT run (server unreachable /
+      // 503 'engine not available' / 500). Never swallow: don't paint, surface loudly.
+      setValAvailable(false); paintFlags();
       setStatus("err", T("status.validation_unavailable","auto red-flag unavailable"));
       if (!valToastShown){
         valToastShown = true;   // debounce fires per keystroke; toast only once per outage
@@ -3905,13 +3919,17 @@ function editDatatable(host, block){
 
   function paintFlags(){
     metricWrap.querySelectorAll(".axis-val").forEach(td=>td.classList.remove("flagcell"));
-    Object.keys(flags).forEach(ri=>{
-      (flags[ri]||[]).forEach(ai=>{
-        // `ai` is a semantic MTM slot (0/1/2), NOT a flat column position. Match by
-        // data-mtm so the right column lights up regardless of axis order; any group
-        // showing that slot is painted (groups share one stored value today).
-        metricWrap.querySelectorAll(`[data-r="${ri}"][data-mtm="${ai}"]`)
-          .forEach(cell=>cell.classList.add("flagcell"));
+    if (!valOk) return;   // validator unreachable -> badge shown; don't guess flags
+    // Flag each sim column by its OWN out-of-spec slots. dtFlagsFor mirrors the
+    // engine's per-sim _flags_from, so a PASSING comparison (e.g. PDR) value is never
+    // reddened just because the primary (CDR) column fails at the same MTM slot.
+    (data.rows||[]).forEach((row, ri)=>{
+      (data.sims||[]).forEach(s=>{
+        dtFlagsFor(row, s.key).forEach(ai=>{
+          if (ai > 2) return;   // NTWC slot (3) has no cell in the MTM grid
+          metricWrap.querySelectorAll(`[data-r="${ri}"][data-group="${s.key}"][data-mtm="${ai}"]`)
+            .forEach(cell=>cell.classList.add("flagcell"));
+        });
       });
     });
   }
@@ -4197,11 +4215,12 @@ function simAxisCell(ctx, row, axisLabel, gkey, ri, flatIdx, c, after){
     else if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v;
   };
   const cell = el("div",{class:"cell", text:fmtAxis(get())});
-  // data-mtm = semantic [MIN,TYP,MAX] slot (0/1/2); blank for non-MTM axes. The
-  // validator returns flags by MTM slot, so paintFlags locates cells by this, not
-  // by column order -- correct even after axes are reordered. (See paintFlags.)
+  // data-mtm = semantic [MIN,TYP,MAX] slot (0/1/2); blank for non-MTM axes.
+  // data-group = the sim key, so paintFlags can flag each sim column by its OWN
+  // out-of-spec slots (a comparison PDR column is judged by its own values, not the
+  // primary sim's -- mirrors the engine's per-sim flagging). See paintFlags.
   const td = el("td",{class:"axis-val", "data-r":ri, "data-flatax":flatIdx,
-    "data-mtm": (mtmIdx!=null ? mtmIdx : "")},[cell]);
+    "data-group": gkey, "data-mtm": (mtmIdx!=null ? mtmIdx : "")},[cell]);
   regCell(ctx, { r:ri, c, type:"axis", el:cell,
     read:()=> fmtAxis(get()),
     write:(s)=>{ const v=parseAxis(s); set(v); cell.textContent = s==="" ? "" : s;
