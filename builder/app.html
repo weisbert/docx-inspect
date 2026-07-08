@@ -235,6 +235,11 @@
   /* compliance grid: bound height so the horizontal scrollbar stays reachable
      without scrolling the whole page to the bottom of a tall table */
   .grid-wrap.dt-grid{max-height:72vh}
+  /* P2.2: maximize a large grid to a full-viewport overlay (kills the double
+     scrollbar for tall compliance tables); Esc or the toolbar button exits */
+  .grid-wrap.dt-grid.gi-max{position:fixed;inset:12px;max-height:none;z-index:60;
+    background:var(--panel);box-shadow:0 8px 40px rgba(0,0,0,.3);border-color:var(--accent)}
+  body.gi-max-open{overflow:hidden}
   /* freeze the header while scrolling the metric list; collapsed borders clip
      under a sticky thead, so the bottom rule is redrawn with an inset shadow */
   .grid-wrap.dt-grid thead{position:sticky;top:0;z-index:3}
@@ -248,6 +253,30 @@
   .grid-wrap.dt-grid .gi-freeze-edge{box-shadow:inset -1px 0 0 var(--line)}
   /* the bottom-right corner cell needs both the header rule and the freeze edge */
   .grid-wrap.dt-grid thead tr:last-child th.gi-freeze-edge{box-shadow:inset -1px 0 0 var(--line),inset 0 -1px 0 var(--line)}
+  /* P0 compaction: tighten the compliance grid only (dt-grid). free-grid keeps its
+     own fixed widths/padding, so every rule here is scoped under .grid-wrap.dt-grid
+     and wins over the shared table.grid rules by specificity. */
+  .grid-wrap.dt-grid table.grid td,.grid-wrap.dt-grid table.grid th{min-width:44px}
+  .grid-wrap.dt-grid table.grid td .cell,.grid-wrap.dt-grid table.grid th .cell{padding:3px 6px;min-height:20px}
+  .grid-wrap.dt-grid td.axis-val:not([colspan]){max-width:120px}
+  .grid-wrap.dt-grid td.axis-val .cell,.grid-wrap.dt-grid td.num-val .cell{
+    overflow-wrap:anywhere;text-align:center;font-variant-numeric:tabular-nums}
+  .grid-wrap.dt-grid .row-actions .icon-btn{padding:2px 3px}
+  /* P1.1: structural buttons in a hover-revealed floating cluster; the actions
+     column keeps only the drag handle + span toggle inline. position:relative
+     anchors the cluster, but a more-specific rule keeps position:sticky when the
+     column is frozen (so the pin survives). The frozen td is itself a containing
+     block, so the absolute cluster tracks it on scroll either way. */
+  .grid-wrap.dt-grid td.row-actions{position:relative}
+  .grid-wrap.dt-grid td.row-actions.gi-freeze{position:sticky}
+  .grid-wrap.dt-grid .row-act-pop{position:absolute;left:2px;top:100%;z-index:6;display:none;
+    gap:1px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:2px;
+    white-space:nowrap;box-shadow:0 3px 10px rgba(0,0,0,.16)}
+  .grid-wrap.dt-grid td.row-actions:hover .row-act-pop{display:flex}
+  /* keep the beige setting band on the frozen identity cells (the sticky bg rule
+     above would otherwise repaint them --panel) */
+  .grid-wrap.dt-grid td.gi-freeze.band-fill{background:var(--band-c)}
+  .grid-wrap.dt-grid td.cat-repeat .cell{color:var(--muted);opacity:.45}
   table.grid{border-collapse:collapse;width:100%}
   table.grid td,table.grid th{border:1px solid var(--line);padding:0;min-width:60px;vertical-align:top}
   table.grid td .cell,table.grid th .cell{padding:5px 7px;outline:none;min-height:24px;white-space:pre-wrap}
@@ -304,6 +333,11 @@
   .dt-section{border:1px solid var(--line2);border-radius:6px;margin-bottom:10px}
   .dt-section>.dt-sh{padding:6px 10px;font-weight:600;font-size:13px;background:#fafbfc;
     border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:8px}
+  .dt-sh-toggle{cursor:pointer;user-select:none}
+  .dt-sh-toggle:hover{background:#f1f4f8}
+  .dt-caret{font-size:11px;color:var(--muted);width:10px;display:inline-block;text-align:center}
+  .dt-sh-summary{font-weight:400;color:var(--muted);font-size:12px;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
   .dt-section>.dt-bd{padding:10px}
   .sim-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
     border-radius:20px;padding:3px 6px 3px 10px;background:#fff}
@@ -3559,6 +3593,9 @@ function editDatatable(host, block){
   let data = block.data;
   const cfg = App.config.compliance || {};
   const defaultAxes = cfg.axis_labels || ["MIN","TYP","MAX","NTWC"];
+  // setting rows get the same beige band as the exported table (config-driven color)
+  const settingKinds = new Set(cfg.setting_kinds || ["common_setting","module_setting","tb"]);
+  const settingBand = "#" + ((cfg.fills && cfg.fills.setting) || "EEECE1");
   // stage presets are config-driven (neutral fallback); used for quick-add + the stage dropdown
   const stagePresets = (cfg.stages && cfg.stages.length) ? cfg.stages : ["S1","S2"];
   // Spec column is hideable (comparison tables). Mirrors data.show_spec used by the
@@ -3580,21 +3617,43 @@ function editDatatable(host, block){
   specToggle.checked = specShown();
   top.appendChild(el("label",{text:T("datatable.show_spec","Show Spec"), style:{marginLeft:"10px"}}));
   top.appendChild(specToggle);
-  host.appendChild(top);
-
-  // import row
-  const importRow = el("div",{class:"grid-tools"});
+  // P1.2: fold the Import-xlsx control into the caption row (was its own ~30px row).
+  // The paste tip moves to the button's tooltip to keep the row compact.
   const fileInput = el("input",{type:"file", accept:".xlsx", style:{display:"none"},
     onchange:(e)=>importXlsxCompliance(e.target.files[0], block)});
-  importRow.appendChild(el("button",{class:"sm-btn", text:T("datatable.import_xlsx","Import xlsx"), onclick:()=>fileInput.click()}));
-  importRow.appendChild(fileInput);
-  importRow.appendChild(el("span",{style:{color:"var(--muted)",fontSize:"12px"}, text:T("datatable.paste_hint","Tip: select a metric cell and Ctrl+V an Excel region")}));
-  host.appendChild(importRow);
+  top.appendChild(el("button",{class:"sm-btn", style:{marginLeft:"10px"},
+    title:T("datatable.paste_hint","Tip: select a metric cell and Ctrl+V an Excel region"),
+    text:T("datatable.import_xlsx","Import xlsx"), onclick:()=>fileInput.click()}));
+  top.appendChild(fileInput);
+  host.appendChild(top);
 
   /* ----- groups / axes management ----- */
   const simSec = el("div",{class:"dt-section"});
-  simSec.appendChild(el("div",{class:"dt-sh"},[ document.createTextNode(T("datatable.groups","Simulation groups / axes")) ]));
+  // P1.2: the groups/axes strip is set-once configuration, not per-row workflow, so
+  // it collapses by default when groups already exist -- reclaiming ~100px above the
+  // grid. Collapsed, the header shows a one-line summary of the groups + axes.
+  const simHead = el("div",{class:"dt-sh dt-sh-toggle"});
+  const simCaret = el("span",{class:"dt-caret", text:"▾"});
+  const simSummary = el("span",{class:"dt-sh-summary"});
+  simHead.appendChild(simCaret);
+  simHead.appendChild(document.createTextNode(T("datatable.groups","Simulation groups / axes")));
+  simHead.appendChild(simSummary);
+  simSec.appendChild(simHead);
   const simBd = el("div",{class:"dt-bd"});
+  let simCollapsed = !!(data.sims && data.sims.length);
+  const updateSimSummary = ()=>{
+    simSummary.textContent = (data.sims||[]).map(s=>{
+      const nm = s.title || s.stage || s.key || "sim";
+      const ax = (s.axes||[]).join("/");
+      return (s.stage && s.stage!==nm) ? (nm+" ("+s.stage+") "+ax) : (nm+" "+ax);
+    }).join("   ·   ");
+  };
+  const applySimCollapse = ()=>{
+    simBd.style.display = simCollapsed ? "none" : "";
+    simCaret.textContent = simCollapsed ? "▸" : "▾";
+    simSummary.style.display = simCollapsed ? "" : "none";
+  };
+  simHead.addEventListener("click", ()=>{ simCollapsed = !simCollapsed; applySimCollapse(); });
   // move an array element left/right (no-drag reorder fallback, decision 9)
   const moveInArr = (arr, i, dir)=>{ const j=i+dir; if(j<0||j>=arr.length) return false;
     const [m]=arr.splice(i,1); arr.splice(j,0,m); return true; };
@@ -3742,6 +3801,7 @@ function editDatatable(host, block){
         onclick:()=>addGroup(null)}));
     }
     simBd.appendChild(addG);
+    updateSimSummary();
   };
   // add an axis via modalPrompt (replaces native prompt, decision 12), guarding the
   // 2nd non-MTM axis that would silently overwrite sim_ntwc (decision 11).
@@ -3786,6 +3846,20 @@ function editDatatable(host, block){
   const rowTools = el("div",{class:"grid-tools"});
   rowTools.appendChild(el("button",{class:"sm-btn", text:"+ "+T("datatable.metric","Metric row"),
     onclick:()=>{ snapshot(ctx); data.rows.push(newComplianceRow()); markDirty(); rebuildMetrics(); }}));
+  // P2.2: maximize the grid to a full-viewport overlay for comfortable editing of
+  // tall tables (exits via this button or Esc). Re-pin the frozen columns after the
+  // width changes.
+  const maxBtn = el("button",{class:"sm-btn", style:{marginLeft:"auto"},
+    title:T("datatable.maximize","Maximize / restore the grid (Esc to exit)"), text:"⛶"});
+  maxBtn.addEventListener("click",()=>{
+    ensureMaxEscHandler();
+    const on = metricWrap.classList.toggle("gi-max");
+    document.body.classList.toggle("gi-max-open", on);
+    maxBtn.textContent = on ? "⤢" : "⛶";
+    const t = metricWrap.querySelector("table.grid");
+    if (t){ if (typeof requestAnimationFrame!=="undefined") requestAnimationFrame(()=>freezeLeadCols(t)); else freezeLeadCols(t); }
+  });
+  rowTools.appendChild(maxBtn);
   host.appendChild(rowTools);
 
   let flags = {}; // rowIndex -> [axisIndex...] (flat index across sims)
@@ -3857,22 +3931,25 @@ function editDatatable(host, block){
 
     const thead = el("thead");
     const hr1 = el("tr",{class:"hdr"});
-    hr1.appendChild(el("th",{}));                                  // row-actions column
-    hr1.appendChild(el("th",{html:T("datatable.col.cat","Category")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.item","Item")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.unit","Unit")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.kind","Kind")}));
-    hr1.appendChild(el("th",{html:T("datatable.col.limit","Limit")}));
+    // P1.5: fixed single-column headers span BOTH header rows (rowspan=2) so hr2 is
+    // no longer a dead empty band over them -- it carries only the colspan groups'
+    // sub-labels. freezeLeadCols is updated to match (measures body row, skips hr2).
+    const fixTh = (o)=> el("th", Object.assign({rowspan:"2"}, o||{}));
+    hr1.appendChild(fixTh());                                      // row-actions column
+    hr1.appendChild(fixTh({html:T("datatable.col.cat","Category")}));
+    hr1.appendChild(fixTh({html:T("datatable.col.item","Item")}));
+    hr1.appendChild(fixTh({html:T("datatable.col.unit","Unit")}));
+    hr1.appendChild(fixTh({html:T("datatable.col.kind","Kind")}));
+    hr1.appendChild(fixTh({html:T("datatable.col.limit","Limit")}));
     if (specShown()){
-      hr1.appendChild(el("th",{html:T("datatable.col.spec","Spec")}));
+      hr1.appendChild(fixTh({html:T("datatable.col.spec","Spec")}));
       hr1.appendChild(el("th",{html:T("datatable.col.spec_mtm","Spec MIN/TYP/MAX"), colspan:3}));
     }
     data.sims.forEach(s=> hr1.appendChild(el("th",{text:(s.title||s.stage||s.key||"sim"), colspan:(s.axes||[]).length})));
     thead.appendChild(hr1);
 
     const hr2 = el("tr",{class:"hdr"});
-    const hr2empty = specShown() ? 7 : 6;   // actions + cat/item/unit/kind/limit[/spec]
-    for (let i=0;i<hr2empty;i++) hr2.appendChild(el("th",{}));
+    // only the colspan groups need a 2nd header row: Spec MIN/TYP/MAX + each sim's axes
     if (specShown()) ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
     flatAxes.forEach(fa=> hr2.appendChild(el("th",{text:fa.label})));
     thead.appendChild(hr2);
@@ -3907,11 +3984,17 @@ function editDatatable(host, block){
       tr.appendChild(actTd);
       wireMetricRowDrag(tr, ri);
       // fixed columns 0..8 (column index = factory arg `c`)
-      tr.appendChild(textCell(ctx, row,"cat",  ri, 0));
+      const catTd = textCell(ctx, row,"cat",  ri, 0);
+      // P1.4: dim a Category that repeats the row above (display-only echo of the
+      // preview's vertical merge; the cell stays fully editable).
+      if (ri>0 && row.cat && data.rows[ri-1] && data.rows[ri-1].cat===row.cat)
+        catTd.classList.add("cat-repeat");
+      tr.appendChild(catTd);
       tr.appendChild(textCell(ctx, row,"item", ri, 1));
       tr.appendChild(textCell(ctx, row,"unit", ri, 2));
       tr.appendChild(selectCell(ctx, row, ri, 3, "kind", false,
-        ["common_setting","module_setting","tb","result"], "result", ()=>validate()));
+        ["common_setting","module_setting","tb","result"], "result", ()=>validate(),
+        {common_setting:"common", module_setting:"module", tb:"tb", result:"result"}));
       tr.appendChild(selectCell(ctx, row, ri, 4, "limit", true,
         ["le","ge","range"], null, ()=>validate()));
       if (specShown()){
@@ -3919,25 +4002,51 @@ function editDatatable(host, block){
         [0,1,2].forEach(k=> tr.appendChild(numArrCell(ctx, row,"spec_mtm", k, ri, DT_FIXED_COLS-3+k, ()=>validate())));
       }
       // sim axes (flat) — map axis label to sim_mtm[0..2] or sim_ntwc
+      // P1.3: honor sim_span like the exported table -- the first sim group's
+      // MIN/TYP/MAX merge into ONE wide editable cell (bound to MIN). The two
+      // covered columns are left unrendered; adapterAt() returns null for those
+      // (r,c) so the select/paste layer skips them (a merged cell holds one value),
+      // while `flat` still advances by 3 so later groups keep their column indices.
+      const spanRow = !!row.sim_span && ((((data.sims||[])[0]||{}).axes)||[]).length >= 3;
       let flat=0;
       data.sims.forEach((s, si)=>{
         (s.axes||[]).forEach((ax, ai)=>{
-          tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate()));
+          if (spanRow && si===0 && ai===0){
+            const td = simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate());
+            td.setAttribute("colspan","3");
+            tr.appendChild(td);
+          } else if (spanRow && si===0 && ai>=1 && ai<=2){
+            /* covered by the colspan above; skip rendering, still bump flat */
+          } else {
+            tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate()));
+          }
           flat++;
         });
       });
+      // P0.2: band setting rows beige (mirror the exported table) so their
+      // legitimately-empty spec/sim cells read as intentional, not as blank waste.
+      if (settingKinds.has(row.kind)){
+        tr.style.setProperty("--band-c", settingBand);
+        for (const td of tr.cells){ if (!td.classList.contains("row-actions")) td.classList.add("band-fill"); }
+      }
       tbody.appendChild(tr);
     });
     tbl.appendChild(tbody);
     metricWrap.appendChild(tbl);
     ctx.table = tbl; tbl.classList.add("gi-grid");
-    freezeLeadCols(tbl);                    // pin actions/Category/Item after layout
+    // Pin identity columns AFTER the editor subtree is attached. rebuildMetrics
+    // runs while the node editor is still detached, so getBoundingClientRect reads
+    // 0 and freezeLeadCols bails on its acc<=0 guard -- the freeze then only
+    // self-heals on a later resize/edit. Defer one frame so the widths are real.
+    if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(()=>freezeLeadCols(tbl));
+    else freezeLeadCols(tbl);
     paintFlags();
     restoreFocusAfterRender(ctx);
   }
 
   redrawSims();
   rebuildMetrics();
+  applySimCollapse();       // collapse the groups/axes config by default when groups exist
   validate();
 }
 
@@ -3947,11 +4056,16 @@ function rowActionsCell(ri, total, rowStruct){
   const td = el("td",{class:"row-actions", style:{padding:"2px"}});
   const b = (txt, key, k, disabled)=> el("button",{class:"icon-btn"+(key==="delete"?" danger":""),
     title:T(k, txt), text:txt, disabled:disabled?"":null, onclick:()=>rowStruct(ri,key)});
-  td.appendChild(b("↑","up","grid.move_up", ri===0));
-  td.appendChild(b("↓","down","grid.move_down", ri===total-1));
-  td.appendChild(b("⊕","below","grid.insert_row_below", false));
-  td.appendChild(b("⊝","above","grid.insert_row_above", false));
-  td.appendChild(b("✕","delete","grid.delete_row", false));
+  // P1.1: the 5 structural buttons (was ~168px of always-on chrome per row, and a
+  // frozen column) move into a hover-revealed floating cluster. The caller keeps
+  // the drag handle + span toggle inline as the affordance + hover target.
+  const pop = el("div",{class:"row-act-pop"});
+  pop.appendChild(b("↑","up","grid.move_up", ri===0));
+  pop.appendChild(b("↓","down","grid.move_down", ri===total-1));
+  pop.appendChild(b("⊕","below","grid.insert_row_below", false));
+  pop.appendChild(b("⊝","above","grid.insert_row_above", false));
+  pop.appendChild(b("✕","delete","grid.delete_row", false));
+  td.appendChild(pop);
   return td;
 }
 
@@ -3968,17 +4082,38 @@ function ensureFreezeResizeHandler(){
     document.querySelectorAll(".grid-wrap.dt-grid table.grid").forEach(freezeLeadCols);
   }, 150));
 }
+// Esc closes any maximized grid overlay (registered once, mirrors the resize hook)
+let GI_MAX_ESC = false;
+function ensureMaxEscHandler(){
+  if (GI_MAX_ESC) return; GI_MAX_ESC = true;
+  document.addEventListener("keydown",(e)=>{
+    if (e.key !== "Escape") return;
+    const open = document.querySelectorAll(".grid-wrap.dt-grid.gi-max");
+    if (!open.length) return;
+    open.forEach(w=>w.classList.remove("gi-max"));
+    document.body.classList.remove("gi-max-open");
+  });
+}
 function freezeLeadCols(tbl){
   ensureFreezeResizeHandler();
   const head = tbl.tHead; if(!head || !head.rows.length) return;
-  const ref = head.rows[head.rows.length-1];          // hr2: exactly one cell per leaf column
+  const body = tbl.tBodies[0];
+  // Measure the fixed-column widths from a row whose leading cells ARE the leaf
+  // identity columns: a body row (its cells 0..2 = actions/Category/Item). hr2 no
+  // longer carries those cells (they rowspan from hr1), so it can't be the ref.
+  const ref = (body && body.rows[0]) || head.rows[head.rows.length-1];
   const lefts=[]; let acc=0;
   for(let i=0;i<GI_FREEZE_N;i++){
     if(!ref.cells[i]) return;                          // fewer columns than the freeze count: skip
     lefts.push(acc); acc += ref.cells[i].getBoundingClientRect().width;
   }
   if(acc<=0) return;                                   // not laid out / hidden: don't pin to 0
-  for(const tr of tbl.rows){
+  // Pin the fixed columns on the rows that actually start with them: the first
+  // header row (its fixed th's rowspan both header rows) + every body row. hr2's
+  // leading cells are sim-axis sub-labels, so it must NOT be pinned.
+  const rows = [head.rows[0]];
+  if (body) for (const r of body.rows) rows.push(r);
+  for(const tr of rows){
     for(let i=0;i<GI_FREEZE_N;i++){
       const c = tr.cells[i]; if(!c) continue;
       c.classList.add("gi-freeze");
@@ -4004,7 +4139,7 @@ function textCell(ctx, row, key, ri, c){
 // numeric cell bound to row[key]; flags non-numeric input but keeps the raw text
 function numCell(ctx, row, key, ri, c, after){
   const cell = el("div",{class:"cell", text:fmtNum(row[key])});
-  const td = el("td",{},[cell]);
+  const td = el("td",{class:"num-val"},[cell]);
   regCell(ctx, { r:ri, c, type:"number", el:cell,
     read:()=> fmtNum(row[key]),
     write:(s)=>{ const v=parseNum(s); row[key]=v; cell.textContent = s==="" ? "" : s; flagNumber(cell, v); markDirty(); after&&after(); } });
@@ -4014,7 +4149,7 @@ function numCell(ctx, row, key, ri, c, after){
 function numArrCell(ctx, row, key, idx, ri, c, after){
   row[key] = row[key] || [null,null,null];
   const cell = el("div",{class:"cell", text:fmtNum(row[key][idx])});
-  const td = el("td",{},[cell]);
+  const td = el("td",{class:"num-val"},[cell]);
   regCell(ctx, { r:ri, c, type:"number", el:cell,
     read:()=> fmtNum(row[key][idx]),
     write:(s)=>{ row[key]=row[key]||[null,null,null]; const v=parseNum(s); row[key][idx]=v; cell.textContent = s==="" ? "" : s; flagNumber(cell, v); markDirty(); after&&after(); } });
@@ -4060,11 +4195,15 @@ function simAxisCell(ctx, row, axisLabel, gkey, ri, flatIdx, c, after){
 }
 // select cell bound to row[key]; the typed write() matches the pasted string
 // against the allowed option values and refuses to store garbage (decision 5).
-function selectCell(ctx, row, ri, c, key, allowEmpty, options, fallback, after){
+function selectCell(ctx, row, ri, c, key, allowEmpty, options, fallback, after, labels){
+  // `labels` (optional) maps a stored value -> a short display label; the stored
+  // value and the paste-match set (options) are unchanged, so data/lint/paste are
+  // unaffected -- only the visible text shrinks (e.g. common_setting -> "common").
+  const disp = (v)=> (labels && labels[v] != null) ? labels[v] : v;
   const sel = el("select",{class:"cell", style:{border:"0",width:"100%"},
     onchange:(e)=>{ row[key] = e.target.value || (allowEmpty?null:fallback); markDirty(); after&&after(); }});
   if (allowEmpty) sel.appendChild(el("option",{value:"",text:"—"}));
-  options.forEach(v=>{ const o=el("option",{value:v,text:v}); if((row[key]||"")===v) o.selected=true; sel.appendChild(o); });
+  options.forEach(v=>{ const o=el("option",{value:v,text:disp(v)}); if((row[key]||"")===v) o.selected=true; sel.appendChild(o); });
   const td = el("td",{},[sel]);
   regCell(ctx, { r:ri, c, type:"select", el:sel,
     read:()=> row[key]==null ? "" : String(row[key]),

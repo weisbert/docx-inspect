@@ -34,7 +34,7 @@ function stub() {
       if (prop === Symbol.toPrimitive) return () => "";
       if (prop === "length") return 0;
       if (prop === "classList") return { add(){}, remove(){}, toggle(){}, contains(){return false} };
-      if (prop === "style") return {};
+      if (prop === "style") return { setProperty(){}, removeProperty(){}, getPropertyValue(){return "";} };
       if (prop === "value") return "";
       if (prop === "dataset") return {};
       return P;
@@ -184,6 +184,27 @@ vm.runInContext("App.project={outline:[{id:'S',title:'Sec',blocks:[" +
 try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sandbox);
   ok(true, "renderNodeEditor runs (text card + image + table w/ xlsx button)"); }
 catch (e) { ok(false, "renderNodeEditor runs (text card + image + table w/ xlsx button)", e && e.message); }
+
+// Datatable editor smoke: a multi-sim compliance table (cdr flat + pdr per-sim, a
+// setting row, a repeated Category) exercises editDatatable/rebuildMetrics -- the
+// setting-row banding, cat-repeat dimming, rowspan header, and per-key value read.
+vm.runInContext("App.config.compliance = " + JSON.stringify({
+  axis_labels:["MIN","TYP","MAX"], setting_kinds:["common_setting","module_setting","tb"], fills:{setting:"EEECE1"}
+}) + ";", sandbox);
+const dtBlock = JSON.stringify({ type:"datatable", id:"dtc", caption:"c", data:{
+  spec_name:"Spec", show_spec:true,
+  sims:[{key:"cdr",title:"CDR",stage:"post",axes:["MIN","TYP","MAX"]},
+        {key:"pdr",title:"PDR",stage:"pre",axes:["MIN","TYP","MAX"]}],
+  rows:[
+    {cat:"PVT",item:"Temp",kind:"common_setting",unit:"",limit:null,spec_mtm:[null,null,null],sim_mtm:[null,null,null],sim_ntwc:null},
+    {cat:"PVT",item:"Process",kind:"common_setting",unit:"",limit:null,spec_mtm:[null,null,null],sim_mtm:["TT/SS/FF",null,null],sim_ntwc:null,sim_span:true},
+    {cat:"Supply",item:"I_total",kind:"result",unit:"uA",limit:"le",spec_mtm:[null,null,500],sim_mtm:[495,659,872],sim_ntwc:872,sims:{pdr:{mtm:[null,490,758],ntwc:758}}},
+    {cat:"Supply",item:"I_core",kind:"result",unit:"uA",limit:null,spec_mtm:[null,null,null],sim_mtm:[243,366,509],sim_ntwc:509,sims:{pdr:{mtm:[null,366,null],ntwc:null}}}
+  ]}});
+vm.runInContext("App.project={outline:[{id:'D',title:'Comp',blocks:[" + dtBlock + "],children:[]}]};", sandbox);
+try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sandbox);
+  ok(true, "renderNodeEditor runs (multi-sim compliance datatable editor)"); }
+catch (e) { ok(false, "renderNodeEditor runs (multi-sim compliance datatable editor)", e && e.message); }
 
 console.log(fails ? ("\nFAILURES: " + fails) : "\nALL APP-LOGIC TESTS PASSED");
 process.exit(fails ? 1 : 0);
