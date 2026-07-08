@@ -186,6 +186,14 @@ def dump_table(tbl, sprops, tmap):
     rows = tbl.findall(qn("w:tr"))
     print("  TABLE %d rows x %d cols  col_w=%s" % (len(rows), len(widths), widths))
     for ri, tr in enumerate(rows):
+        rh = "auto"
+        trpr = tr.find(qn("w:trPr"))
+        if trpr is not None:
+            th = trpr.find(qn("w:trHeight"))
+            if th is not None and th.get(qn("w:val")):
+                rh = "%.2fcm(%s)" % (int(th.get(qn("w:val"))) / 567.0,
+                                     th.get(qn("w:hRule")) or "atLeast")
+        print("   row %d  height=%s" % (ri, rh))
         for ci, tc in enumerate(tr.findall(qn("w:tc"))):
             tcpr = tc.find(qn("w:tcPr"))
             fill = None

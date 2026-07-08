@@ -522,9 +522,13 @@ def render_datatable(doc, data, cfg):
 # Public: free-table renderer (arbitrary rows/cols)
 # ---------------------------------------------------------------------------
 def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
-                      row_fills=None, header_fill=None):
+                      row_fills=None, header_fill=None, row_h=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
         header_fill, border{val,sz,color}, font_pt(optional).
+
+    ``row_h`` (optional): a per-row height in cm -- a dict {row_index: cm} or a
+    single cm applied to every row. Set AT_LEAST (not exact), so a form table keeps
+    its designed empty-row height but a cell that is later filled can still grow.
 
     ``header_fill`` (optional): a per-table hex6 header colour that overrides the
     config default -- lets a table library preset carry its own header shade (e.g.
@@ -584,5 +588,12 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     for m in (merges or []):
         r, c, rs, cs = m["r"], m["c"], m.get("rs", 1), m.get("cs", 1)
         table.cell(r, c).merge(table.cell(r + rs - 1, c + cs - 1))
+
+    if row_h is not None:
+        for r in range(nrows):
+            h = (row_h.get(str(r), row_h.get(r)) if isinstance(row_h, dict) else row_h)
+            if h is not None:
+                table.rows[r].height = Cm(float(h))
+                table.rows[r].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
 
     return {"table": table, "total_rows": nrows, "flagged_rows": 0, "warnings": []}

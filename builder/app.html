@@ -1347,6 +1347,8 @@ function tableFromPreset(p){
              col_w: p.col_w || null };
     if (p.header_fill) b.header_fill = p.header_fill;   // preset-carried header shade
     if (p.row_fills) b.row_fills = JSON.parse(JSON.stringify(p.row_fills));  // preset band fills
+    if (p.row_h != null) b.row_h = (typeof p.row_h === "object")
+      ? JSON.parse(JSON.stringify(p.row_h)) : p.row_h;  // preset row heights
     return b;
   }
   const specSims = (Array.isArray(p.sims) && p.sims.length)
@@ -4985,14 +4987,19 @@ function previewFreeTable(block, chap, seq){
   }
   const rfills = block.row_fills || null;            // {rowIndex: "RRGGBB"} band fills
   const hfill = block.header_fill ? ("#" + block.header_fill) : null;  // per-table header shade
+  const rowH = block.row_h;                          // per-row cm {idx:cm} or a single cm
+  const rhOf = (ri)=> rowH == null ? null
+      : (typeof rowH === "object" ? (rowH[ri] != null ? rowH[ri] : rowH[String(ri)]) : rowH);
   (block.rows || []).forEach((row, ri)=>{
     const tr = el("tr",{class: ri < hr ? "pv-hdr" : ""});
     const band = (rfills && ri >= hr && rfills[ri] != null) ? ("#" + rfills[ri]) : null;
+    const rh = rhOf(ri);
     (row || []).forEach(cell=>{
       const td = el(ri < hr ? "th" : "td", {class:"pv-td"});
       td.innerHTML = cellHtml(cell);                 // styled runs render as HTML
       if (ri < hr && hfill) td.style.background = hfill;
       else if (band) td.style.background = band;
+      if (rh != null) td.style.height = rh + "cm";   // min-height in table cells
       tr.appendChild(td);
     });
     tbl.appendChild(tr);
