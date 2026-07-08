@@ -3993,15 +3993,13 @@ function editDatatable(host, block){
       rowHandle.addEventListener("mousedown",()=>tr.setAttribute("draggable","true"));
       tr.addEventListener("dragend",()=>tr.setAttribute("draggable","false"));
       actTd.insertBefore(rowHandle, actTd.firstChild);
-      // D9: sim_span toggle (merge this row's single value into one wide cell
-      // across ALL sim groups' columns in the exported table -- so a common
-      // condition like Process / Noise reads as one merged cell across CDR + PDR).
-      // Guarded by the total sim axis count (<2 has nothing to merge).
-      const totalSimAx = (data.sims||[]).reduce((a,s)=>a + ((s.axes||[]).length), 0);
-      const spanOk = totalSimAx >= 2;
+      // D9: sim_span toggle -- merge this row's value within EACH sim group into
+      // one wide cell (CDR's MIN/TYP/MAX -> 1 cell, PDR's -> 1 cell, separately).
+      // Guarded by whether any sim group has >=2 axes to merge.
+      const spanOk = (data.sims||[]).some(s => ((s.axes||[]).length) >= 2);
       const spanWrap = el("label",{class:"span-toggle",
-        title: spanOk ? T("datatable.sim_span_hint","Span: merge this row's value into one wide cell across ALL sim columns on export")
-                      : T("datatable.sim_span_blocked","Span needs at least 2 sim axis columns")});
+        title: spanOk ? T("datatable.sim_span_hint","Span: merge this row's MIN/TYP/MAX into one cell per sim group (CDR, PDR separately) on export")
+                      : T("datatable.sim_span_blocked","Span needs a sim group with at least 2 axes")});
       const spanCb = el("input",{type:"checkbox"});
       spanCb.checked = !!row.sim_span;
       if (!spanOk) spanCb.disabled = true;
@@ -4037,21 +4035,22 @@ function editDatatable(host, block){
           else tr.appendChild(numCell(ctx, row,"spec_ntwc", ri, c++, ()=>validate()));   // F9: NTWC spec is editable
         });
       }
-      // sim axes — P1.3 honors sim_span like the export: the single value merges
-      // across ALL sim groups' axis columns into ONE wide editable cell (bound to
-      // the first group's MIN); the covered columns become grid holes (adapterAt()
-      // returns null there, which the select/paste layer already tolerates).
-      // `flat` = the flat axis index (data-flatax debug attr); `c` = grid column.
-      const spanRow = !!row.sim_span && totalSimAx >= 2;
+      // sim axes — honors sim_span like the export: PER-GROUP merge. Each sim
+      // group's axes merge into ONE wide editable cell (bound to that group's MIN);
+      // the covered columns become grid holes (adapterAt() returns null there,
+      // which the select/paste layer already tolerates). CDR and PDR merge
+      // separately. `flat` = flat axis index; `c` = running grid column.
       let flat=0;
       data.sims.forEach((s, si)=>{
+        const axn = (s.axes||[]).length;
+        const spanG = !!row.sim_span && axn >= 2;
         (s.axes||[]).forEach((ax, ai)=>{
-          if (spanRow && si===0 && ai===0){
+          if (spanG && ai===0){
             const td = simAxisCell(ctx, row, ax, s.key, ri, flat, c, ()=>validate());
-            td.setAttribute("colspan", String(totalSimAx));
-            tr.appendChild(td); c += totalSimAx;
-          } else if (spanRow){
-            /* covered by the colspan above; c already advanced past these */
+            td.setAttribute("colspan", String(axn));
+            tr.appendChild(td); c += axn;
+          } else if (spanG){
+            /* covered by this group's colspan above */
           } else {
             tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, c, ()=>validate())); c++;
           }
@@ -5348,17 +5347,12 @@ function previewDatatable(block, chap, seq){
     let j = i; while (j+1 < rows.length && rows[j+1].cat === rows[i].cat) j++;
     catFirst.add(i); catSpan[i] = j - i + 1; i = j + 1;
   }
-  // sim_span rows merge the single value across ALL sim groups' axis columns
-  // (plus the inter-group spacers) into one wide cell -- mirror render_datatable.
-  let simAxFirst = -1, simAxLast = -1;
-  plan.forEach((p, ix)=>{ if (p.kind==="axis" && p.role==="sim"){ if (simAxFirst<0) simAxFirst=ix; simAxLast=ix; } });
-  const simSpanCols = simAxFirst >= 0 ? (simAxLast - simAxFirst + 1) : 0;
 
   rows.forEach((row, ri)=>{
     const band  = settingKinds.has(row.kind) ? F.setting : F.result;
     const tr = el("tr",{});
     let skip = 0;   // sim_span: skip the merged-away axis cells
-    plan.forEach((p, pix)=>{
+    plan.forEach((p)=>{
       if (p.kind === "cat"){
         if (catFirst.has(ri)) tr.appendChild(cell("td",{rowspan:catSpan[ri], fill:band, bold:true, text:row.cat||""}));
         return;   // non-first rows: covered by the rowspan above
@@ -5369,19 +5363,19 @@ function previewDatatable(block, chap, seq){
       if (p.kind === "spec")   return void tr.appendChild(cell("td",{fill:band, text:dtFmt(row.spec)}));
       if (p.kind === "spacer") return void tr.appendChild(cell("td",{fill:band, cls:"pv-spacer"}));
       if (p.kind === "axis"){
-        // sim_span row: the single value merges across ALL sim groups' axis
-        // columns into one wide cell (mirror render_datatable). Show the first
-        // non-null axis value; no red flag on a spanning setting row.
-        if (row.sim_span && p.role === "sim" && pix === simAxFirst && simSpanCols > 0){
-          let spanVal = null;
-          for (const q of plan){
-            if (q.kind === "axis" && q.role === "sim"){
-              const vv = dtAxisValue(row, q.group, q.axis);
-              if (vv !== null && vv !== undefined && vv !== ""){ spanVal = vv; break; }
-            }
+        // per-group sim_span: each sim group merges its OWN axes into one wide
+        // cell (CDR 3->1, PDR 3->1, SEPARATELY). At a group's first axis, emit one
+        // cell spanning that group's axes with its first non-null value, then skip
+        // the group's remaining axes. No red flag on a spanning setting row.
+        if (row.sim_span && p.role === "sim" && p.axis === 0){
+          const axn = (p.g.axes || []).length;
+          let gv = null;
+          for (let a = 0; a < axn; a++){
+            const vv = dtAxisValue(row, p.group, a);
+            if (vv !== null && vv !== undefined && vv !== ""){ gv = vv; break; }
           }
-          tr.appendChild(cell("td",{colspan:simSpanCols, fill:band, cls:"pv-num", text:dtFmt(spanVal)}));
-          skip = simSpanCols - 1;
+          tr.appendChild(cell("td",{colspan:axn, fill:band, cls:"pv-num", text:dtFmt(gv)}));
+          skip = axn - 1;
           return;
         }
         const red = (p.role === "sim" && dtFlagsFor(row, p.group).has(p.axis));

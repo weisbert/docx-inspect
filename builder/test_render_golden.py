@@ -746,7 +746,8 @@ def main():
     check(2 in tables._flags_from(ps_row2, *tables._sim_axis_vals(ps_row2, "pdr")),
           "per-sim flag: comparison column reds when IT is out of spec")
 
-    # --- sim_span full-span: one value merges across ALL sim groups (CDR+PDR) ---
+    # --- sim_span per-group merge: EACH sim group merges its OWN axes (CDR's 3 ->
+    #     1, PDR's 3 -> 1, SEPARATELY -- not one cell across both) ---
     def _span_data(span):
         return {"show_spec": False,
                 "sims": [{"key": "post", "title": "Post", "axes": ["MIN", "TYP", "MAX"]},
@@ -761,11 +762,13 @@ def main():
     def _row_distinct(tbl, r):
         return len({id(c._tc) for c in tbl.rows[r].cells})
     check(_row_distinct(span_on, 3) < _row_distinct(span_off, 3),
-          "sim_span merges sim cells across all groups (fewer distinct cells than unmerged)",
+          "sim_span merges each group's axis cells (fewer distinct cells than unmerged)",
           "on=%d off=%d" % (_row_distinct(span_on, 3), _row_distinct(span_off, 3)))
+    # value appears once PER GROUP -> two distinct merged cells (post + pre),
+    # proving the groups merge SEPARATELY, not into one cell across both.
     span_val_cells = {id(c._tc) for c in span_on.rows[3].cells if "TT/SS/FF" in c.text}
-    check(len(span_val_cells) == 1,
-          "sim_span: value shown once in the merged wide cell across CDR + PDR",
+    check(len(span_val_cells) == 2,
+          "sim_span per-group: value shown once in EACH group's own merged cell (CDR+PDR=2)",
           "value appears in %d distinct cells" % len(span_val_cells))
 
     return _finish()

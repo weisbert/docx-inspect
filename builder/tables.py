@@ -462,24 +462,25 @@ def render_datatable(doc, data, cfg):
             # per-axis width no longer bounds the text, so skip the clip check
             # for sim cells (would otherwise over-warn on a non-clipping merge).
             span = bool(row.get("sim_span"))
-            # full-span: a single value merges across ALL sim groups' axis columns
-            # (the whole simulation area, engulfing the inter-group spacer) into one
-            # wide cell -- so a common condition like Process / Noise reads as one
-            # merged cell across CDR + PDR, not just the first group. The displayed
-            # value is the first non-null axis value scanned across the sim groups.
-            span_cols = sorted(c for g in sim_groups
-                               for c in group_axis_cols[g["key"]]) if span else []
-            span_first_col = span_cols[0] if span_cols else None
-            span_val = None
+            # per-group span: each sim group merges its OWN axis cells into one wide
+            # cell independently (CDR's 3 -> 1, PDR's 3 -> 1, SEPARATELY -- not one
+            # cell across both). Each merged cell shows that group's first non-null
+            # axis value. A group's axis columns are contiguous (the spacer sits
+            # BEFORE each group), so merging cc[0]..cc[-1] never engulfs a spacer.
+            group_span = {}          # gkey -> (first_axis_col, display value)
             if span:
+                saw_sim_span = True
                 for g in sim_groups:
+                    cc = group_axis_cols[g["key"]]
+                    if not cc:
+                        continue
+                    gval = None
                     for ai in range(len(g["axes"])):
                         vv = _axis_value(row, g["key"], ai)
                         if vv is not None and str(vv) != "":
-                            span_val = vv
+                            gval = vv
                             break
-                    if span_val is not None:
-                        break
+                    group_span[g["key"]] = (cc[0], gval)
             for idx, p in enumerate(plan):
                 if p["kind"] == "cat":
                     continue
@@ -494,11 +495,11 @@ def render_datatable(doc, data, cfg):
                     _set_cell_text(table.cell(r, idx), row.get("spec"), font_pt)
                     _clip_check(row.get("spec"), p["w"], "spec", row_label)
                 elif p["kind"] == "axis":
-                    if span and p["role"] == "sim":
-                        # the merged wide cell carries the value only in its first
-                        # axis cell; the rest are blanked so the merge does not
-                        # duplicate text. No red flag on a spanning setting row.
-                        txt = _fmt_val(span_val) if idx == span_first_col else ""
+                    if span and p["role"] == "sim" and p["group"] in group_span:
+                        # this group's merged cell holds its value in the first axis
+                        # cell; the rest blanked so the merge does not duplicate.
+                        first_col, gval = group_span[p["group"]]
+                        txt = _fmt_val(gval) if idx == first_col else ""
                         _set_cell_text(table.cell(r, idx), txt, font_pt)
                         continue
                     v = _axis_value(row, p["group"], p["axis"])
@@ -512,13 +513,12 @@ def render_datatable(doc, data, cfg):
                                    bold=red, color=(flag_color if red else None))
                     _clip_check(_fmt_val(v), p["w"],
                                 "%s.%s" % (p["group"], p["label"]), row_label)
-            if span and span_cols:
-                saw_sim_span = True
-                lo, hi = span_cols[0], span_cols[-1]
-                # merge from the first sim group's first axis to the last group's
-                # last axis; a single group with <3 axes just merges what it has.
-                if hi > lo:
-                    table.cell(r, lo).merge(table.cell(r, hi))
+            if span:
+                # merge each sim group's own axis columns, independently per group.
+                for g in sim_groups:
+                    cc = group_axis_cols[g["key"]]
+                    if len(cc) >= 2:
+                        table.cell(r, cc[0]).merge(table.cell(r, cc[-1]))
         # vertical merge of the category column
         cc = col_of["cat"]
         r0, r1 = start + g0, start + g1
@@ -527,15 +527,15 @@ def render_datatable(doc, data, cfg):
         _shade(table.cell(r0, cc), band)
         _set_cell_text(table.cell(r0, cc), rows[g0].get("cat", ""), font_pt, bold=True)
 
-    # sim_span diagnostics (emitted once per table, not per row). The value now
-    # merges across ALL sim groups, so there is no "only the first group" case.
+    # sim_span diagnostics (emitted once per table, not per row). Each sim group
+    # merges independently, so a group needs >=2 axis columns to merge at all.
     if saw_sim_span:
-        total_axis_cols = sum(len(group_axis_cols[g["key"]]) for g in sim_groups)
-        if total_axis_cols < 2:
+        thin = [g["key"] for g in sim_groups if len(group_axis_cols[g["key"]]) < 2]
+        if thin:
             warnings.append({
                 "type": "sim_span_unmergeable",
-                "detail": "sim_span row(s) but the sim area has %d axis column(s) "
-                          "(<2); nothing to merge" % total_axis_cols,
+                "detail": "sim_span row(s) but sim group(s) %s have <2 axis "
+                          "column(s); not merged" % ", ".join(thin),
                 "location": "datatable"})
 
     # ---- exact fixed row heights: shrink inline, never spill / rotate ----
