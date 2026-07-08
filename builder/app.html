@@ -3583,9 +3583,6 @@ function parseTSV(txt){
 /* ============================================================================
    BLOCK EDITOR ③  DATATABLE (compliance)
 ============================================================================ */
-// fixed (non-axis) column count of the compliance grid:
-// cat,item,unit,kind,limit,spec,spec_mtm[0..2]
-const DT_FIXED_COLS = 9;
 function editDatatable(host, block){
   block.data = block.data || blankComplianceData();
   // `data` is re-synced from block.data on every rebuild because undo replaces
@@ -3602,7 +3599,18 @@ function editDatatable(host, block){
   // engine/preview; the editor drops the Spec + Spec-MTM columns and shifts the sim
   // axis column indices so the select/paste layer stays gap-free.
   const specShown = ()=> data.show_spec !== false;
-  const fixedCols = ()=> specShown() ? DT_FIXED_COLS : DT_FIXED_COLS - 4;
+  // Column model (running-counter based; no hardcoded indices). Visual + grid-c
+  // order: cat, item, kind, limit, [scalar Spec?], spec axes, sim axes, Unit LAST
+  // (P2.1: Unit last matches the exported table). The scalar Spec column is dropped
+  // when no row uses it (P2.3), and the spec axes follow axis_labels so a 4th (NTWC)
+  // spec column is editable when configured (P2.3/F9).
+  const specAxisLabels = ()=> defaultAxes;
+  const scalarSpecShown = ()=> specShown() && data.rows.some(r => r.spec != null);
+  const simAxisTotal = ()=> data.sims.reduce((n,s)=>n+(s.axes||[]).length,0);
+  const gridCols = ()=> {
+    const specCols = specShown() ? ((scalarSpecShown()?1:0) + specAxisLabels().length) : 0;
+    return 4 + specCols + simAxisTotal() + 1;   // cat,item,kind,limit + spec + sims + unit
+  };
 
   // caption + spec name
   const top = el("div",{class:"field-row"});
@@ -3836,7 +3844,7 @@ function editDatatable(host, block){
   const ctx = makeGridContext({
     block, host:metricWrap, kind:"compliance",
     rows:()=> data.rows.length,
-    cols:()=> fixedCols() + data.sims.reduce((n,s)=>n+(s.axes||[]).length,0),
+    cols:()=> gridCols(),
     // re-sync `data` after an undo swaps block.data, then rebuild BOTH layers so the
     // group/axis chip strip and its index-bound handlers match the restored data.
     rerender:()=>{ data = block.data; redrawSims(); rebuildMetrics(); },
@@ -3929,6 +3937,9 @@ function editDatatable(host, block){
     const flatAxes = []; // {si, ai, label}
     data.sims.forEach((s, si)=> (s.axes||[]).forEach((ax, ai)=> flatAxes.push({si, ai, label:ax})));
 
+    const sAxes = specAxisLabels();          // spec group columns (MIN/TYP/MAX[/NTWC])
+    const scalarSpec = scalarSpecShown();    // P2.3: only when some row uses the scalar Spec
+
     const thead = el("thead");
     const hr1 = el("tr",{class:"hdr"});
     // P1.5: fixed single-column headers span BOTH header rows (rowspan=2) so hr2 is
@@ -3938,19 +3949,19 @@ function editDatatable(host, block){
     hr1.appendChild(fixTh());                                      // row-actions column
     hr1.appendChild(fixTh({html:T("datatable.col.cat","Category")}));
     hr1.appendChild(fixTh({html:T("datatable.col.item","Item")}));
-    hr1.appendChild(fixTh({html:T("datatable.col.unit","Unit")}));
     hr1.appendChild(fixTh({html:T("datatable.col.kind","Kind")}));
     hr1.appendChild(fixTh({html:T("datatable.col.limit","Limit")}));
     if (specShown()){
-      hr1.appendChild(fixTh({html:T("datatable.col.spec","Spec")}));
-      hr1.appendChild(el("th",{html:T("datatable.col.spec_mtm","Spec MIN/TYP/MAX"), colspan:3}));
+      if (scalarSpec) hr1.appendChild(fixTh({html:T("datatable.col.spec","Spec")}));
+      hr1.appendChild(el("th",{html:T("datatable.col.spec","Spec")+" "+sAxes.join("/"), colspan:sAxes.length}));
     }
     data.sims.forEach(s=> hr1.appendChild(el("th",{text:(s.title||s.stage||s.key||"sim"), colspan:(s.axes||[]).length})));
+    hr1.appendChild(fixTh({html:T("datatable.col.unit","Unit")}));   // P2.1: Unit is the last column
     thead.appendChild(hr1);
 
     const hr2 = el("tr",{class:"hdr"});
-    // only the colspan groups need a 2nd header row: Spec MIN/TYP/MAX + each sim's axes
-    if (specShown()) ["MIN","TYP","MAX"].forEach(x=>hr2.appendChild(el("th",{text:x})));
+    // only the colspan groups need a 2nd header row: Spec axes + each sim's axes
+    if (specShown()) sAxes.forEach(x=>hr2.appendChild(el("th",{text:x})));
     flatAxes.forEach(fa=> hr2.appendChild(el("th",{text:fa.label})));
     thead.appendChild(hr2);
     tbl.appendChild(thead);
@@ -3983,46 +3994,53 @@ function editDatatable(host, block){
       actTd.appendChild(spanWrap);
       tr.appendChild(actTd);
       wireMetricRowDrag(tr, ri);
-      // fixed columns 0..8 (column index = factory arg `c`)
-      const catTd = textCell(ctx, row,"cat",  ri, 0);
+      // Grid columns via a running counter `c` (order mirrors the header + the
+      // exported table): cat, item, kind, limit, [scalar Spec?], spec axes, sim
+      // axes, Unit LAST. No hardcoded indices, so P2.1/P2.3 layout shifts stay
+      // self-consistent for the select/paste/fill coordinate layer.
+      let c = 0;
+      const catTd = textCell(ctx, row,"cat", ri, c++);
       // P1.4: dim a Category that repeats the row above (display-only echo of the
       // preview's vertical merge; the cell stays fully editable).
       if (ri>0 && row.cat && data.rows[ri-1] && data.rows[ri-1].cat===row.cat)
         catTd.classList.add("cat-repeat");
       tr.appendChild(catTd);
-      tr.appendChild(textCell(ctx, row,"item", ri, 1));
-      tr.appendChild(textCell(ctx, row,"unit", ri, 2));
-      tr.appendChild(selectCell(ctx, row, ri, 3, "kind", false,
+      tr.appendChild(textCell(ctx, row,"item", ri, c++));
+      tr.appendChild(selectCell(ctx, row, ri, c++, "kind", false,
         ["common_setting","module_setting","tb","result"], "result", ()=>validate(),
         {common_setting:"common", module_setting:"module", tb:"tb", result:"result"}));
-      tr.appendChild(selectCell(ctx, row, ri, 4, "limit", true,
+      tr.appendChild(selectCell(ctx, row, ri, c++, "limit", true,
         ["le","ge","range"], null, ()=>validate()));
       if (specShown()){
-        tr.appendChild(numCell(ctx, row,"spec", ri, 5, ()=>validate()));
-        [0,1,2].forEach(k=> tr.appendChild(numArrCell(ctx, row,"spec_mtm", k, ri, DT_FIXED_COLS-3+k, ()=>validate())));
+        if (scalarSpec) tr.appendChild(numCell(ctx, row,"spec", ri, c++, ()=>validate()));
+        sAxes.forEach(ax=>{
+          const mi = MTM_AXES[String(ax).toUpperCase()];
+          if (mi != null) tr.appendChild(numArrCell(ctx, row,"spec_mtm", mi, ri, c++, ()=>validate()));
+          else tr.appendChild(numCell(ctx, row,"spec_ntwc", ri, c++, ()=>validate()));   // F9: NTWC spec is editable
+        });
       }
-      // sim axes (flat) — map axis label to sim_mtm[0..2] or sim_ntwc
-      // P1.3: honor sim_span like the exported table -- the first sim group's
-      // MIN/TYP/MAX merge into ONE wide editable cell (bound to MIN). The two
-      // covered columns are left unrendered; adapterAt() returns null for those
-      // (r,c) so the select/paste layer skips them (a merged cell holds one value),
-      // while `flat` still advances by 3 so later groups keep their column indices.
+      // sim axes — P1.3 honors sim_span like the export: the first sim group's
+      // MIN/TYP/MAX merge into ONE wide editable cell (bound to MIN); the two
+      // covered columns become grid holes (adapterAt() returns null there, which
+      // the select/paste layer already tolerates). `flat` = the flat axis index
+      // (data-flatax debug attr); `c` = the running grid column.
       const spanRow = !!row.sim_span && ((((data.sims||[])[0]||{}).axes)||[]).length >= 3;
       let flat=0;
       data.sims.forEach((s, si)=>{
         (s.axes||[]).forEach((ax, ai)=>{
           if (spanRow && si===0 && ai===0){
-            const td = simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate());
+            const td = simAxisCell(ctx, row, ax, s.key, ri, flat, c, ()=>validate());
             td.setAttribute("colspan","3");
-            tr.appendChild(td);
+            tr.appendChild(td); c += 3;
           } else if (spanRow && si===0 && ai>=1 && ai<=2){
-            /* covered by the colspan above; skip rendering, still bump flat */
+            /* covered by the colspan above; c already advanced past these */
           } else {
-            tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, fixedCols()+flat, ()=>validate()));
+            tr.appendChild(simAxisCell(ctx, row, ax, s.key, ri, flat, c, ()=>validate())); c++;
           }
           flat++;
         });
       });
+      tr.appendChild(textCell(ctx, row,"unit", ri, c++));   // P2.1: Unit is the last grid column
       // P0.2: band setting rows beige (mirror the exported table) so their
       // legitimately-empty spec/sim cells read as intentional, not as blank waste.
       if (settingKinds.has(row.kind)){
