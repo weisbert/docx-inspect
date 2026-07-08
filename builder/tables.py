@@ -206,16 +206,15 @@ def _violates(limit, nv, smin, smax, en, styp):
     return False
 
 
-def flag_positions(row):
-    """Axis indices in the simulation group that violate the row's limit.
+def _flags_from(row, mtm, ntwc):
+    """Axis indices in a sim group's [MIN,TYP,MAX(,NTWC)] that violate the row's
+    limit, evaluated against the values passed in (``mtm`` triple + ``ntwc``).
 
-    Indices 0/1/2 are the simulation [MIN,TYP,MAX] triple; index 3 is the NTWC
-    corner (``_axis_value`` lays the sim group out as [MIN,TYP,MAX,NTWC]). NTWC
-    is evaluated against its own spec threshold (``spec_ntwc``) when present,
-    otherwise it falls back to the same MTM-derived thresholds as the triple --
-    so a None NTWC (no corner value) is never flagged. Backward-tolerant: callers
-    that only ever looked at {0,1,2} keep working; index 3 is added only when an
-    NTWC value is out of spec.
+    Split out from ``flag_positions`` so a multi-simulation table can flag each
+    sim group against its OWN numbers -- a PDR/reference comparison column is
+    judged by its own values, not the primary sim's. Index 3 is the NTWC corner,
+    compared to ``spec_ntwc`` when present else the MTM-derived thresholds; a None
+    NTWC is never flagged.
 
     Directions: ``le`` (<= upper bound) / ``ge`` (>= target) / ``range`` ([MIN,MAX]).
     Thresholds are taken from the row's spec triple / scalar spec. No hardcoded numbers.
@@ -224,16 +223,13 @@ def flag_positions(row):
     if not limit:
         return set()
     sm = row.get("spec_mtm") or [None, None, None]
-    sim = row.get("sim_mtm") or [None, None, None]
     smin, styp, smax = _numv(sm[0]), _numv(sm[1]), _numv(sm[2])
     en = _numv(row.get("spec"))
     flags = set()
-    for i, v in enumerate(sim):
+    for i, v in enumerate(mtm or []):
         if _violates(limit, _numv(v), smin, smax, en, styp):
             flags.add(i)
-    # NTWC corner = axis index 3. Prefer the NTWC-specific spec bound; if the
-    # template carries no spec_ntwc, reuse the MTM-derived thresholds.
-    nt = _numv(row.get("sim_ntwc"))
+    nt = _numv(ntwc)
     if nt is not None:
         nspec = _numv(row.get("spec_ntwc"))
         n_smin = nspec if nspec is not None else smin
@@ -242,6 +238,26 @@ def flag_positions(row):
         if _violates(limit, nt, n_smin, n_smax, n_en, styp):
             flags.add(3)
     return flags
+
+
+def _sim_axis_vals(row, gkey):
+    """A sim group's (mtm_triple, ntwc): per-sim ``row['sims'][gkey]`` when present,
+    else the flat ``sim_mtm``/``sim_ntwc``. Mirrors ``_axis_value``'s fallback."""
+    sims = row.get("sims")
+    if isinstance(sims, dict) and gkey in sims:
+        sv = sims.get(gkey) or {}
+        return (sv.get("mtm") or [None, None, None]), sv.get("ntwc")
+    return (row.get("sim_mtm") or [None, None, None]), row.get("sim_ntwc")
+
+
+def flag_positions(row):
+    """Backward-compatible flat-schema flags (the row's ``sim_mtm``/``sim_ntwc``).
+
+    Kept for callers such as the GUI validate endpoint. ``render_datatable`` flags
+    each sim group by its own values via ``_flags_from`` + ``_sim_axis_vals``.
+    """
+    return _flags_from(row, row.get("sim_mtm") or [None, None, None],
+                       row.get("sim_ntwc"))
 
 
 def _default_axes(cfg):
@@ -435,8 +451,11 @@ def render_datatable(doc, data, cfg):
             row = rows[gi]
             r = start + gi
             band = fills["setting"] if row.get("kind") in setting_kinds else fills["result"]
-            flags = flag_positions(row)
-            if flags:
+            # Flag each sim group against ITS OWN values (per-sim), so a comparison
+            # column (e.g. PDR) reds only where it itself is out of spec.
+            flags_by_group = {g["key"]: _flags_from(row, *_sim_axis_vals(row, g["key"]))
+                              for g in sim_groups}
+            if any(flags_by_group.values()):
                 flagged_rows += 1
             row_label = "row %d (%s)" % (gi, row.get("item", ""))
             # When a row merges its sim axis cells into one wide cell, the
@@ -458,7 +477,8 @@ def render_datatable(doc, data, cfg):
                     _clip_check(row.get("spec"), p["w"], "spec", row_label)
                 elif p["kind"] == "axis":
                     v = _axis_value(row, p["group"], p["axis"])
-                    red = (p["role"] == "sim" and p["axis"] in flags)
+                    red = (p["role"] == "sim"
+                           and p["axis"] in flags_by_group.get(p["group"], ()))
                     # B&W-safe marker: flagged sim values are red AND bold so the
                     # flag survives a grayscale print. Bold adds no measurable
                     # width here (fixed column layout) so it cannot push a cell to

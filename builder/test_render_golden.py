@@ -731,6 +731,21 @@ def main():
     check(ms_texts.count("186.7") == 1,
           "post NTWC (186.7) shown once; pre NTWC blank (not duplicated across sims)")
 
+    # per-sim flagging: each sim group is flagged by its OWN values, so a
+    # comparison column reds only where it itself is out of spec.
+    ps_row = {"cat": "C", "item": "I_t", "kind": "result", "unit": "uA",
+              "limit": "le", "spec_mtm": [None, None, 500], "spec_ntwc": 500,
+              "sim_mtm": [495, 660, 872], "sim_ntwc": 872,             # primary: over
+              "sims": {"pdr": {"mtm": [279, 490, 480], "ntwc": 480}}}  # pdr: in spec
+    f_cdr = tables._flags_from(ps_row, *tables._sim_axis_vals(ps_row, "cdr"))
+    f_pdr = tables._flags_from(ps_row, *tables._sim_axis_vals(ps_row, "pdr"))
+    check(2 in f_cdr and 2 not in f_pdr,
+          "per-sim flag: primary over-spec reds; in-spec comparison column does not",
+          "cdr=%r pdr=%r" % (sorted(f_cdr), sorted(f_pdr)))
+    ps_row2 = dict(ps_row, sims={"pdr": {"mtm": [279, 490, 758], "ntwc": 758}})
+    check(2 in tables._flags_from(ps_row2, *tables._sim_axis_vals(ps_row2, "pdr")),
+          "per-sim flag: comparison column reds when IT is out of spec")
+
     return _finish()
 
 

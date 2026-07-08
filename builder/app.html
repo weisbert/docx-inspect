@@ -5026,16 +5026,18 @@ function dtViolates(limit, nv, smin, smax, en, styp){
   if (limit === "range"){ return (smin != null && nv < smin) || (smax != null && nv > smax); }
   return false;
 }
-function dtFlagPositions(row){
+// flags for a sim group given ITS OWN values (mtm triple + ntwc). Mirrors
+// tables.py _flags_from so a comparison column (e.g. PDR) reds only where it
+// itself is out of spec, not where the primary sim is.
+function dtFlagsFrom(row, mtm, ntwc){
   const flags = new Set();
   const limit = row.limit;
   if (!limit) return flags;
   const sm = row.spec_mtm || [null, null, null];
-  const sim = row.sim_mtm || [null, null, null];
   const smin = dtNumv(sm[0]), styp = dtNumv(sm[1]), smax = dtNumv(sm[2]);
   const en = dtNumv(row.spec);
-  sim.forEach((v, i)=>{ if (dtViolates(limit, dtNumv(v), smin, smax, en, styp)) flags.add(i); });
-  const nt = dtNumv(row.sim_ntwc);
+  (mtm || []).forEach((v, i)=>{ if (dtViolates(limit, dtNumv(v), smin, smax, en, styp)) flags.add(i); });
+  const nt = dtNumv(ntwc);
   if (nt != null){
     const nspec = dtNumv(row.spec_ntwc);
     const n_smin = nspec != null ? nspec : smin;
@@ -5045,6 +5047,14 @@ function dtFlagPositions(row){
   }
   return flags;
 }
+// a sim group's (mtm, ntwc): per-sim row.sims[gkey] when present else flat.
+function dtSimVals(row, gkey){
+  if (row.sims && row.sims[gkey]){ const sv = row.sims[gkey] || {}; return [sv.mtm || [null,null,null], sv.ntwc]; }
+  return [row.sim_mtm || [null,null,null], row.sim_ntwc];
+}
+function dtFlagsFor(row, gkey){ const v = dtSimVals(row, gkey); return dtFlagsFrom(row, v[0], v[1]); }
+// backward-compatible flat-schema flags (row.sim_mtm/sim_ntwc).
+function dtFlagPositions(row){ return dtFlagsFrom(row, row.sim_mtm || [null,null,null], row.sim_ntwc); }
 function dtAxisValue(row, gkey, ai){
   let arr;
   if (gkey === "spec"){
@@ -5160,7 +5170,6 @@ function previewDatatable(block, chap, seq){
 
   rows.forEach((row, ri)=>{
     const band  = settingKinds.has(row.kind) ? F.setting : F.result;
-    const flags = dtFlagPositions(row);
     const tr = el("tr",{});
     let skip = 0;   // sim_span: skip the merged-away axis cells
     plan.forEach(p=>{
@@ -5176,13 +5185,13 @@ function previewDatatable(block, chap, seq){
       if (p.kind === "axis"){
         // sim_span row: the first sim group's first 3 axes merge into one wide cell
         if (row.sim_span && firstSim && p.group === firstSim.key && p.axis === 0){
-          const red = flags.has(0);
+          const red = dtFlagsFor(row, firstSim.key).has(0);
           tr.appendChild(cell("td",{colspan:3, fill:band, cls:"pv-num",
             text:dtFmt(dtAxisValue(row, p.group, 0)), color:red?flagColor:null, bold:red}));
           skip = Math.min(2, firstSim.axes.length - 1);
           return;
         }
-        const red = (p.role === "sim" && flags.has(p.axis));
+        const red = (p.role === "sim" && dtFlagsFor(row, p.group).has(p.axis));
         tr.appendChild(cell("td",{fill:band, cls:"pv-num",
           text:dtFmt(dtAxisValue(row, p.group, p.axis)), color:red?flagColor:null, bold:red}));
         return;
