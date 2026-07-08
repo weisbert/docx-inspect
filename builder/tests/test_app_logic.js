@@ -154,6 +154,22 @@ ok(gbMedia.length === 3 && gbMedia[1].kind === "block" &&
    gbMedia[0].kind === "prose" && gbMedia[2].kind === "prose",
    "groupBlocks: a media block breaks the text run");
 
+// dtSimVals: per-KEY flat-vs-per-sim read. A multi-sim compliance row stores the
+// primary (cdr) values in the flat sim_mtm and a comparison column (pdr) under
+// row.sims[key]. Reading cdr must fall back to the flat store even though
+// row.sims exists -- a global !!row.sims once blanked the whole cdr column in the
+// editable grid. dtSimVals is the shared read used by both preview and simAxisCell.
+const dsv = sandbox.dtSimVals;
+ok(typeof dsv === "function", "dtSimVals defined");
+const multiRow = { sim_mtm: [1.17, 1.617, 1.869], sim_ntwc: 1.869,
+  sims: { pdr: { mtm: [1.777, 3.754, null], ntwc: null } } };
+const cdrVals = dsv(multiRow, "cdr");
+ok(JSON.stringify(cdrVals[0]) === JSON.stringify([1.17, 1.617, 1.869]),
+   "dtSimVals: cdr falls back to flat sim_mtm when row.sims lacks cdr", JSON.stringify(cdrVals));
+const pdrVals = dsv(multiRow, "pdr");
+ok(JSON.stringify(pdrVals[0]) === JSON.stringify([1.777, 3.754, null]),
+   "dtSimVals: pdr reads its per-sim store", JSON.stringify(pdrVals));
+
 // renderTree runs without throwing (stubbed DOM)
 vm.runInContext("App.selId='X'; App._treeFilter='';", sandbox);
 try { sandbox.renderTree(); ok(true, "renderTree() runs without throwing"); }

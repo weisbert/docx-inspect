@@ -4028,14 +4028,19 @@ function simAxisCell(ctx, row, axisLabel, gkey, ri, flatIdx, c, after){
   const mtmIdx = MTM_AXES[String(axisLabel).toUpperCase()];
   // per-sim rows store values under row.sims[gkey]={mtm,ntwc}; legacy single-sim
   // rows use the flat row.sim_mtm/sim_ntwc. Mirrors tables.py _axis_value.
-  const perSim = !!row.sims;
+  // Decide flat-vs-per-sim PER KEY, not by a global !!row.sims: the CDR column
+  // lives in the flat row.sim_mtm while a PDR/reference column lives in
+  // row.sims[gkey]. A row that has only row.sims.pdr must still read/write cdr
+  // from the flat store -- a global perSim blanks the cdr column. Mirrors
+  // tables.py _axis_value / _sim_axis_vals.
+  const perSim = ()=> !!(row.sims && row.sims[gkey]);
   const svStore = ()=>{ row.sims = row.sims || {}; return (row.sims[gkey] = row.sims[gkey] || {mtm:[null,null,null], ntwc:null}); };
   const get = ()=>{
-    if (perSim){ const sv=row.sims[gkey]||{}; return (mtmIdx!=null) ? (sv.mtm||[])[mtmIdx] : sv.ntwc; }
-    return (mtmIdx!=null) ? (row.sim_mtm||[])[mtmIdx] : row.sim_ntwc;
+    const [mtm, ntwc] = dtSimVals(row, gkey);   // shared per-key flat-vs-per-sim read (preview + tables.py parity)
+    return (mtmIdx!=null) ? mtm[mtmIdx] : ntwc;
   };
   const set = (v)=>{
-    if (perSim){ const sv=svStore(); if (mtmIdx!=null){ sv.mtm=sv.mtm||[null,null,null]; sv.mtm[mtmIdx]=v; } else sv.ntwc=v; }
+    if (perSim()){ const sv=svStore(); if (mtmIdx!=null){ sv.mtm=sv.mtm||[null,null,null]; sv.mtm[mtmIdx]=v; } else sv.ntwc=v; }
     else if (mtmIdx!=null){ row.sim_mtm=row.sim_mtm||[null,null,null]; row.sim_mtm[mtmIdx]=v; } else row.sim_ntwc=v;
   };
   const cell = el("div",{class:"cell", text:fmtAxis(get())});
