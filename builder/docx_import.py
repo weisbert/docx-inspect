@@ -405,6 +405,35 @@ def _docx_table_to_grid(tbl):
     return grid
 
 
+def _docx_table_row_fills(tbl):
+    """Per-row dominant cell shading hex (upper-case) or None -> lets fills survive
+    the round-trip (plain-table row_fills; datatable setting-row detection)."""
+    out = []
+    try:
+        n_rows, n_cols = len(tbl.rows), len(tbl.columns)
+    except Exception:
+        return out
+    for r in range(n_rows):
+        hexes = []
+        for c in range(n_cols):
+            try:
+                h = _cell_fill_hex(tbl.cell(r, c)._tc)
+            except Exception:
+                h = None
+            if h:
+                hexes.append(h.upper())
+        out.append(max(set(hexes), key=hexes.count) if hexes else None)
+    return out
+
+
+def _is_setting_fill(hexv):
+    """A non-white, non-header shading marks a datatable setting / condition row."""
+    if not hexv:
+        return False
+    h = hexv.upper()
+    return h not in ("FFFFFF", "FFFFFE", "FFFF00", "AUTO")
+
+
 # ---------------------------------------------------------------------------
 # Compliance grid -> data model.
 # SOURCE OF TRUTH: server.parse_xlsx_compliance (builder/server.py). This is a
@@ -445,8 +474,13 @@ def _sanitize_name(name):
     return name[:64] if name else ""
 
 
-def _compliance_model_from_grid(grid):
-    """Port of server.parse_xlsx_compliance's core. -> {spec_name, sims, rows}."""
+def _compliance_model_from_grid(grid, fills=None):
+    """Port of server.parse_xlsx_compliance's core. -> {spec_name, sims, rows}.
+
+    ``fills`` (optional per-row shading hex) lets condition/setting rows be told
+    apart from result rows. NOTE: a row's ``limit`` (le/ge) and ``sim_span`` are
+    NOT encoded anywhere in the rendered Word table, so they cannot be recovered
+    on import -- they come back as None/False and must be re-set in the editor."""
     if not grid:
         return {"spec_name": "", "sims": [], "rows": []}
     ncols = max(len(r) for r in grid)
@@ -558,22 +592,32 @@ def _compliance_model_from_grid(grid):
                 else:
                     spec_ntwc = val
 
+        # primary sim -> flat sim_mtm; every extra sim (e.g. a PDR compare column)
+        # -> row["sims"][key] so its values are NOT dropped on import.
         sim_mtm = [None, None, None]
         sim_ntwc = None
-        if groups:
-            first_cols = groups[0][2]
-            for ai, ci in enumerate(first_cols[:4]):
+        per_sim = {}
+        for gi, (_gt, _gs, gcols) in enumerate(groups):
+            mtm = [None, None, None]
+            ntwc = None
+            for ai, ci in enumerate(gcols[:4]):
                 val = _to_num_or_str(r[ci]) if ci < len(r) else None
                 if ai < 3:
-                    sim_mtm[ai] = val
+                    mtm[ai] = val
                 else:
-                    sim_ntwc = val
+                    ntwc = val
+            if gi == 0:
+                sim_mtm, sim_ntwc = mtm, ntwc
+            elif gi < len(sims):
+                per_sim[sims[gi]["key"]] = {"mtm": mtm, "ntwc": ntwc}
 
-        rows.append({
+        is_setting = (fills is not None and ri < len(fills)
+                      and _is_setting_fill(fills[ri]))
+        row_obj = {
             "cat": last_cat,
             "item": str(item),
             "unit": "" if unit is None else str(unit),
-            "kind": "result",
+            "kind": "common_setting" if is_setting else "result",
             "spec": spec,
             "spec_mtm": spec_mtm,
             "sim_mtm": sim_mtm,
@@ -581,7 +625,10 @@ def _compliance_model_from_grid(grid):
             "sim_ntwc": sim_ntwc,
             "limit": None,
             "sim_span": False,
-        })
+        }
+        if per_sim:
+            row_obj["sims"] = per_sim
+        rows.append(row_obj)
 
     return {"spec_name": spec_name, "sims": sims, "rows": rows}
 
@@ -660,7 +707,49 @@ def _free_table_model(tbl, warn):
         col_w = mc._grid_cols_cm(tbl._tbl)
     except Exception:
         col_w = []
-    return {"rows": rows, "header_rows": 1, "merges": merges, "col_w": col_w}
+    row_fills = {}
+    for ri, hexv in enumerate(_docx_table_row_fills(tbl)):
+        if _is_setting_fill(hexv):
+            row_fills[str(ri)] = hexv
+    return {"rows": rows, "header_rows": 1, "merges": merges,
+            "col_w": col_w, "row_fills": row_fills}
+
+
+def _table_has_images(tbl):
+    """True if a table embeds any picture -> it is an engine-rendered imagegrid
+    (plain / compliance tables never carry pictures)."""
+    try:
+        return bool(tbl._tbl.findall(".//" + qn("a:blip")))
+    except Exception:
+        return False
+
+
+def _imagegrid_from_table(tbl, document, docx_path, images_dir, img_seq, warn):
+    """Reconstruct an imagegrid from a borderless table of pictures: extract each
+    cell's image in reading order so nothing is lost. sub_captions=True when a cell
+    also carries caption text beneath its picture (the (a)(b) sub-labels)."""
+    try:
+        n_rows, n_cols = len(tbl.rows), len(tbl.columns)
+    except Exception:
+        n_rows, n_cols = 0, 0
+    items = []
+    has_sub = False
+    for r in range(n_rows):
+        for c in range(n_cols):
+            try:
+                cell = tbl.cell(r, c)
+            except Exception:
+                continue
+            cell_imgs = []
+            for para in cell.paragraphs:
+                cell_imgs += _extract_inline_images(
+                    para._p, document, docx_path, images_dir, img_seq, warn)
+            for ib in cell_imgs:
+                items.append({"file": ib["file"]})
+            if cell_imgs and (cell.text or "").strip():
+                has_sub = True
+    return {"type": "imagegrid", "cols": max(1, n_cols), "caption": "",
+            "items": items, "sub_captions": has_sub}
 
 
 # ===========================================================================
@@ -673,13 +762,20 @@ _CAPTION_PREFIX_RE = re.compile(
     r"^\s*(?:Table|Figure|\u8868|\u56fe)\s*\d+\s*[:.\-\u3001\uff1a]?\s*",
     re.IGNORECASE,
 )
+# The engine numbers captions chapter-scoped as "Figure <chap>-<seq>"; the base
+# regex strips "Figure <chap>-", leaving the <seq>. This ASCII-only pass drops
+# that leftover leading number so the caption text survives clean.
+_CAPTION_LEFTOVER_SEQ_RE = re.compile(r"^\s*\d+\s+")
 
 
 def _strip_caption_prefix(text):
-    """Remove a leading 'Table N' / 'Figure N' / localized table/figure prefix."""
+    """Strip a leading Table N / Figure N / localized figure prefix, including
+    the engine chapter-scoped Figure <chap>-<seq> numbering."""
     if not text:
         return ""
-    return _CAPTION_PREFIX_RE.sub("", text, count=1).strip()
+    t = _CAPTION_PREFIX_RE.sub("", text, count=1)
+    t = _CAPTION_LEFTOVER_SEQ_RE.sub("", t, count=1)
+    return t.strip()
 
 
 def _is_caption_para(p, by_id):
@@ -881,14 +977,68 @@ def _runs_text(runs):
     return "".join(r.get("t", "") for r in (runs or []))
 
 
-def _paragraph_block(p, by_id, body_id, mybody_id, warn):
+def _para_list_kind(p, document):
+    """-> 'bullet' | 'number' | None for a paragraph, resolving its w:numPr through
+    the numbering part (bullet abstractNum uses numFmt='bullet', decimal otherwise).
+    Mirrors engine.build_list_numbering so a list survives the round-trip."""
+    ppr = p.find(qn("w:pPr"))
+    if ppr is None:
+        return None
+    numpr = ppr.find(qn("w:numPr"))
+    if numpr is None:
+        return None
+    nid_el = numpr.find(qn("w:numId"))
+    if nid_el is None or nid_el.get(qn("w:val")) in (None, "0"):
+        return None
+    numid = nid_el.get(qn("w:val"))
+    ilvl_el = numpr.find(qn("w:ilvl"))
+    try:
+        ilvl = int(ilvl_el.get(qn("w:val"))) if ilvl_el is not None else 0
+    except (TypeError, ValueError):
+        ilvl = 0
+    try:
+        numbering = document.part.numbering_part.element
+    except Exception:
+        return "bullet"  # numbered somehow but no numbering part -> treat as a list
+    abs_id = None
+    for num in numbering.findall(qn("w:num")):
+        if num.get(qn("w:numId")) == str(numid):
+            ael = num.find(qn("w:abstractNumId"))
+            abs_id = ael.get(qn("w:val")) if ael is not None else None
+            break
+    if abs_id is None:
+        return "bullet"
+    for anum in numbering.findall(qn("w:abstractNum")):
+        if anum.get(qn("w:abstractNumId")) != str(abs_id):
+            continue
+        lvl = None
+        for lv in anum.findall(qn("w:lvl")):
+            if lv.get(qn("w:ilvl")) == str(ilvl):
+                lvl = lv
+                break
+        if lvl is None:
+            lvl = anum.find(qn("w:lvl"))
+        if lvl is not None:
+            nf = lvl.find(qn("w:numFmt"))
+            if nf is not None and nf.get(qn("w:val")) == "bullet":
+                return "bullet"
+        return "number"
+    return "bullet"
+
+
+def _paragraph_block(p, by_id, body_id, mybody_id, warn, document=None):
     """-> a ``para`` block for a non-empty body paragraph, or None to skip."""
     runs = _para_runs(p)
     if not _runs_text(runs).strip():
         return None
     sid = mc._para_style_id(p)
     alias = mc._style_alias(by_id, sid, body_id, mybody_id, warn)
-    return {"type": "para", "runs": runs, "style": alias}
+    block = {"type": "para", "runs": runs, "style": alias}
+    if document is not None:
+        lk = _para_list_kind(p, document)
+        if lk:
+            block["list"] = lk
+    return block
 
 
 def _table_block(tbl, warn):
@@ -896,14 +1046,18 @@ def _table_block(tbl, warn):
     kind = classify_table(tbl)
     if kind == "datatable":
         grid = _docx_table_to_grid(tbl)
-        model = _compliance_model_from_grid(grid)
+        fills = _docx_table_row_fills(tbl)
+        model = _compliance_model_from_grid(grid, fills)
         return {"type": "datatable", "caption": "", "data": model}
     ft = _free_table_model(tbl, warn)
-    return {
+    block = {
         "type": "table", "caption": "",
         "rows": ft["rows"], "header_rows": ft["header_rows"],
         "merges": ft["merges"], "col_w": ft["col_w"],
     }
+    if ft.get("row_fills"):
+        block["row_fills"] = ft["row_fills"]
+    return block
 
 
 def build_outline(document, by_id, body_id, mybody_id, body_children,
@@ -947,7 +1101,17 @@ def build_outline(document, by_id, body_id, mybody_id, body_children,
                 continue
             # non-heading paragraph
             if _is_caption_para(child, by_id):
-                pending_caption = _strip_caption_prefix(mc._para_text(child))
+                cap = _strip_caption_prefix(mc._para_text(child))
+                # The engine emits a caption AFTER its figure; company masters put it
+                # BEFORE. Attach backward to an immediately-preceding captionless
+                # figure/table, else hold it to attach forward to the next one.
+                prev = current["blocks"][-1] if (current and current["blocks"]) else None
+                if prev is not None and prev.get("type") in \
+                        ("image", "imagegrid", "table", "datatable") \
+                        and not prev.get("caption"):
+                    prev["caption"] = cap
+                else:
+                    pending_caption = cap
                 continue
             # images first (a paragraph may carry both a picture and stray text)
             imgs = _extract_inline_images(
@@ -958,7 +1122,7 @@ def build_outline(document, by_id, body_id, mybody_id, body_children,
                         _attach_caption(ib)
                         current["blocks"].append(ib)
                 continue
-            blk = _paragraph_block(child, by_id, body_id, mybody_id, warn)
+            blk = _paragraph_block(child, by_id, body_id, mybody_id, warn, document)
             if blk is not None and current is not None:
                 current["blocks"].append(blk)
         elif tag == qn("w:tbl"):
@@ -966,7 +1130,14 @@ def build_outline(document, by_id, body_id, mybody_id, body_children,
             if tbl is None or current is None:
                 continue
             try:
-                block = _table_block(tbl, warn)
+                if _table_has_images(tbl):
+                    # engine renders an imagegrid as a borderless table of pictures;
+                    # plain / compliance tables never embed images, so a picture in a
+                    # cell is a reliable imagegrid signal.
+                    block = _imagegrid_from_table(
+                        tbl, document, docx_path, images_dir, img_seq, warn)
+                else:
+                    block = _table_block(tbl, warn)
             except Exception as ex:
                 warn(f"table classification failed ({ex!r}); emitted empty table")
                 block = {"type": "table", "caption": "", "rows": [],
