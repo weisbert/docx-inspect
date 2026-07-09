@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -177,6 +178,10 @@ def atomic_write(path, data_bytes):
 
 AUTOSAVE_DIRNAME = "_autosave"
 AUTOSAVE_KEEP = 300  # rolling retention per project
+
+# Root-level bookkeeping dirs that are never valid as a project folder name.
+_RESERVED_ROOT_DIRS = {"_backups", "_updates", "_outbox", "_trash",
+                       "_autosave", "__pycache__", "assets"}
 
 
 def _autosave_dir(project_dir):
@@ -1141,6 +1146,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_rollback()
             if path == "/api/autosave-restore":
                 return self._api_autosave_restore()
+            if path == "/api/project-delete":
+                return self._api_project_delete()
+            if path == "/api/project-rename":
+                return self._api_project_rename()
+            if path == "/api/project-copy":
+                return self._api_project_copy()
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -1234,7 +1245,8 @@ class Handler(BaseHTTPRequestHandler):
         out = []
         if root and os.path.isdir(root):
             for name in os.listdir(root):
-                if name == "templates":
+                if name == "templates" or name.startswith("_") \
+                        or name in _RESERVED_ROOT_DIRS:
                     continue
                 pj = os.path.join(root, name, "project.json")
                 if not os.path.isfile(pj):
@@ -1813,6 +1825,80 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json("missing 'name'")
         project_dir = resolve_project_dir(dir_arg)
         return self._send_json(restore_autosave(project_dir, name))
+
+    def _new_project_target(self, name):
+        """Validate a NEW project folder name -> (segment, abs path). Single
+        sanitized segment, contained under reports_root, not reserved, not '_'."""
+        if not name or not isinstance(name, str):
+            raise ValueError("missing new project name")
+        seg = _sanitize_name(name.strip())
+        if not seg or seg.startswith("_") or seg in _RESERVED_ROOT_DIRS:
+            raise ValueError("invalid project name: %r" % name)
+        return seg, resolve_project_dir(seg)  # resolve_project_dir enforces containment
+
+    def _api_project_delete(self):
+        """Move a project to reports_root/_trash/<name>-<ts>/ (recoverable, never
+        a hard delete). Body: {dir}."""
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        payload = self._read_json()
+        project_dir = resolve_project_dir(payload.get("dir"))
+        if not os.path.isdir(project_dir):
+            return self._send_error_json("no such project", status=404)
+        name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
+        trash = os.path.join(CFG.reports_root, "_trash")
+        os.makedirs(trash, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = os.path.join(trash, "%s-%s" % (name, ts))
+        shutil.move(project_dir, dest)
+        return self._send_json({"ok": True, "trashed_to": dest.replace("\\", "/")})
+
+    def _api_project_rename(self):
+        """Rename a project folder (and optionally its meta.title).
+        Body: {dir, new_name, title?}."""
+        payload = self._read_json()
+        src = resolve_project_dir(payload.get("dir"))
+        if not os.path.isdir(src):
+            return self._send_error_json("no such project", status=404)
+        seg, dest = self._new_project_target(payload.get("new_name"))
+        if os.path.normcase(dest) == os.path.normcase(src):
+            return self._send_json({"ok": True, "dir": seg})  # no-op
+        if os.path.exists(dest):
+            return self._send_error_json("a project named '%s' already exists" % seg,
+                                         status=409)
+        shutil.move(src, dest)
+        title = payload.get("title")
+        if title is not None:
+            pj = os.path.join(dest, "project.json")
+            if os.path.isfile(pj):
+                try:
+                    with open(pj, encoding="utf-8") as fh:
+                        d = json.load(fh)
+                    d.setdefault("meta", {})["title"] = title
+                    atomic_write(pj, json.dumps(d, ensure_ascii=False,
+                                                indent=2).encode("utf-8"))
+                except Exception:
+                    pass
+        return self._send_json({"ok": True, "dir": seg})
+
+    def _api_project_copy(self):
+        """Duplicate a project (project.json + images/ only, not the heavy
+        _backups/_autosave/_updates) under a new name. Body: {dir, new_name}."""
+        payload = self._read_json()
+        src = resolve_project_dir(payload.get("dir"))
+        if not os.path.isfile(os.path.join(src, "project.json")):
+            return self._send_error_json("no such project", status=404)
+        seg, dest = self._new_project_target(payload.get("new_name"))
+        if os.path.exists(dest):
+            return self._send_error_json("a project named '%s' already exists" % seg,
+                                         status=409)
+        os.makedirs(dest)
+        shutil.copy2(os.path.join(src, "project.json"),
+                     os.path.join(dest, "project.json"))
+        img = os.path.join(src, "images")
+        if os.path.isdir(img):
+            shutil.copytree(img, os.path.join(dest, "images"))
+        return self._send_json({"ok": True, "dir": seg})
 
 
 def _import_apply_update():

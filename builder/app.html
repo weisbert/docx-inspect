@@ -5452,10 +5452,16 @@ function renderProjectsSection(){
       ]),
       el("div",{class:"home-actions"},[
         el("button",{class:"sm-btn", text:T("home.open","Open"), onclick:()=>openFromHome(p.dir)}),
+        el("button",{class:"sm-btn", text:T("home.rename","Rename"),
+          onclick:()=>renameReport(p.dir, p.title)}),
+        el("button",{class:"sm-btn", text:T("home.duplicate","Duplicate"),
+          onclick:()=>duplicateReport(p.dir)}),
         el("button",{class:"sm-btn", text:T("home.snapshots","Snapshots"),
           onclick:()=>showSnapshots(p.dir)}),
         el("button",{class:"sm-btn", text:T("home.paste_import","Paste import"),
           onclick:()=>pasteImport(p.dir)}),
+        el("button",{class:"sm-btn", style:{color:"var(--danger)"}, text:T("home.delete","Delete"),
+          onclick:()=>deleteReport(p.dir, p.title)}),
       ]),
     ]));
   });
@@ -6132,6 +6138,44 @@ function restoreSnapshot(dir, name){
         if (App.view==="editor" && App.dir===dir){ await openProject(dir); }
         else { await refreshHome(); }
       }catch(e){ toast(T("toast.snap_restore_failed","Restore failed: ")+e.message, true); }
+    });
+}
+/* ---- flow: report management (rename / duplicate / delete) ----------------
+   Delete is RECOVERABLE: the server moves the folder to reports_root/_trash/
+   rather than hard-deleting it. */
+function renameReport(dir, title){
+  modalPrompt(T("dialog.rename_report.title","Rename report"),
+    T("dialog.rename_report.msg","New folder name for this report:"),
+    dir, async (name)=>{
+      name = (name||"").trim(); if(!name || name===dir) return;
+      try{
+        await api("POST","/api/project-rename",{json:{dir, new_name:name, title}});
+        toast(T("toast.report_renamed","Renamed"));
+        await refreshHome();
+      }catch(e){ toast(T("toast.rename_failed","Rename failed: ")+e.message, true); }
+    });
+}
+function duplicateReport(dir){
+  modalPrompt(T("dialog.dup_report.title","Duplicate report"),
+    T("dialog.dup_report.msg","Folder name for the copy:"),
+    dir+"_copy", async (name)=>{
+      name = (name||"").trim(); if(!name) return;
+      try{
+        const r = await api("POST","/api/project-copy",{json:{dir, new_name:name}});
+        toast(T("toast.report_duplicated","Duplicated → ")+(r.dir||name));
+        await refreshHome();
+      }catch(e){ toast(T("toast.dup_failed","Duplicate failed: ")+e.message, true); }
+    });
+}
+function deleteReport(dir, title){
+  modalConfirm(T("dialog.del_report.title","Delete report?"),
+    T("dialog.del_report.msg","Move “")+(title||dir)+T("dialog.del_report.msg2","” to _trash? It stays recoverable in the reports folder's _trash directory — not permanently deleted."),
+    async ()=>{
+      try{
+        await api("POST","/api/project-delete",{json:{dir}});
+        toast(T("toast.report_deleted","Report moved to _trash"));
+        await refreshHome();
+      }catch(e){ toast(T("toast.delete_failed","Delete failed: ")+e.message, true); }
     });
 }
 function applyUpdate(){
