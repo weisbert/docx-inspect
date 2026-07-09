@@ -604,26 +604,45 @@ def _free_table_model(tbl, warn):
     except Exception:
         return {"rows": [], "header_rows": 1, "merges": [], "col_w": []}
 
+    # Collect every cell's <w:tc> element into a grid FIRST and keep those
+    # references alive for the rest of the function. python-docx returns a fresh
+    # _Cell wrapper per tbl.cell() call; if a wrapper is GC'd between reads,
+    # CPython recycles its id() and a later DISTINCT cell can collide with an
+    # earlier one -> it is misread as a merge continuation and BLANKED (the
+    # value silently disappears on import). Holding all tc elements at once makes
+    # id() a stable per-element identity again.
+    tc_grid, txt_grid = [], []
+    for r in range(n_rows):
+        tc_row, txt_row = [], []
+        for c in range(n_cols):
+            try:
+                cell = tbl.cell(r, c)
+                tc_row.append(cell._tc)
+                txt_row.append((cell.text or "").strip())
+            except Exception:
+                tc_row.append(None)
+                txt_row.append("")
+        tc_grid.append(tc_row)
+        txt_grid.append(txt_row)
+
     # tc id -> top-left (r, c) and accumulated span coverage
     seen = {}
     spans = {}  # tc_id -> {"r":..,"c":..,"rows":set,"cols":set}
     for r in range(n_rows):
         row_out = []
         for c in range(n_cols):
-            try:
-                cell = tbl.cell(r, c)
-                tc_id = id(cell._tc)
-                text = (cell.text or "").strip()
-            except Exception:
+            tc = tc_grid[r][c]
+            if tc is None:
                 row_out.append("")
                 continue
+            tc_id = id(tc)
             if tc_id in seen:
                 # merge continuation: blank cell, extend the recorded span
                 row_out.append("")
             else:
                 seen[tc_id] = (r, c)
                 spans[tc_id] = {"r": r, "c": c, "rows": set(), "cols": set()}
-                row_out.append(text)
+                row_out.append(txt_grid[r][c])
             spans[tc_id]["rows"].add(r)
             spans[tc_id]["cols"].add(c)
         rows.append(row_out)
