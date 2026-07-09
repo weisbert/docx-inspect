@@ -5452,6 +5452,8 @@ function renderProjectsSection(){
       ]),
       el("div",{class:"home-actions"},[
         el("button",{class:"sm-btn", text:T("home.open","Open"), onclick:()=>openFromHome(p.dir)}),
+        el("button",{class:"sm-btn", text:T("home.snapshots","Snapshots"),
+          onclick:()=>showSnapshots(p.dir)}),
         el("button",{class:"sm-btn", text:T("home.paste_import","Paste import"),
           onclick:()=>pasteImport(p.dir)}),
       ]),
@@ -6077,6 +6079,59 @@ function rollbackLastApply(){
         toast(T("toast.rolled_back","Rolled back ")+nback+T("toast.update_files"," file(s)"));
         await refreshHome();
       }catch(e){ toast(T("toast.rollback_failed","Rollback failed: ")+e.message, true); }
+    });
+}
+/* ---- flow: local auto-snapshots (browse & restore) ------------------------
+   The server drops a timestamped copy of project.json into the project's
+   _autosave/ on every save and before every apply / paste-import. This dialog
+   lists them (newest first) and restores one; the current state is snapshotted
+   first, so a restore is itself undoable. Safety net against an external update
+   silently overwriting local edits. */
+async function showSnapshots(dir){
+  let list = [];
+  try{
+    const r = await api("GET","/api/autosaves",{query:{dir}});
+    list = r.autosaves || [];
+  }catch(e){ toast(T("toast.snap_failed","Could not load snapshots: ")+e.message, true); return; }
+  const m = $("#modal"); m.innerHTML="";
+  m.appendChild(el("h3",{text:T("dialog.snap.title","Local snapshots — ")+dir}));
+  m.appendChild(el("p",{style:{fontSize:"12px",color:"var(--muted)"},
+    text:T("dialog.snap.msg","Automatic local backups of project.json (every save, and before every apply / paste-import). Restoring backs up the current state first, so it's undoable.")}));
+  if(!list.length){
+    m.appendChild(el("div",{class:"empty", text:T("dialog.snap.empty","No snapshots yet — one is written on the next save.")}));
+  } else {
+    const wrap = el("div",{style:{maxHeight:"340px",overflowY:"auto",margin:"8px 0"}});
+    list.forEach(s=>{
+      wrap.appendChild(el("div",{class:"proj-row"},[
+        el("div",{class:"home-row-main"},[
+          el("div",{class:"title", text: relTime(s.mtime)+"  ·  "+(s.reason||"save")}),
+          el("div",{class:"sub", text: s.name+"  ("+Math.round((s.size||0)/1024)+" KB)"}),
+        ]),
+        el("div",{class:"home-actions"},[
+          el("button",{class:"sm-btn", text:T("dialog.snap.restore","Restore"),
+            onclick:()=>restoreSnapshot(dir, s.name)}),
+        ]),
+      ]));
+    });
+    m.appendChild(wrap);
+  }
+  m.appendChild(el("div",{class:"modal-actions"},[
+    el("div",{style:{flex:"1"}}),
+    el("button",{class:"tb-btn primary", text:T("action.close","Close"), onclick:closeOverlay}),
+  ]));
+  showOverlay();
+}
+function restoreSnapshot(dir, name){
+  modalConfirm(T("dialog.snap_restore.title","Restore this snapshot?"),
+    T("dialog.snap_restore.msg","Replace the current project.json with this snapshot? The current state is backed up first, so you can undo it.")+"\n\n"+name,
+    async ()=>{
+      try{
+        await api("POST","/api/autosave-restore",{json:{dir, name}});
+        toast(T("toast.snap_restored","Snapshot restored"));
+        closeOverlay();
+        if (App.view==="editor" && App.dir===dir){ await openProject(dir); }
+        else { await refreshHome(); }
+      }catch(e){ toast(T("toast.snap_restore_failed","Restore failed: ")+e.message, true); }
     });
 }
 function applyUpdate(){

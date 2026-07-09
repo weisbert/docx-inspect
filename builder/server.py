@@ -166,6 +166,132 @@ def atomic_write(path, data_bytes):
 
 
 # ---------------------------------------------------------------------------
+# Helpers: local auto-snapshots (belt-and-suspenders backup of project.json).
+#
+# Every save -- and every overwrite by apply-update / paste-import -- first drops
+# a timestamped copy of project.json into <project_dir>/_autosave/, kept rolling.
+# This is INDEPENDENT of the apply-time _backups/ history, so an external update
+# can never leave local edits unrecoverable: the last saved state is always
+# sitting in _autosave/ and is one click to restore.
+# ---------------------------------------------------------------------------
+
+AUTOSAVE_DIRNAME = "_autosave"
+AUTOSAVE_KEEP = 300  # rolling retention per project
+
+
+def _autosave_dir(project_dir):
+    return os.path.join(project_dir, AUTOSAVE_DIRNAME)
+
+
+def _autosave_paths(project_dir):
+    """Snapshot paths in chronological order (oldest first). Sorted by mtime
+    (tie-break by name) so same-second collision suffixes can't scramble order."""
+    d = _autosave_dir(project_dir)
+    if not os.path.isdir(d):
+        return []
+    entries = []
+    for n in os.listdir(d):
+        if not n.endswith(".json"):
+            continue
+        p = os.path.join(d, n)
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            mt = 0.0
+        entries.append((mt, n, p))
+    entries.sort()
+    return [p for _, _, p in entries]
+
+
+def autosave_snapshot(project_dir, reason="save"):
+    """Copy the current project.json into _autosave/<ts>__<reason>.json.
+
+    Skips if identical to the newest snapshot (dedupe). Prunes to the newest
+    AUTOSAVE_KEEP. Best-effort: never raises -- a snapshot must never break a
+    save. Returns the snapshot filename or None.
+    """
+    try:
+        pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            return None
+        with open(pj, "rb") as fh:
+            data = fh.read()
+        existing = _autosave_paths(project_dir)
+        if existing:
+            try:
+                with open(existing[-1], "rb") as fh:
+                    if fh.read() == data:
+                        return None  # unchanged since last snapshot
+            except OSError:
+                pass
+        os.makedirs(_autosave_dir(project_dir), exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        tag = _sanitize_name(reason) or "save"
+        base = "%s__%s" % (ts, tag)
+        name = base + ".json"
+        k = 1
+        while os.path.exists(os.path.join(_autosave_dir(project_dir), name)):
+            name = "%s-%d.json" % (base, k)
+            k += 1
+        atomic_write(os.path.join(_autosave_dir(project_dir), name), data)
+        for p in _autosave_paths(project_dir)[:-AUTOSAVE_KEEP]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return name
+    except Exception:
+        return None
+
+
+def autosave_all(reports_root, reason="preapply"):
+    """Snapshot every project under reports_root (used before an apply)."""
+    made = []
+    try:
+        for name in sorted(os.listdir(reports_root)):
+            pdir = os.path.join(reports_root, name)
+            if os.path.isfile(os.path.join(pdir, "project.json")):
+                snap = autosave_snapshot(pdir, reason)
+                if snap:
+                    made.append("%s/%s" % (name, snap))
+    except OSError:
+        pass
+    return made
+
+
+def list_autosaves(project_dir):
+    out = []
+    for p in _autosave_paths(project_dir):
+        name = os.path.basename(p)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        stem = name[:-5]
+        reason = stem.split("__", 1)[1].split("-")[0] if "__" in stem else ""
+        out.append({"name": name, "mtime": st.st_mtime,
+                    "size": st.st_size, "reason": reason})
+    out.reverse()  # newest first
+    return out
+
+
+def restore_autosave(project_dir, name):
+    """Restore _autosave/<name> to project.json (snapshotting current first)."""
+    if not name or "/" in name or "\\" in name or not name.endswith(".json"):
+        raise ValueError("bad snapshot name")
+    src = os.path.join(_autosave_dir(project_dir), name)
+    if not os.path.isfile(src):
+        raise FileNotFoundError("snapshot not found: %s" % name)
+    with open(src, "rb") as fh:
+        data = fh.read()
+    json.loads(data.decode("utf-8"))  # validate JSON before installing
+    autosave_snapshot(project_dir, reason="prerestore")  # keep the restore undoable
+    pj = os.path.join(project_dir, "project.json")
+    atomic_write(pj, data)
+    return {"ok": True, "restored": name, "saved_at": os.path.getmtime(pj)}
+
+
+# ---------------------------------------------------------------------------
 # Helpers: image saving.
 # ---------------------------------------------------------------------------
 
@@ -946,6 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_project_get(qs)
             if path == "/api/projects":
                 return self._api_projects_list()
+            if path == "/api/autosaves":
+                return self._api_autosaves(qs)
             if path == "/api/templates":
                 return self._api_templates_list()
             if path == "/api/template":
@@ -1011,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_apply_update()
             if path == "/api/rollback":
                 return self._api_rollback()
+            if path == "/api/autosave-restore":
+                return self._api_autosave_restore()
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -1170,6 +1300,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         body = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
         atomic_write(pj, body)
+        autosave_snapshot(project_dir, "save")  # capture every saved state
         return self._send_json(
             {
                 "ok": True,
@@ -1547,6 +1678,7 @@ class Handler(BaseHTTPRequestHandler):
         diff_md = paste_import_diff(old_project, project, name, warns)
 
         body = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
+        autosave_snapshot(project_dir, "prepaste")  # keep pre-paste state recoverable
         apply_update = _import_apply_update()
         rel = os.path.relpath(pj, CFG.reports_root)
         rec = apply_update.record_replace(CFG.reports_root, rel, body)
@@ -1645,9 +1777,12 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(updates_dir, exist_ok=True)
         dest = os.path.join(updates_dir, name)
         atomic_write(dest, raw)
+        # snapshot every project's current state BEFORE applying, so an update
+        # bundle can never silently overwrite local edits beyond recovery.
+        autosaved = autosave_all(CFG.reports_root, "preapply")
         apply_update = _import_apply_update()
         summary = apply_update.apply_bundle(CFG.reports_root, dest, dry=False)
-        return self._send_json({"ok": True, **summary})
+        return self._send_json({"ok": True, "autosaved": autosaved, **summary})
 
     def _api_rollback(self):
         """Undo the most recent apply / paste-import by restoring the newest
@@ -1661,6 +1796,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json(result.get("error", "rollback failed"),
                                          status=400)
         return self._send_json(result)
+
+    def _api_autosaves(self, qs):
+        """List the local auto-snapshots of a project's project.json (newest first)."""
+        dir_arg = (qs.get("dir") or [None])[0]
+        project_dir = resolve_project_dir(dir_arg)
+        return self._send_json({"autosaves": list_autosaves(project_dir)})
+
+    def _api_autosave_restore(self):
+        """Restore a named auto-snapshot to project.json (current is snapshotted
+        first, so the restore is itself undoable). Body: {dir, name}."""
+        payload = self._read_json()
+        dir_arg = payload.get("dir")
+        name = payload.get("name")
+        if not name:
+            return self._send_error_json("missing 'name'")
+        project_dir = resolve_project_dir(dir_arg)
+        return self._send_json(restore_autosave(project_dir, name))
 
 
 def _import_apply_update():
