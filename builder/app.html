@@ -3272,6 +3272,14 @@ function sectionOf(id){
 function editTable(host, block){
   block.rows = block.rows && block.rows.length ? block.rows : [["",""],["",""]];
   block.header_rows = block.header_rows ?? 1;
+  // Guard against ragged rows (e.g. a preset whose body rows have fewer cells
+  // than the header, or col_w declaring more columns than any row): pad every
+  // row to the widest so the grid renders — and lets you fill — every column.
+  // Without this a short row emits fewer <td> than the <colgroup> has columns,
+  // so the trailing column looks merged and can't be typed into. The renderer
+  // already treats missing cells as "", so padding is a no-op for Word output.
+  { const nc = Math.max(colCount(block), Array.isArray(block.col_w) ? block.col_w.length : 0);
+    block.rows.forEach(r=>{ while (r.length < nc) r.push(""); }); }
 
   const tools = el("div",{class:"grid-tools"});
   const mkBtn=(t,fn)=>el("button",{class:"sm-btn",text:t,onclick:fn});

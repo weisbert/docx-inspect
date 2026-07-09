@@ -185,6 +185,18 @@ try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sa
   ok(true, "renderNodeEditor runs (text card + image + table w/ xlsx button)"); }
 catch (e) { ok(false, "renderNodeEditor runs (text card + image + table w/ xlsx button)", e && e.message); }
 
+// Ragged table: a 5-wide header (and col_w) with 4-cell body rows -- as an
+// "Action Items"-style preset produced before the fix -- must be padded so the
+// editor renders (and lets you fill) every column, not a merged-looking last
+// col. editTable pads block.rows to the widest before building the grid.
+vm.runInContext("App._rag = {type:'table',id:'rg',caption:'r',header_rows:1," +
+  "col_w:[1,6.8,2.4,2.2,3.6]," +
+  "rows:[['No.','Items Description','Owner','Status','Status Update'],['','','',''],['','','','']]};", sandbox);
+try { vm.runInContext("editTable(el('div'), App._rag);", sandbox);
+  const widths = vm.runInContext("App._rag.rows.map(r=>r.length)", sandbox);
+  ok(widths.every(w=>w===5), "editTable pads ragged rows to header width", "got " + JSON.stringify(widths)); }
+catch (e) { ok(false, "editTable pads ragged rows to header width", e && e.message); }
+
 // Datatable editor smoke: a multi-sim compliance table (cdr flat + pdr per-sim, a
 // setting row, a repeated Category) exercises editDatatable/rebuildMetrics -- the
 // setting-row banding, cat-repeat dimming, rowspan header, and per-key value read.
