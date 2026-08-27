@@ -48,7 +48,8 @@ import shutil
 import sys
 import zipfile
 
-SELF = os.path.dirname(os.path.abspath(__file__))
+SELF = os.path.dirname(os.path.abspath(__file__))          # builder/sync
+REPO = os.path.dirname(os.path.dirname(SELF))              # repo root
 RESERVED = {"_backups", "_updates", "_outbox", "__pycache__"}
 
 
@@ -63,8 +64,8 @@ def resolve_root(arg):
     env = os.environ.get("BUILDER_REPORTS_ROOT")
     if env:
         return os.path.abspath(env)
-    cand = os.path.join(SELF, "local")
-    return cand if os.path.isdir(cand) else SELF
+    cand = os.path.join(REPO, "local")
+    return cand if os.path.isdir(cand) else REPO
 
 
 def _backups(root):
@@ -857,7 +858,7 @@ def cmd_list(root):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Apply report update bundles.")
     ap.add_argument("bundle", nargs="?", help="bundle .zip (default: newest in <root>/_updates/)")
-    ap.add_argument("--root", help="reports root (default: ./local next to this script)")
+    ap.add_argument("--root", help="reports root (default: <repo>/local)")
     ap.add_argument("--dry-run", action="store_true", help="preview, write nothing")
     ap.add_argument("--yes", action="store_true", help="skip confirmation")
     ap.add_argument("--snapshot", action="store_true", help="package current project.json to hand back")
