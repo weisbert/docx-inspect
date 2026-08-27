@@ -33,7 +33,7 @@ python -m venv .venv
 ## Usage
 
 ```bash
-python inspect_word.py input.docx [output.txt]
+python builder/tools/inspect_word.py input.docx [output.txt]
 ```
 
 With no output path it writes `input_inspect.txt` next to the input. Open the

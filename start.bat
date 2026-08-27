@@ -8,4 +8,4 @@ rem Force UTF-8 for Python stdio so printing U+2212 / U+26A0 etc. never hits a
 rem cp936 (GBK) UnicodeEncodeError on this locale.
 set PYTHONUTF8=1
 echo Starting document builder...  (close this window to stop the server)
-.venv\Scripts\python.exe builder\server.py --open %*
+.venv\Scripts\python.exe builder\web\server.py --open %*

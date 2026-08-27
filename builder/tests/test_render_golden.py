@@ -27,16 +27,20 @@ terms (iron rule 1). The test is standalone: run it directly, exit 0 on pass and
 nonzero on any failed assertion.
 
 Run:
-    python builder/test_render_golden.py
+    python builder/tests/test_render_golden.py
 """
 
 import os
 import sys
 import tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 
 from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402

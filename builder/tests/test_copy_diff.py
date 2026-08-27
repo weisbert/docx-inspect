@@ -13,8 +13,11 @@ import os
 import sys
 import tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))   # repo root: apply_update.py
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 import apply_update as A   # noqa: E402
 
 _fails = []

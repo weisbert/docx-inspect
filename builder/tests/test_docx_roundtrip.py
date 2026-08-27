@@ -12,12 +12,15 @@ that content survives. Covers the fixes for silent round-trip loss:
 Genuinely NOT recoverable from Word (documented, not asserted): a datatable row's
 limit (le/ge) and sim_span, and meta.version (the engine never renders it).
 
-ASCII-only, no company/CJK data. Run: python builder/test_docx_roundtrip.py
+ASCII-only, no company/CJK data. Run: python builder/tests/test_docx_roundtrip.py
 """
 import os, struct, sys, tempfile, zlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 import engine          # noqa: E402
 import docx_import     # noqa: E402
 from test_render_golden import golden_config  # noqa: E402

@@ -29,11 +29,15 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))          # builder/web
+BUILDER = os.path.dirname(HERE)                            # builder
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
 
-import templates_store as tstore  # builder/ is on sys.path via HERE  # noqa: E402
+import buildpath  # noqa: E402,F401  (side effect: registers core/docx_io/store/sync)
+import templates_store as tstore  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Server configuration (populated in main()).
@@ -1902,17 +1906,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _import_apply_update():
-    """Import the repo-root apply_update module (shared with the CLI).
+    """Import the shared apply_update module (builder/sync, shared with the CLI).
 
     Reload on every call so a long-running server picks up an updated
     apply_update.py after a ``git pull`` WITHOUT needing a restart (Python caches
     modules in sys.modules; a running server would otherwise keep the stale code).
     """
     import importlib
-    repo_root = os.path.abspath(os.path.join(HERE, ".."))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-    import apply_update  # noqa: E402  (repo-root sibling of builder/)
+    import apply_update  # noqa: E402  (builder/sync, on sys.path via buildpath)
     return importlib.reload(apply_update)
 
 
@@ -1968,7 +1969,7 @@ def default_config_path():
     """
     import glob
 
-    local_dir = os.path.abspath(os.path.join(HERE, "..", "local"))
+    local_dir = os.path.abspath(os.path.join(HERE, "..", "..", "local"))
     matches = sorted(glob.glob(os.path.join(local_dir, "template_config_*.json")))
     return matches[0] if matches else None
 
@@ -1979,7 +1980,7 @@ def default_reports_root():
     Lets ``python builder/server.py`` (or a start script) Just Work without
     ``--root`` in the common layout where reports live under ``<repo>/local``.
     """
-    cand = os.path.abspath(os.path.join(HERE, "..", "local"))
+    cand = os.path.abspath(os.path.join(HERE, "..", "..", "local"))
     return cand if os.path.isdir(cand) else None
 
 

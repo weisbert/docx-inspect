@@ -436,7 +436,7 @@ def _is_setting_fill(hexv):
 
 # ---------------------------------------------------------------------------
 # Compliance grid -> data model.
-# SOURCE OF TRUTH: server.parse_xlsx_compliance (builder/server.py). This is a
+# SOURCE OF TRUTH: server.parse_xlsx_compliance (builder/web/server.py). This is a
 # faithful port of its grid->model core so this module needs no server import;
 # function name and AX set are kept identical for a mechanical later merge.
 # ---------------------------------------------------------------------------

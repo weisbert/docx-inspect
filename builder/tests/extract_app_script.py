@@ -14,7 +14,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP_HTML = os.path.abspath(os.path.join(HERE, "..", "app.html"))
+APP_HTML = os.path.abspath(os.path.join(HERE, "..", "web", "app.html"))
 
 
 def extract(html):

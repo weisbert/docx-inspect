@@ -11,8 +11,11 @@ exercised missing_image). Run:
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 
 import content_lint as cl  # noqa: E402
 

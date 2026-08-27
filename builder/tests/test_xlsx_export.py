@@ -11,8 +11,11 @@ import io
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 import openpyxl                       # noqa: E402
 import xlsx_export as X               # noqa: E402
 import test_render_golden as G        # noqa: E402

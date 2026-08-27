@@ -17,9 +17,11 @@ import sys
 import tempfile
 import zipfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, ".."))
-sys.path.insert(0, REPO)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 
 import apply_update as au  # noqa: E402
 

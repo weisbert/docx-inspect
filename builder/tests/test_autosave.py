@@ -7,12 +7,15 @@ Exercises the pure helpers on a temp reports root:
   - list newest-first with reason tags
   - restore (and that restore snapshots the current state first, so it's undoable)
 
-Neutral: no project/company data. Run: python builder/test_autosave.py
+Neutral: no project/company data. Run: python builder/tests/test_autosave.py
 """
 import json, os, shutil, sys, tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 import server  # noqa: E402
 
 

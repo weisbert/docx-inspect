@@ -26,8 +26,11 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
+BUILDER = os.path.dirname(HERE)                  # builder/
+if BUILDER not in sys.path:
+    sys.path.insert(0, BUILDER)
+import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 
 import server  # noqa: E402
 
@@ -626,7 +629,7 @@ def check_real_config():
     """
     import glob
 
-    local_dir = os.path.abspath(os.path.join(HERE, "..", "local"))
+    local_dir = os.path.abspath(os.path.join(HERE, "..", "..", "local"))
     cfgs = sorted(glob.glob(os.path.join(local_dir, "template_config_*.json")))
     demo = os.path.join(local_dir, "demo_project")
     if not cfgs or not os.path.isfile(os.path.join(demo, "project.json")):

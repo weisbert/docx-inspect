@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const APP_HTML = path.join(__dirname, "..", "app.html");
+const APP_HTML = path.join(__dirname, "..", "web", "app.html");
 let html = fs.readFileSync(APP_HTML, "utf8");
 const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
   .map(m => m[1]).sort((a, b) => a.length - b.length);

@@ -17,8 +17,8 @@ Findings share the render manifest's warning shape and add a ``level``:
              which the demo proves is valid). Default off in the GUI.
 
 CLI:
-    python builder/content_lint.py <project_dir> [--config <template.json>]
-    python builder/content_lint.py <project_dir> --json      # machine-readable
+    python builder/core/content_lint.py <project_dir> [--config <template.json>]
+    python builder/core/content_lint.py <project_dir> --json      # machine-readable
 
 Exit status is 1 when any ``error``-level finding exists (0 otherwise), so it can
 gate a fill / bundle workflow.
