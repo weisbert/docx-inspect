@@ -21,6 +21,14 @@ worth using -- the ones a future refactor must never silently break:
      indirectly through the rendered red cells; the manifest is asserted for the
      missing image).
   7. No-spill guarantee: every compliance row uses an EXACT row-height rule.
+  8. Cross-reference placeholder text: a REF field's cached text is the target
+     caption's COMPUTED NUMBER ("1-1"), never a bare "Figure" / "Table" label.
+     Word does not refresh fields when it exports to PDF, so that cached text is
+     what a printed / proof page actually shows.
+  9. Section-only rendering (render_report(..., section_only=<node id>) and its
+     render_section_docx wrapper): the fragment drops the cover and the contents
+     but keeps WHOLE-DOCUMENT numbering -- captions, cross-references and heading
+     numbers all read as they do in the full render.
 
 The fixture config and project contain ZERO CJK characters and zero company
 terms (iron rule 1). The test is standalone: run it directly, exit 0 on pass and
@@ -213,6 +221,7 @@ def golden_project():
                             "text": NOTE_SENTINEL_REPORT}]},
         "outline": [
             {
+                "id": "sec-results",
                 "title": "Results",
                 "level": 1,
                 # section-level note -- also must not reach the body.
@@ -244,6 +253,7 @@ def golden_project():
                 "children": [],
             },
             {
+                "id": "sec-outline-lists",
                 "title": "Outline lists",
                 "level": 1,
                 "blocks": [
@@ -275,6 +285,67 @@ def golden_project():
                 ],
                 "children": [],
             },
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Fixture for section-only rendering.
+#
+# Deliberately SEPARATE from golden_project() so the golden document's bytes stay
+# untouched. Shape: four chapters, the target being a nested section (4.2) that
+# sits mid-document, owns a figure and a table, and carries cross-references both
+# to its own figure and to a figure in another chapter. That combination is what
+# a naive "slice the outline and render it" implementation gets wrong -- figure
+# numbers restart at 1, the chapter number goes missing, and the outside
+# reference degrades to a red "[ref: ...]" marker.
+# ---------------------------------------------------------------------------
+def section_only_project():
+    return {
+        "schema_version": 1,
+        "template": "golden_tpl_v1",
+        "meta": {"title": "Section Only Fixture", "author": "Tester",
+                 "reviewers": [], "revisions": []},
+        "outline": [
+            {"id": "sec-alpha", "title": "Alpha", "level": 1, "children": [],
+             "blocks": [
+                 {"type": "image", "id": "img-alpha", "file": "images/a.png",
+                  "caption": "Alpha figure", "width_cm": 10.0},
+             ]},
+            {"id": "sec-beta", "title": "Beta", "level": 1, "children": [],
+             "blocks": [
+                 {"type": "para", "list": None, "runs": [{"t": "Beta body."}]},
+             ]},
+            {"id": "sec-gamma", "title": "Gamma", "level": 1, "children": [],
+             "blocks": [
+                 {"type": "image", "id": "img-gamma", "file": "images/g.png",
+                  "caption": "Gamma figure", "width_cm": 10.0},
+             ]},
+            {"id": "sec-delta", "title": "Delta", "level": 1,
+             "blocks": [
+                 {"type": "image", "id": "img-delta-0", "file": "images/d0.png",
+                  "caption": "Delta opening figure", "width_cm": 10.0},
+             ],
+             "children": [
+                 {"id": "sec-delta-one", "title": "Delta One", "level": 2,
+                  "children": [], "blocks": [
+                      {"type": "image", "id": "img-delta-1", "file": "images/d1.png",
+                       "caption": "Delta one figure", "width_cm": 10.0},
+                  ]},
+                 {"id": "sec-delta-two", "title": "Delta Two", "level": 2,
+                  "children": [], "blocks": [
+                      # references BOTH a figure inside this section (forward) and
+                      # one in a different chapter (outside the emitted subtree).
+                      {"type": "para", "list": None,
+                       "runs": [{"t": "See "}, {"ref": "img-delta-2"},
+                                {"t": " and "}, {"ref": "img-alpha"}, {"t": "."}]},
+                      {"type": "image", "id": "img-delta-2", "file": "images/d2.png",
+                       "caption": "Delta two figure", "width_cm": 10.0},
+                      {"type": "table", "id": "tbl-delta-2",
+                       "caption": "Delta two table", "header_rows": 1, "col_w": None,
+                       "rows": [["Name", "Value"], ["a", "1"]]},
+                  ]},
+             ]},
         ],
     }
 
@@ -444,6 +515,71 @@ def caption_paragraphs(doc):
     return out
 
 
+def field_placeholders(el, instr_substr):
+    """Cached placeholder text of every field in ``el`` matching instr_substr.
+
+    A Word field is a run sequence begin / instrText / separate / result / end.
+    The run(s) between "separate" and "end" hold the cached result -- what Word
+    shows until F9, and therefore what a PDF export or page image shows, because
+    Word does not refresh fields on export."""
+    out = []
+    state = None      # None -> outside, "instr" -> reading instrText, "result"
+    instr = ""
+    text = ""
+    for r in el.iter(qn("w:r")):
+        fld = r.find(qn("w:fldChar"))
+        if fld is not None:
+            kind = fld.get(qn("w:fldCharType"))
+            if kind == "begin":
+                state, instr, text = "instr", "", ""
+            elif kind == "separate":
+                state = "result"
+            elif kind == "end":
+                if state == "result" and instr_substr in instr:
+                    out.append(text)
+                state = None
+            continue
+        if state == "instr":
+            for it in r.iter(qn("w:instrText")):
+                instr += it.text or ""
+        elif state == "result":
+            for t in r.iter(qn("w:t")):
+                text += t.text or ""
+    return out
+
+
+def hidden_paragraphs(doc):
+    """Paragraphs whose paragraph mark carries <w:vanish/> (hidden text)."""
+    out = []
+    for p in doc.paragraphs:
+        pPr = p._p.find(qn("w:pPr"))
+        if pPr is None:
+            continue
+        rPr = pPr.find(qn("w:rPr"))
+        if rPr is not None and rPr.find(qn("w:vanish")) is not None:
+            out.append(p)
+    return out
+
+
+def heading_start_overrides(doc, num_id):
+    """[(ilvl, startOverride value)] on the heading numbering instance."""
+    numbering = doc.part.numbering_part.element
+    for num in numbering.findall(qn("w:num")):
+        if num.get(qn("w:numId")) != str(num_id):
+            continue
+        out = []
+        for ov in num.findall(qn("w:lvlOverride")):
+            so = ov.find(qn("w:startOverride"))
+            out.append((ov.get(qn("w:ilvl")),
+                        so.get(qn("w:val")) if so is not None else None))
+        return out
+    return None
+
+
+def caption_texts(doc):
+    return [p.text for p in caption_paragraphs(doc)]
+
+
 def bookmark_names(doc):
     names = set()
     for bs in doc.element.body.iter(qn("w:bookmarkStart")):
@@ -451,6 +587,10 @@ def bookmark_names(doc):
         if nm:
             names.add(nm)
     return names
+
+
+def _collect_targets_snapshot():
+    return engine._collect_ref_targets(golden_project()["outline"])
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +842,26 @@ def main():
     check(doc_has_field_anywhere(doc, "REF bm_dt-gold-1_num"),
           "paragraph REF field targets the table bookmark")
 
+    # --- a REF field's CACHED text is the target's number, not a bare label ---
+    # Word does not refresh fields when it exports to PDF, so this cached text is
+    # what a printed page (and every proof image) shows. It must read exactly as
+    # the caption's own number does, and never as the word "Figure" / "Table".
+    img_ph = field_placeholders(doc.element.body, "REF bm_img-gold-1_num")
+    tbl_ph = field_placeholders(doc.element.body, "REF bm_dt-gold-1_num")
+    check(img_ph == ["1-1"],
+          "figure REF placeholder is the computed number '1-1'", repr(img_ph))
+    check(tbl_ph == ["1-1"],
+          "table REF placeholder is the computed number '1-1'", repr(tbl_ph))
+    check(all(ph not in ("Figure", "Table") for ph in img_ph + tbl_ph),
+          "REF placeholder is never a bare 'Figure' / 'Table' label",
+          repr(img_ph + tbl_ph))
+    check(_collect_targets_snapshot() == {"img-gold-1": "1-1", "dt-gold-1": "1-1",
+                                          "grid-gold-1": "1-2"},
+          "_collect_ref_targets maps block ids to '<chap>-<seq>' numbers",
+          repr(_collect_targets_snapshot()))
+    check("dangling_ref" not in wtypes,
+          "no reference is reported as dangling", "warnings=%r" % wtypes)
+
     # --- footer DATE / PAGE / NUMPAGES + TOC field ---
     check(footer_has_field(doc, "DATE"), "footer has a DATE field")
     check(footer_has_field(doc, "PAGE"), "footer has a PAGE field")
@@ -775,7 +935,146 @@ def main():
           "sim_span per-group: value shown once in EACH group's own merged cell (CDR+PDR=2)",
           "value appears in %d distinct cells" % len(span_val_cells))
 
+    check_section_only()
+
     return _finish()
+
+
+def check_section_only():
+    """render_report(..., section_only=<node id>) keeps whole-document numbering.
+
+    Renders section_only_project() twice -- whole, then the nested section "4.2"
+    alone -- and asserts the fragment is what a proof render needs: no cover, no
+    contents, and every number (captions, cross-references, heading autonumber)
+    identical to the full document. A naive slice-the-outline implementation
+    fails every one of these."""
+    cfg_full = golden_config()
+    cfg_full["_logo_path"] = ""
+    project = section_only_project()
+    tmp = tempfile.mkdtemp(prefix="section_only_")
+    os.makedirs(os.path.join(tmp, "images"), exist_ok=True)
+
+    full_path = os.path.join(tmp, "out", "full.docx")
+    engine.render_report(project, cfg_full, tmp, full_path)
+    full = Document(full_path)
+
+    cfg_sec = golden_config()
+    cfg_sec["_logo_path"] = ""
+    sec_path = os.path.join(tmp, "out", "section.docx")
+    # exercise the named wrapper the live-preview path calls
+    sec_result = engine.render_section_docx(project, cfg_sec, tmp, sec_path,
+                                            "sec-delta-two")
+    check(isinstance(sec_result, dict) and os.path.isfile(sec_path),
+          "render_section_docx writes a docx and returns a manifest")
+    sec = Document(sec_path)
+
+    # --- the fragment drops the front matter ---
+    check(not doc_has_field_anywhere(sec, "TOC"),
+          "section-only render has NO table of contents field")
+    check(doc_has_field_anywhere(full, "TOC"),
+          "the full render still has a table of contents field")
+    cover_title = golden_config()["cover"]["big_title"]["placeholder"]
+    body_text = "\n".join(p.text for p in sec.paragraphs)
+    check(cover_title not in body_text,
+          "section-only render has NO cover", repr(cover_title))
+
+    # --- only the selected subtree is emitted ---
+    hidden_els = {id(h._p) for h in hidden_paragraphs(sec)}
+    visible_headings = [p.text for p in sec.paragraphs
+                        if p.style is not None and p.style.name.startswith("Heading")
+                        and id(p._p) not in hidden_els]
+    check(visible_headings == ["Delta Two"],
+          "only the selected section's heading is emitted", repr(visible_headings))
+    check(sec_result.get("stats", {}).get("total_blocks") == 3,
+          "only the selected section's blocks are counted",
+          repr(sec_result.get("stats")))
+    sec_warn_types = [w.get("type") for w in sec_result.get("warnings", [])]
+    check(sec_warn_types.count("missing_image") == 1,
+          "warnings are scoped to the emitted section (1 missing image, not 5)",
+          repr(sec_warn_types))
+
+    # --- captions keep their whole-document numbers ---
+    fcaps = caption_texts(full)
+    scaps = caption_texts(sec)
+    check(scaps == ["Figure 4-3  Delta two figure", "Table 4-1  Delta two table"],
+          "fragment captions carry the FULL-document numbers (4-3 / 4-1)",
+          repr(scaps))
+    check(all(c in fcaps for c in scaps),
+          "every fragment caption is verbatim one of the full render's captions",
+          repr((scaps, fcaps)))
+    check(not any(c.startswith("Figure 1-1") for c in scaps),
+          "figure numbering did NOT restart at 1-1", repr(scaps))
+
+    # --- cross-references still resolve, including one pointing out of section ---
+    inside = field_placeholders(sec.element.body, "REF bm_img-delta-2_num")
+    outside = field_placeholders(sec.element.body, "REF bm_img-alpha_num")
+    check(inside == ["4-3"],
+          "in-section reference shows the full-document number", repr(inside))
+    check(outside == ["1-1"],
+          "reference to a figure OUTSIDE the emitted section still resolves",
+          repr(outside))
+    check("dangling_ref" not in sec_warn_types,
+          "no reference in the fragment is reported as dangling",
+          repr(sec_warn_types))
+    check("[ref:" not in body_text,
+          "no reference degraded to a red '[ref: ...]' marker")
+
+    # --- a Heading 1 exists for STYLEREF, and heading numbers are anchored ---
+    hidden = hidden_paragraphs(sec)
+    check([h.text for h in hidden] == ["Delta"],
+          "the ancestor chapter heading is synthesised (hidden) for STYLEREF",
+          repr([h.text for h in hidden]))
+    check(hidden and hidden[0].style is not None
+          and hidden[0].style.name == "Heading 1",
+          "the synthesised ancestor is a Heading 1",
+          repr(hidden[0].style.name if hidden else None))
+    check(any(paragraph_has_field(p, "STYLEREF") for p in caption_paragraphs(sec)),
+          "fragment captions still use a STYLEREF chapter field")
+    num_id = golden_config()["styles"]["headings"]["autonumber"]["num_id"]
+    check(heading_start_overrides(sec, num_id) == [("0", "4"), ("1", "2")],
+          "heading autonumber is anchored to the section's number path (4.2)",
+          repr(heading_start_overrides(sec, num_id)))
+    check(heading_start_overrides(full, num_id) == [],
+          "a full render adds NO heading start overrides",
+          repr(heading_start_overrides(full, num_id)))
+
+    # --- progress reporting covers the emitted subtree only ---
+    prog = []
+    cfg_p = golden_config()
+    cfg_p["_logo_path"] = ""
+    engine.render_report(project, cfg_p, tmp, os.path.join(tmp, "out", "p.docx"),
+                         on_progress=lambda d, t, l: prog.append((d, t)),
+                         section_only="sec-delta-two")
+    dones = [d for d, _t in prog]
+    totals = {t for _d, t in prog}
+    check(prog and len(totals) == 1 and dones == list(range(1, list(totals)[0] + 1)),
+          "on_progress runs 1..total over the emitted section only", repr(prog))
+
+    # --- a top-level target needs no synthesised ancestor ---
+    cfg_top = golden_config()
+    cfg_top["_logo_path"] = ""
+    top_path = os.path.join(tmp, "out", "top.docx")
+    engine.render_section_docx(project, cfg_top, tmp, top_path, "sec-gamma")
+    top = Document(top_path)
+    check(not hidden_paragraphs(top),
+          "a top-level section needs no hidden ancestor heading")
+    check(heading_start_overrides(top, num_id) == [("0", "3")],
+          "a top-level section anchors its own chapter number",
+          repr(heading_start_overrides(top, num_id)))
+    check(caption_texts(top) == ["Figure 3-1  Gamma figure"],
+          "a top-level section keeps its chapter's figure number",
+          repr(caption_texts(top)))
+
+    # --- an unknown node id is an error, not a silently empty document ---
+    cfg_bad = golden_config()
+    cfg_bad["_logo_path"] = ""
+    try:
+        engine.render_report(project, cfg_bad, tmp,
+                             os.path.join(tmp, "out", "x.docx"),
+                             section_only="no-such-node")
+        check(False, "an unknown section_only id raises ValueError")
+    except ValueError:
+        check(True, "an unknown section_only id raises ValueError")
 
 
 def _finish():

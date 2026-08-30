@@ -44,6 +44,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -51,6 +52,11 @@ import zipfile
 SELF = os.path.dirname(os.path.abspath(__file__))          # builder/sync
 REPO = os.path.dirname(os.path.dirname(SELF))              # repo root
 RESERVED = {"_backups", "_updates", "_outbox", "__pycache__"}
+
+# Per-report rolling snapshots, written before any overwrite so every apply --
+# including one that had no baseline to check against -- stays recoverable.
+AUTOSAVE_DIRNAME = "_autosave"
+AUTOSAVE_KEEP = 300
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +126,147 @@ def _baseline_path(root, rel):
 
 
 def _stamp_baseline(root, rel, project_bytes):
-    """Refresh _baseline.json after a sync event (apply bundle / paste-import /
-    text-diff apply / rollback). No-op for non-project.json targets. Best-effort:
-    the baseline is an optimization, never worth failing an apply over."""
+    """Move _baseline.json to a state BOTH SIDES now agree on.
+
+    Call this ONLY for an event where a whole report crossed the channel: a
+    package applied (run_plan), a full-text paste-import (record_replace), a
+    rollback of one of those (rollback_last), a three-way merge of an inbound
+    package. A one-way incremental diff is NOT such an event and must never call
+    it -- see apply_text_diff for why.
+
+    No-op for non-project.json targets. Best-effort: the baseline is an
+    optimization, never worth failing an apply over."""
     if os.path.basename(rel.replace("\\", "/")) != "project.json":
         return
     try:
         _atomic_write(_baseline_path(root, rel), project_bytes)
     except OSError:
         pass
+
+
+class BaselineMismatch(Exception):
+    """The two sides do not declare the same common ancestor.
+
+    The package names the state it was cut from (``base_sha``); this machine
+    names the state it last agreed on (``_baseline.json``). When those differ, the
+    ops in the package describe edits to a report neither side is holding, so the
+    apply is REFUSED -- this used to be only a warning printed after the write.
+    The caller renders the ways forward; see _print_baseline_refusal.
+    """
+
+    def __init__(self, package_base, local_base, dir_name=None):
+        Exception.__init__(
+            self, "baseline mismatch for %s: package %s, local %s"
+            % (dir_name or "?", (package_base or "?")[:12],
+               (local_base or "?")[:12]))
+        # camelCase mirrors the JSON keys the HTTP layer hands the frontend.
+        self.packageBase = package_base
+        self.localBase = local_base
+        self.dir = dir_name
+
+    def as_dict(self):
+        return {"error": "baseline_mismatch", "packageBase": self.packageBase,
+                "localBase": self.localBase, "dir": self.dir}
+
+
+def project_sha(path):
+    """Fingerprint of a project.json on disk, canonicalized the same way
+    make_text_diff fingerprints the state a package was cut from, so the two are
+    directly comparable. None when the file is absent or unreadable."""
+    try:
+        return _sha(_canon(json.loads(_read(path).decode("utf-8"))))
+    except Exception:
+        return None
+
+
+def baseline_state(root, rel):
+    """(has_baseline, ancestor_sha) for one project.json.
+
+    has_baseline says whether this report has ever taken part in an exchange at
+    all -- whether ``_baseline.json`` exists next to it. ancestor_sha fingerprints
+    that baseline's CONTENT: the state both sides last agreed on, which is exactly
+    what make_text_diff puts in a package's ``base_sha``. It is deliberately NOT
+    the sha of the current project.json -- see check_baseline.
+    """
+    bpath = _baseline_path(root, rel)
+    return (os.path.isfile(bpath), project_sha(bpath))
+
+
+def check_baseline(root, rel, package_base, dir_name=None):
+    """Guard an apply against a package cut from a DIFFERENT ancestor. Three
+    cases, deliberately distinct -- returns which one applies, or raises:
+
+      * local baseline content == package base_sha -> "ok", proceed
+      * local baseline content != package base_sha -> raise BaselineMismatch
+      * the report has NO _baseline.json           -> "no_baseline", proceed anyway
+
+    The question asked is "do the two sides declare the same common ancestor?",
+    never "has this project.json changed since the last exchange?". The local file
+    is rewritten by ordinary saves and by content-filling scripts, and that drift
+    is exactly what an incoming op-diff is merged onto; measuring the package
+    against the current file instead would refuse every report that has been
+    edited since its last exchange, which in practice is all of them.
+
+    The third case must never be turned into a refusal. Reports that have never
+    been exchanged have no baseline to compare against, so a mismatch reading is
+    meaningless there; refusing them would lock those reports out of the exchange
+    permanently, with no way to ever earn a baseline. They are applied as a full
+    replace after a snapshot, and a baseline is stamped afterwards so the next
+    exchange can be incremental.
+    """
+    has_baseline, ancestor = baseline_state(root, rel)
+    if not package_base:
+        return "no_fingerprint"     # nothing to compare -- older package format
+    if not has_baseline:
+        return "no_baseline"
+    if package_base != ancestor:
+        raise BaselineMismatch(package_base, ancestor, dir_name)
+    return "ok"
+
+
+def snapshot_project(project_dir, reason="save"):
+    """Copy a report's project.json into ``<report>/_autosave/<ts>__<reason>.json``
+    before something overwrites it -- the same rolling snapshot layout the
+    history timeline reads. Deduplicates against the newest snapshot (returning
+    its path either way, so the caller always has something to point at) and
+    prunes to AUTOSAVE_KEEP. Best-effort: a snapshot must never be able to break
+    the write it protects."""
+    try:
+        pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            return None
+        data = _read(pj)
+        adir = os.path.join(project_dir, AUTOSAVE_DIRNAME)
+        existing = _snapshot_paths(adir)
+        if existing and _read(existing[-1]) == data:
+            return existing[-1].replace("\\", "/")
+        os.makedirs(adir, exist_ok=True)
+        stem = "%s__%s" % (_ts(), _sanitize_tag(reason))
+        name, k = stem + ".json", 1
+        while os.path.exists(os.path.join(adir, name)):
+            name = "%s-%d.json" % (stem, k)
+            k += 1
+        path = os.path.join(adir, name)
+        _atomic_write(path, data)
+        for old in _snapshot_paths(adir)[:-AUTOSAVE_KEEP]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        return path.replace("\\", "/")
+    except Exception:
+        return None
+
+
+def _snapshot_paths(adir):
+    if not os.path.isdir(adir):
+        return []
+    return sorted(os.path.join(adir, n) for n in os.listdir(adir)
+                  if n.endswith(".json"))
+
+
+def _sanitize_tag(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip("-") or "save"
 
 
 def _safe_rel(name):
@@ -452,10 +590,30 @@ def _apply_text_diff_into(project, diff):
 
 def apply_text_diff(root, diff, dir_name=None, backup=True):
     """Apply an upstream "Copy diff" delta to a local project.json. Backs the
-    target into the shared rollback history, writes atomically, re-stamps the
-    baseline. Returns {ok, backup, logs, rel, base_match} (base_match is None when
-    the diff carried no fingerprint, else whether the local file matched it).
-    Raises FileNotFoundError if the target project.json is absent."""
+    target into the shared rollback history and writes atomically. Returns
+    {ok, backup, logs, rel, base_match, baseline, baseline_moved}. base_match is
+    None when the diff carried no fingerprint, else whether the CURRENT file still
+    equals the state the diff was cut from -- drift reporting only, never the
+    guard. ``baseline`` names which of check_baseline's three cases applied.
+
+    THE BASELINE DOES NOT MOVE HERE. A delta is one-way: only the far side's
+    edits crossed, this machine's did not, so the two sides did not arrive at a
+    common state and there is no new agreement to record. The far side's baseline
+    likewise stays put when it cuts a delta, which is what makes "Copy diff" mean
+    "everything since the last full exchange" -- cumulative, and idempotent when
+    the same text is pasted twice. Re-stamping here would rename the ancestor on
+    this side only, so the NEXT delta -- cut from the same unchanged far-side
+    baseline -- would be refused as a mismatch, and every delta after the first
+    was dead. The baseline moves only when a whole report crosses: a package, a
+    paste-import, or a rollback of one of those.
+
+    The single exception is a report that has no baseline at all: applying a delta
+    to it establishes the first agreement rather than moving an existing one, so
+    one is stamped (``baseline_moved`` True) and the next exchange can be checked.
+
+    Raises FileNotFoundError if the target project.json is absent, and
+    BaselineMismatch when the diff was cut from a state this machine has moved
+    past -- see check_baseline for why a MISSING baseline is not that case."""
     dname = dir_name or diff.get("dir")
     if not dname:
         raise ValueError("diff has no project dir; pass dir_name")
@@ -464,9 +622,16 @@ def apply_text_diff(root, diff, dir_name=None, backup=True):
     if not os.path.isfile(tgt):
         raise FileNotFoundError("no project.json at %s" % tgt)
     project = json.loads(_read(tgt).decode("utf-8"))
+    local_sha = _sha(_canon(project))
     base_match = None
     if diff.get("base_sha"):
-        base_match = (diff["base_sha"] == _sha(_canon(project)))
+        base_match = (diff["base_sha"] == local_sha)
+    # Refuses (raises) on a real mismatch; a report with no baseline yet is let
+    # through on purpose and snapshotted first.
+    baseline = check_baseline(root, rel, diff.get("base_sha"), dname)
+    had_baseline, _ = baseline_state(root, rel)
+    if baseline != "ok":
+        snapshot_project(os.path.dirname(tgt), "prebaseline")
     logs = _apply_text_diff_into(project, diff)
     new_bytes = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
     bdir = _new_backup_dir(root)
@@ -478,9 +643,13 @@ def apply_text_diff(root, diff, dir_name=None, backup=True):
     st = _load_state(root)
     st[rel] = _sha(new_bytes)
     _save_state(root, st)
-    _stamp_baseline(root, rel, new_bytes)
+    # Establish a first agreement for a report that has never exchanged; never
+    # move one that already exists (see the docstring).
+    if not had_baseline:
+        _stamp_baseline(root, rel, new_bytes)
     return {"ok": True, "backup": bdir.replace("\\", "/"), "logs": logs,
-            "rel": rel.replace("\\", "/"), "base_match": base_match}
+            "rel": rel.replace("\\", "/"), "base_match": base_match,
+            "baseline": baseline, "baseline_moved": not had_baseline}
 
 
 # ---------------------------------------------------------------------------
@@ -717,25 +886,53 @@ def cmd_apply_diff(root, path, dir_name, yes):
         return 0
     for line in diff_summary(diff):
         print("  * " + line)
-    tgt = os.path.join(root, dname, "project.json")
+    rel = os.path.join(dname, "project.json")
+    tgt = os.path.join(root, rel)
     if not os.path.isfile(tgt):
         print("error: no project.json at %s" % tgt)
         return 2
+    # Check the fingerprint BEFORE prompting, so the user is never asked to
+    # confirm an apply that is going to be refused.
+    try:
+        state = check_baseline(root, rel, diff.get("base_sha"), dname)
+    except BaselineMismatch as mismatch:
+        _print_baseline_refusal(mismatch)
+        return 3
+    if state == "no_baseline":
+        print("\nNote: this report has no exchange baseline yet, so there is "
+              "nothing to compare the diff against. It will be applied after a "
+              "snapshot, and a baseline recorded so the next exchange can be "
+              "incremental.")
     if not yes:
         ans = input("\nApply this diff to %s? [y/N] " % dname).strip().lower()
         if ans not in ("y", "yes"):
             print("aborted.")
             return 1
-    res = apply_text_diff(root, diff, dir_name=dir_name)
+    try:
+        res = apply_text_diff(root, diff, dir_name=dir_name)
+    except BaselineMismatch as mismatch:   # the file moved between check and write
+        _print_baseline_refusal(mismatch)
+        return 3
     for line in res["logs"]:
         print(line)
-    if res.get("base_match") is False:
-        print("  ! WARNING: local project.json differs from the diff's baseline "
-              "(base_sha mismatch). Changed sections were applied wholesale, but "
-              "any section you never edited on the work machine keeps the local "
-              "version -- verify if you have out-of-band edits here.")
     print("\nOK. Backed up to: %s" % res["backup"])
     return 0
+
+
+def _print_baseline_refusal(mismatch):
+    """The ways forward, spelled out -- a refusal with no route out is worse than
+    the silent overwrite it replaced. Both routes below work for an op-diff, which
+    carries only the changed sections and so cannot itself act as an ancestor."""
+    print("\nREFUSED: the two sides name different common ancestors.")
+    print("  diff was cut from: %s" % (mismatch.packageBase or "?"))
+    print("  local baseline   : %s" % (mismatch.localBase or "?"))
+    print("Nothing was written. Two ways forward, both available right now:")
+    print("  1. Ask for the whole report instead of a delta (Copy text -> paste "
+          "import). A full report carries its own content, so it can be merged "
+          "against this baseline; a delta cannot.")
+    print("  2. Re-synchronize first -- apply a package (or paste-import) once, "
+          "which re-stamps the baseline on both sides -- then send a fresh delta "
+          "cut from that new baseline.")
 
 
 # ---------------------------------------------------------------------------

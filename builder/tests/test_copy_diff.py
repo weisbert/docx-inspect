@@ -3,15 +3,23 @@
 """Regression tests for the upstream "Copy diff" channel (apply_update.py):
 make_text_diff -> apply_text_diff must reproduce the edited project EXACTLY, for
 block edits, renames, meta / top-level changes, and sub-structure changes; an
-unchanged pair yields an empty diff; the applier restamps the baseline and flags
-a drifted local copy. Pure logic (no server) -- fast, run in CI alongside the
-render golden. See test_app_logic.js for the GUI side.
+unchanged pair yields an empty diff; the applier flags a drifted local copy.
+
+Also pins the BASELINE INVARIANT: ``_baseline.json`` is the last state both sides
+agreed on, so it moves only when a whole report crosses the channel (package,
+paste-import, rollback) and NEVER when a one-way delta is applied. That is what
+makes a delta cumulative since the last full exchange and idempotent on re-paste;
+moving it would refuse every delta after the first.
+
+Pure logic (no server) -- fast, run in CI alongside the render golden. See
+test_app_logic.js for the GUI side.
 """
 import copy
 import json
 import os
 import sys
 import tempfile
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # builder/tests
 BUILDER = os.path.dirname(HERE)                  # builder/
@@ -81,9 +89,147 @@ def roundtrip(name, mutate, expect_empty=False):
     if not ok:
         print("     got : %s" % canon(got))
         print("     want: %s" % canon(cur))
-    check(res.get("base_match") is True, "%s -> base_sha matches seeded baseline" % name)
+    check(res.get("base_match") is True, "%s -> base_sha matches seeded project" % name)
+    # This report had no _baseline.json, so the apply establishes the FIRST
+    # agreement (it does not move an existing one -- see the invariant tests).
+    check(res.get("baseline") == "no_baseline",
+          "%s -> unexchanged report takes the no_baseline path" % name)
     check(base_stamped and canon(base_after) == canon(cur),
-          "%s -> baseline restamped to applied state" % name)
+          "%s -> first baseline established from the applied state" % name)
+
+
+def seed(root, project, baseline=None, dname="demo"):
+    """Write <root>/<dname>/project.json, plus _baseline.json when given.
+    Returns (project_dir, project_path, baseline_path)."""
+    d = os.path.join(root, dname)
+    os.makedirs(d, exist_ok=True)
+    pj = os.path.join(d, "project.json")
+    with open(pj, "w", encoding="utf-8") as fh:
+        json.dump(project, fh, ensure_ascii=False, indent=2)
+    bl = os.path.join(d, "_baseline.json")
+    if baseline is not None:
+        with open(bl, "w", encoding="utf-8") as fh:
+            json.dump(baseline, fh, ensure_ascii=False, indent=2)
+    return d, pj, bl
+
+
+def rb(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def edit_para(project, chapter, child, text):
+    project["outline"][chapter]["children"][child]["blocks"][0]["runs"][0]["t"] = text
+
+
+def baseline_invariant():
+    """The rule the "second Copy diff is dead" bug broke: a one-way delta never
+    moves _baseline.json, so consecutive cumulative deltas cut from the same
+    far-side baseline all apply."""
+    print("== two consecutive cumulative diffs (the bug this pins) ==")
+    with tempfile.TemporaryDirectory() as root:
+        # Both sides last agreed on BASE. The local copy has ALSO drifted since
+        # then (ordinary local edits) -- exactly what a delta is merged onto.
+        local = copy.deepcopy(BASE)
+        edit_para(local, 1, 0, "local drift")
+        d, pj, bl = seed(root, local, baseline=BASE)
+        before = rb(bl)
+
+        # Far side: cuts d1, edits more, cuts d2. ITS baseline stayed BASE, so
+        # d2 is cumulative and declares the same ancestor as d1.
+        far1 = copy.deepcopy(BASE)
+        edit_para(far1, 0, 1, "far edit one")
+        d1 = A.make_text_diff(BASE, far1, "demo")
+        far2 = copy.deepcopy(far1)
+        far2["outline"][0]["children"][0]["title"] = "Renamed by far side"
+        d2 = A.make_text_diff(BASE, far2, "demo")
+        check(d1["base_sha"] == d2["base_sha"],
+              "consecutive diffs declare the same ancestor")
+
+        r1 = A.apply_text_diff(root, d1, dir_name="demo")
+        check(r1.get("baseline") == "ok", "first diff applies (baseline ok)")
+        check(rb(bl) == before, "baseline byte-identical after the first diff")
+
+        try:
+            r2 = A.apply_text_diff(root, d2, dir_name="demo")
+            applied2 = r2.get("baseline") == "ok"
+        except A.BaselineMismatch as ex:
+            applied2 = False
+            print("     refused: %s" % ex)
+        check(applied2, "SECOND cumulative diff applies too")
+        check(rb(bl) == before, "baseline byte-identical after the second diff")
+
+        got = json.load(open(pj, encoding="utf-8"))
+        check(got["outline"][0]["children"][1]["blocks"][0]["runs"][0]["t"] == "far edit one"
+              and got["outline"][0]["children"][0]["title"] == "Renamed by far side",
+              "after d2 the far side's whole cumulative edit has landed")
+        check(got["outline"][1]["children"][0]["blocks"][0]["runs"][0]["t"] == "local drift",
+              "local drift survives both applies")
+        # ...and the merged result equals the far side's state plus the local
+        # drift the far side never saw.
+        want = copy.deepcopy(far2)
+        edit_para(want, 1, 0, "local drift")
+        check(canon(got) == canon(want), "merged result == far state + local drift")
+
+    print("== re-pasting the SAME diff is idempotent ==")
+    with tempfile.TemporaryDirectory() as root:
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        far = copy.deepcopy(BASE)
+        edit_para(far, 0, 1, "once")
+        diff = A.make_text_diff(BASE, far, "demo")
+        A.apply_text_diff(root, diff, dir_name="demo")
+        after_first, base_after_first = rb(pj), rb(bl)
+        try:
+            A.apply_text_diff(root, diff, dir_name="demo")
+            ok2 = True
+        except A.BaselineMismatch as ex:
+            ok2 = False
+            print("     refused: %s" % ex)
+        check(ok2, "the same diff pasted twice is accepted the second time")
+        check(rb(pj) == after_first, "second paste leaves project.json byte-identical")
+        check(rb(bl) == base_after_first, "second paste leaves the baseline untouched")
+
+    print("== a full package DOES move the baseline ==")
+    with tempfile.TemporaryDirectory() as root:
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        incoming = copy.deepcopy(BASE)
+        edit_para(incoming, 0, 0, "came in a package")
+        zpath = os.path.join(root, "pkg.zip")
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("update.json",
+                        json.dumps({"projects": {"demo": {"mode": "replace"}}}))
+            zf.writestr("demo/project.json",
+                        json.dumps(incoming, ensure_ascii=False, indent=2))
+        A.apply_bundle(root, zpath)
+        check(canon(json.load(open(bl, encoding="utf-8"))) == canon(incoming),
+              "apply_bundle moves the baseline to the applied report")
+
+    with tempfile.TemporaryDirectory() as root:
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        pasted = copy.deepcopy(BASE)
+        edit_para(pasted, 1, 0, "came in a paste-import")
+        body = json.dumps(pasted, ensure_ascii=False, indent=2).encode("utf-8")
+        A.record_replace(root, os.path.join("demo", "project.json"), body)
+        check(canon(json.load(open(bl, encoding="utf-8"))) == canon(pasted),
+              "record_replace (paste-import) moves the baseline")
+
+    print("== a diff cut from a genuinely different ancestor is still refused ==")
+    with tempfile.TemporaryDirectory() as root:
+        stale = copy.deepcopy(BASE)
+        stale["meta"]["title"] = "an older agreement"
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        far = copy.deepcopy(stale)
+        edit_para(far, 0, 1, "cut from a state this machine never agreed on")
+        diff = A.make_text_diff(stale, far, "demo")
+        before_bl, before_pj = rb(bl), rb(pj)
+        refused = False
+        try:
+            A.apply_text_diff(root, diff, dir_name="demo")
+        except A.BaselineMismatch:
+            refused = True
+        check(refused, "mismatched ancestor -> still refused")
+        check(rb(bl) == before_bl and rb(pj) == before_pj,
+              "a refused diff writes neither project.json nor the baseline")
 
 
 def main():
@@ -185,6 +331,8 @@ def main():
     A._apply_text_diff_into(proj, diff)
     check(proj["outline"][1]["children"][0]["blocks"][0]["runs"][0]["t"] == "EDITED",
           "mixed edit + noise -> apply lands the real edit")
+
+    baseline_invariant()
 
     print("\n== SUMMARY ==  %s" % ("ALL PASSED" if not _fails else "%d FAILED" % len(_fails)))
     return 1 if _fails else 0

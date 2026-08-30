@@ -25,6 +25,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -42,6 +43,12 @@ import templates_store as tstore  # noqa: E402
 # ---------------------------------------------------------------------------
 # Server configuration (populated in main()).
 # ---------------------------------------------------------------------------
+
+
+# Version of this tool, reported by GET /api/version. Bumped by hand on a
+# release; the endpoint never touches the network, so "available" stays null and
+# "needsRestart" false until an updater fills them in.
+TOOL_VERSION = "2.0.0"
 
 
 class Config:
@@ -657,6 +664,32 @@ def _import_xlsx_export():
     return importlib.reload(xlsx_export)
 
 
+# How the renderer spells a figure that carries no file at all: engine's
+# _place_picture writes ``fname or "(no file)"`` into the warning's detail, so a
+# blank file is the empty string or that literal, and anything else is a real
+# file name.
+_BLANK_FIGURE_DETAILS = ("", "(no file)")
+
+
+def _level_blank_figures(warnings):
+    """Drop a blank figure's ``missing_image`` to info. Returns ``warnings``.
+
+    Two different situations arrive from the renderer under one type. A figure
+    whose file is blank is the deliberate "cleared for this stage" state -- a
+    freshly inherited report is full of them by design, and content_lint already
+    reports each one as an info-level ``image_placeholder``. A figure that NAMES
+    a file which is not in the folder is a picture somebody still has to copy in.
+    Only the second needs attention, so only the second stays a warning; sixty
+    notes about empty frames otherwise bury the handful that matter.
+    """
+    for w in warnings or []:
+        if not isinstance(w, dict) or w.get("type") != "missing_image":
+            continue
+        if str(w.get("detail") or "").strip() in _BLANK_FIGURE_DETAILS:
+            w["level"] = "info"
+    return warnings
+
+
 def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=None):
     """Render the project via the engine. fmt in {docx, pdf}.
 
@@ -717,10 +750,11 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
         lint_findings = []
     if lint_findings:
         warnings = list(lint_findings) + list(warnings)
-        stats = dict(stats)
-        stats["errors"] = sum(1 for w in warnings if w.get("level") == "error")
-        stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
-        stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
+    _level_blank_figures(warnings)
+    stats = dict(stats)
+    stats["errors"] = sum(1 for w in warnings if w.get("level") == "error")
+    stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
+    stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
 
     if fmt == "docx":
         rel = os.path.relpath(docx_abs, project_dir).replace("\\", "/")
@@ -738,31 +772,126 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
     raise ValueError("unknown fmt: %s" % fmt)
 
 
+def _import_live_preview():
+    """The live-preview module, or None when it cannot be imported.
+
+    Its COM / process-identity helpers are reused by the PDF export so there is
+    exactly ONE set of rules in this codebase for driving and disposing of a Word
+    process. Returning None (rather than raising) keeps the export working on a
+    machine where the preview module is unavailable: identification is then
+    skipped, which only ever means declining to terminate anything.
+    """
+    import importlib
+    for name in ("web.live_preview", "live_preview"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    return None
+
+
+def _word_instance_identity(lp, word, spawned_after):
+    """``(pid, created)`` of the instance just created, or ``(None, None)``.
+
+    Every check here is live_preview's, for live_preview's reason: a wrong id
+    would not mean a broken export, it would mean terminating a process this
+    server never started -- and the likeliest such process is the copy of Word
+    the user has their own unsaved documents open in. Anything uncertain refuses
+    and returns nothing, which leaves the instance to its own ``Quit``.
+    """
+    if lp is None:
+        return None, None
+    try:
+        pid = lp._identify_instance(word)
+        created = lp._process_created(pid) if pid else None
+        if pid is None or created is None:
+            return None, None
+        if created < spawned_after - lp._SPAWN_CLOCK_SLACK:
+            return None, None       # older than our own start: cannot be ours
+        image = os.path.basename(lp._process_image(pid) or "")
+        if image.upper() != lp._WORD_IMAGE_NAME:
+            return None, None
+        return pid, created
+    except Exception:
+        return None, None
+
+
 def _word_export_pdf(docx_abs, pdf_abs):
-    """Word COM: Open -> ExportAsFixedFormat(17) -> Close. Export then Close."""
+    """Word COM: Open -> ExportAsFixedFormat -> Close. Export then Close.
+
+    COM apartment state is PER THREAD, and this runs on whichever request thread
+    ThreadingHTTPServer handed the export to. pywin32 initialises the apartment
+    of the thread that first imports pythoncom and of no other, so the first
+    export of a session used to work and every later one -- served by a different
+    thread -- died on "CoInitialize has not been called", with only a restart
+    clearing it. The apartment is entered here and left again on the way out, the
+    same way live_preview's COM worker thread brackets its own loop.
+
+    Process safety follows live_preview's rule exactly: ``DispatchEx`` creates
+    OUR OWN Word process (``Dispatch`` / ``GetActiveObject`` would attach to the
+    copy of Word the user is typing in, and quitting that would throw away their
+    unsaved work), and the only process this function may ever terminate is the
+    one it just created, identified by pid AND creation time -- and only after a
+    graceful ``Quit`` has been given its grace period and did not take.
+    """
+    import pythoncom       # type: ignore  # pywin32
     import win32com.client  # type: ignore  # pywin32, present on the work machine
 
-    word = win32com.client.DispatchEx("Word.Application")
-    word.Visible = False
-    doc = None
+    lp = _import_live_preview()
+    # 17 = wdExportFormatPDF; the same constant live_preview exports with.
+    pdf_format = getattr(lp, "_WD_EXPORT_FORMAT_PDF", 17)
+    quit_grace = getattr(lp, "QUIT_GRACE", 8.0)
+
     try:
-        doc = word.Documents.Open(os.path.abspath(docx_abs))
-        # Update all fields (e.g. a Table of Contents) so the PDF reflects what
-        # the user sees in Word after a field refresh; otherwise TOC/PAGEREF
-        # fields render as their unpopulated placeholder and pagination differs.
+        pythoncom.CoInitialize()
+        entered = True
+    except Exception:
+        # Somebody already put this thread in an apartment; leave it as we
+        # found it rather than unbalancing their CoUninitialize.
+        entered = False
+    try:
+        # Read before the process exists: nothing this call creates can be older.
+        spawned_after = time.time()
+        word = win32com.client.DispatchEx("Word.Application")
+        pid = created = None
+        doc = None
         try:
-            for story in doc.StoryRanges:
-                story.Fields.Update()
-            for toc in doc.TablesOfContents:
-                toc.Update()
-        except Exception:
-            pass  # field update is best-effort; never block the export
-        # 17 = wdExportFormatPDF
-        doc.ExportAsFixedFormat(os.path.abspath(pdf_abs), 17)
+            word.Visible = False
+            pid, created = _word_instance_identity(lp, word, spawned_after)
+            doc = word.Documents.Open(os.path.abspath(docx_abs))
+            # Update all fields (e.g. a Table of Contents) so the PDF reflects
+            # what the user sees in Word after a field refresh; otherwise
+            # TOC/PAGEREF fields render as their unpopulated placeholder and
+            # pagination differs.
+            try:
+                for story in doc.StoryRanges:
+                    story.Fields.Update()
+                for toc in doc.TablesOfContents:
+                    toc.Update()
+            except Exception:
+                pass  # field update is best-effort; never block the export
+            doc.ExportAsFixedFormat(os.path.abspath(pdf_abs), pdf_format)
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)  # never call a method on doc after this
+                except Exception:
+                    pass
+            try:
+                word.Quit()
+            except Exception:
+                pass
+            del word
+            # A Quit that did not take (a modal dialog, say) used to leak the
+            # process for the life of the machine. Terminate it -- but only it:
+            # _process_matches inside _terminate_recorded re-checks the creation
+            # time, so a pid Windows has since recycled is left alone.
+            if pid is not None and lp is not None:
+                if not lp._wait_for_exit(pid, created, quit_grace):
+                    lp._terminate_recorded(pid, created)
     finally:
-        if doc is not None:
-            doc.Close(False)  # never call a method on doc after this
-        word.Quit()
+        if entered:
+            pythoncom.CoUninitialize()
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1150,406 @@ def paste_import_diff(old_project, new_project, dir_name, id_warns=None):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Helpers: the report tree (PROJECT / MODULE / STAGE).
+#
+# Reports used to live flat under the reports root: <root>/<MODULE>/project.json.
+# The layout the workbench addresses is <root>/<PROJECT>/<MODULE>/<STAGE>/
+# project.json -- two extra levels. Both are read by ONE walk, which classifies
+# whatever it finds by its depth:
+#   depth 1 -> a legacy flat report: project "unfiled", module = folder name,
+#              stage read out of meta.title when the title names one
+#   depth 2 -> a report parked directly in a module folder: stage from the title
+#   depth 3 -> project / module / stage taken straight from the path
+# There is no new addressing scheme: a report is identified by its path relative
+# to the reports root ("PROJ/MOD/STAGE"), which resolve_project_dir already
+# accepts and already guards for containment.
+# ---------------------------------------------------------------------------
+
+UNFILED_PROJECT_ID = "unfiled"
+UNFILED_PROJECT_NAME = "Unfiled"       # user-facing: 02_GLOSSARY_EN.md, Home
+
+# Optional, at the project and module level: {"name": ..., "description": ...}.
+PROJECT_META_FILE = "project_meta.json"
+
+# Bookkeeping and payload folders that can never be a project, module or stage.
+_TREE_SKIP_DIRS = set(_RESERVED_ROOT_DIRS) | {
+    "_trash", "_autosave", "_backups", "_updates",
+    "images", "out", "data", "templates",
+}
+
+_STAGE_RE = re.compile(r"(?:^|[^A-Z])(XDR|PDR|CDR|FDR)(?:[^A-Z]|$)")
+
+
+def _read_json_quiet(path):
+    """Parse a JSON file, or None. Never raises: the tree walk must not die on
+    one unreadable report."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _is_tree_dir(parent, name):
+    if name in _TREE_SKIP_DIRS or name.startswith("_") or name.startswith("."):
+        return False
+    return os.path.isdir(os.path.join(parent, name))
+
+
+def _listdir_quiet(path):
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _has_project(path):
+    return os.path.isfile(os.path.join(path, "project.json"))
+
+
+def _stage_from_text(text):
+    """The stage code named by a title or a folder name, else an empty string."""
+    m = _STAGE_RE.search(str(text or "").upper())
+    return m.group(1) if m else ""
+
+
+def _dir_meta(path):
+    """(name, description) from an optional project_meta.json, else empties."""
+    if not path:
+        return "", ""
+    d = _read_json_quiet(os.path.join(path, PROJECT_META_FILE))
+    if not isinstance(d, dict):
+        return "", ""
+    return (str(d.get("name") or "").strip(),
+            str(d.get("description") or "").strip())
+
+
+# Over-spec counts are cached against project.json's mtime: the shelf asks for
+# every report at once, and re-flagging thousands of rows on each poll is waste.
+_OVERSPEC_CACHE = {}                    # normcased abs path -> (mtime, count)
+_OVERSPEC_LOCK = threading.Lock()
+
+
+def _import_tables():
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import tables  # type: ignore
+    return tables
+
+
+def count_over_spec(project):
+    """Number of simulated values that violate their row's limit.
+
+    Uses the SAME code the checklist and the rendered table use -- tables'
+    ``_flags_from`` over each simulation group's own values, which is what
+    ``flag_positions`` and ``render_datatable`` are both built on -- so the shelf
+    and the checklist can never disagree. Rows that declare no per-group values
+    fall back to the flat-schema ``flag_positions``.
+    """
+    try:
+        tb = _import_tables()
+    except Exception:
+        return 0
+    total = 0
+    for node in _collect_nodes((project or {}).get("outline") or []):
+        for block in node.get("blocks") or []:
+            if not isinstance(block, dict) or block.get("type") != "datatable":
+                continue
+            data = block.get("data") or {}
+            keys = [g.get("key") for g in (data.get("sims") or [])
+                    if isinstance(g, dict) and g.get("key")]
+            for row in data.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    if keys and hasattr(tb, "_sim_axis_vals"):
+                        for k in keys:
+                            mtm, ntwc = tb._sim_axis_vals(row, k)
+                            total += len(tb._flags_from(row, mtm, ntwc))
+                    else:
+                        total += len(tb.flag_positions(row))
+                except Exception:
+                    pass        # one malformed row never hides the whole count
+    return total
+
+
+def over_spec_count(project_dir, project=None):
+    """Cached count_over_spec for a project dir, keyed on project.json's mtime."""
+    pj = os.path.join(project_dir, "project.json")
+    try:
+        mtime = os.path.getmtime(pj)
+    except OSError:
+        return 0
+    key = os.path.normcase(os.path.abspath(pj))
+    with _OVERSPEC_LOCK:
+        hit = _OVERSPEC_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    if project is None:
+        project = _read_json_quiet(pj)
+    n = count_over_spec(project or {})
+    with _OVERSPEC_LOCK:
+        _OVERSPEC_CACHE[key] = (mtime, n)
+    return n
+
+
+def _report_entry(root, parts, stage=""):
+    """One report row of the tree. ``parts`` is its path under the reports root."""
+    project_dir = os.path.join(root, *parts)
+    pj = os.path.join(project_dir, "project.json")
+    project = _read_json_quiet(pj) or {}
+    title = str((project.get("meta") or {}).get("title") or "")
+    stage = stage or _stage_from_text(title)
+    try:
+        mtime = os.path.getmtime(pj)
+    except OSError:
+        mtime = 0.0
+    baseline = os.path.join(project_dir, "_baseline.json")
+    last = os.path.getmtime(baseline) if os.path.isfile(baseline) else None
+    return {
+        "dir": "/".join(parts),
+        "stage": stage,
+        "name": stage or parts[-1],
+        "title": title,
+        "mtime": mtime,
+        "overSpec": over_spec_count(project_dir, project),
+        # exchange.sectionsSince is a documented STUB, always 0: counting the
+        # sections changed since the last exchange needs the baseline op-diff,
+        # which the exchange view computes on demand via /api/copy-diff.
+        "exchange": {"last": last, "sectionsSince": 0},
+    }
+
+
+def _project_row(project_dir, parts):
+    """One /api/projects entry -- the flat listing the previous interface renders.
+
+    Same four keys it has always had; only "dir" grew, from a folder name to the
+    report's path under the reports root. Never raises: one unreadable report
+    must not empty the whole list.
+    """
+    pj = os.path.join(project_dir, "project.json")
+    project = _read_json_quiet(pj) or {}
+    try:
+        mtime = os.path.getmtime(pj)
+    except OSError:
+        mtime = 0.0
+    return {
+        "dir": "/".join(parts),
+        "title": str((project.get("meta") or {}).get("title") or ""),
+        "template": str(project.get("template") or ""),
+        "mtime": mtime,
+    }
+
+
+def build_report_tree(root):
+    """Walk the reports root (three levels deep) into the /api/tree shape."""
+    if not root or not os.path.isdir(root):
+        return []
+
+    projects = {}          # id -> {..., "modules": {id -> module}}
+    project_order = []
+
+    def project_bucket(pid, path):
+        if pid not in projects:
+            name, desc = _dir_meta(path)
+            if not name:
+                name = UNFILED_PROJECT_NAME if pid == UNFILED_PROJECT_ID else pid
+            projects[pid] = {"id": pid, "name": name, "description": desc,
+                             "modules": {}, "_order": []}
+            project_order.append(pid)
+        return projects[pid]
+
+    def module_bucket(proj, mid, path):
+        if mid not in proj["modules"]:
+            name, desc = _dir_meta(path)
+            proj["modules"][mid] = {"id": mid, "name": name or mid,
+                                    "description": desc, "reports": []}
+            proj["_order"].append(mid)
+        return proj["modules"][mid]
+
+    for l1 in _listdir_quiet(root):
+        if not _is_tree_dir(root, l1):
+            continue
+        p1 = os.path.join(root, l1)
+        if _has_project(p1):
+            # depth 1: a flat legacy report, filed under the "unfiled" project.
+            proj = project_bucket(UNFILED_PROJECT_ID, None)
+            module_bucket(proj, l1, p1)["reports"].append(
+                _report_entry(root, [l1]))
+            continue
+        has_meta_1 = os.path.isfile(os.path.join(p1, PROJECT_META_FILE))
+        found_1 = False
+        for l2 in _listdir_quiet(p1):
+            if not _is_tree_dir(p1, l2):
+                continue
+            p2 = os.path.join(p1, l2)
+            if _has_project(p2):
+                # depth 2: a report sitting directly in a module folder.
+                proj = project_bucket(l1, p1)
+                module_bucket(proj, l2, p2)["reports"].append(
+                    _report_entry(root, [l1, l2]))
+                found_1 = True
+                continue
+            found_2 = False
+            for l3 in _listdir_quiet(p2):
+                if not _is_tree_dir(p2, l3):
+                    continue
+                if not _has_project(os.path.join(p2, l3)):
+                    continue
+                # depth 3: the target layout.
+                proj = project_bucket(l1, p1)
+                module_bucket(proj, l2, p2)["reports"].append(
+                    _report_entry(root, [l1, l2, l3],
+                                  stage=_stage_from_text(l3) or l3))
+                found_1 = found_2 = True
+            if not found_2 and os.path.isfile(os.path.join(p2, PROJECT_META_FILE)):
+                # a module the user just created, still empty, belongs on the shelf
+                module_bucket(project_bucket(l1, p1), l2, p2)
+                found_1 = True
+        if has_meta_1 and not found_1:
+            project_bucket(l1, p1)
+
+    out = []
+    for pid in project_order:
+        p = projects[pid]
+        mods = []
+        for mid in p["_order"]:
+            m = p["modules"][mid]
+            m["reports"].sort(key=lambda r: r["mtime"], reverse=True)
+            mods.append(m)
+        mods.sort(key=lambda m: m["name"].lower())
+        out.append({"id": p["id"], "name": p["name"],
+                    "description": p["description"], "modules": mods})
+    # named projects first, the legacy "unfiled" bucket last
+    out.sort(key=lambda p: (p["id"] == UNFILED_PROJECT_ID, p["name"].lower()))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Helpers: v2 endpoints whose implementation module is not written yet.
+#
+# Every v2 endpoint below is wired to a real module function with a fixed
+# signature. The import happens INSIDE the handler, so a module that does not
+# exist yet can never stop the server from starting. While a module is missing
+# the endpoint answers with the documented response shape, empty data and
+# {"stub": true}: the frontend is written against these endpoints today and
+# needs them to answer. Flip STUB_HTTP_STATUS to 501 once every module below is
+# real and a missing one should be a hard error instead. A module that DOES
+# exist but fails to import, or lacks the function, is always a clear 501 --
+# that is a broken build, not a missing feature.
+# ---------------------------------------------------------------------------
+
+STUB_HTTP_STATUS = 200
+
+
+def _lazy_call(modnames, funcname, args, empty):
+    """Import the first available module of ``modnames`` and call ``funcname``.
+
+    Returns (payload, status). Layer directories are on sys.path (buildpath), so
+    both the layered name ("core.report_new") and the flat one ("report_new")
+    are tried before the module is declared missing.
+    """
+    import importlib
+    mod = None
+    for name in modnames:
+        try:
+            mod = importlib.import_module(name)
+            break
+        except ModuleNotFoundError:
+            continue
+        except ImportError as exc:
+            return {"error": "%s could not be imported: %s" % (name, exc)}, 501
+    if mod is None:
+        body = dict(empty)
+        body["stub"] = True
+        body["detail"] = "%s is not available yet" % modnames[0]
+        return body, STUB_HTTP_STATUS
+    fn = getattr(mod, funcname, None)
+    if not callable(fn):
+        return {"error": "%s has no %s()" % (mod.__name__, funcname)}, 501
+    result = fn(*args)
+    if not isinstance(result, dict):
+        result = {"ok": True, "result": result}
+    return result, 200
+
+
+def _project_config(project_dir, project):
+    """Resolve a project's template config exactly like the export path does (a
+    library template named by the project wins over the global --config)."""
+    engine = _import_engine()
+    tid = (project or {}).get("template")
+    tpl_cfg = tstore.template_config_path(CFG.reports_root, tid) if tid else None
+    explicit = tpl_cfg or CFG.template_config_path
+    return engine._load_config(
+        engine._resolve_config_path(project, project_dir, explicit))
+
+
+def _baseline_verdict(apply_update, project_dir, package_base, dir_name=None):
+    """Ask the shared library whether a package may be applied to one report.
+
+    There is exactly ONE implementation of the baseline rule, and it lives in
+    apply_update.check_baseline: it compares the content of this report's
+    ``_baseline.json`` -- the state both sides last agreed on -- against the
+    ``base_sha`` the package declares it was cut from. The HTTP layer must never
+    fingerprint the CURRENT project.json instead: local drift since the last
+    exchange is expected and is exactly what an incoming op-diff merges onto, so
+    measuring against the live file refuses every report that has been edited
+    since it was last exchanged, which in practice is all of them.
+
+    Returns (verdict, refusal_body). verdict is check_baseline's own answer --
+    "ok" / "no_baseline" / "no_fingerprint" -- and refusal_body is None unless
+    the two sides declare different ancestors, in which case it is the 409 body
+    carrying both shas.
+    """
+    rel = os.path.join(os.path.relpath(project_dir, CFG.reports_root),
+                       "project.json")
+    try:
+        return apply_update.check_baseline(CFG.reports_root, rel, package_base,
+                                           dir_name), None
+    except apply_update.BaselineMismatch as exc:
+        return "mismatch", exc.as_dict()
+
+
+def _truncation_refusal(payload):
+    """409 body for a returned report that looks cut off.
+
+    The merge refuses rather than reading every absent section as a deletion.
+    The body has to carry enough for the UI to say WHAT looks missing and to
+    offer the override, so it always ends up as
+    {"error": "truncated", "truncated": {kind, missing, total, detail}} whatever
+    shape the merge library reports it in.
+    """
+    t = payload.get("truncated") or {}
+    total = t.get("total")
+    if total is None:
+        total = t.get("base_sections")
+    return {"error": "truncated",
+            "truncated": {"kind": t.get("kind") or "sections",
+                          "missing": t.get("missing"),
+                          "total": total,
+                          "detail": t.get("detail") or payload.get("error") or
+                          "the returned report is missing much of what it was "
+                          "cut from",
+                          "override": "allowBulkDelete"}}
+
+
+def _open_with_os(path):
+    """Hand a path to the desktop's own handler. Returns True on success."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", path])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "DocBuilder/1.0"
     protocol_version = "HTTP/1.1"
@@ -1068,7 +1597,11 @@ class Handler(BaseHTTPRequestHandler):
             path = parsed.path
             qs = parse_qs(parsed.query)
 
-            if path == "/" or path == "/app.html":
+            # The workbench (v2) is the default UI. The old single-file app
+            # stays reachable, byte-identical, at /legacy and at /app.html.
+            if path in ("/", "/index.html", "/v2", "/v2/"):
+                return self._serve_v2_index()
+            if path == "/legacy" or path == "/app.html":
                 return self._serve_app_html()
             if path.startswith("/assets/"):
                 return self._serve_asset(path)
@@ -1087,6 +1620,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_templates_list()
             if path == "/api/template":
                 return self._api_template_get(qs)
+            if path == "/api/tree":
+                return self._api_tree()
+            if path == "/api/assets":
+                return self._api_assets(qs)
+            if path == "/api/version":
+                return self._api_version()
             if path == "/api/health":
                 return self._send_json({"ok": True})
 
@@ -1103,6 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_project_put(qs)
             if path == "/api/template":
                 return self._api_template_put(qs)
+            self._read_body()      # see do_POST: an unread body desyncs the socket
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
@@ -1156,7 +1696,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_project_rename()
             if path == "/api/project-copy":
                 return self._api_project_copy()
+            if path == "/api/report-new":
+                return self._api_report_new()
+            if path == "/api/refcol":
+                return self._api_refcol()
+            if path == "/api/preview-section":
+                return self._api_preview_section()
+            if path == "/api/merge3":
+                return self._api_merge3()
+            if path == "/api/merge3-apply":
+                return self._api_merge3_apply()
+            if path == "/api/asset-tag":
+                return self._api_asset_tag()
+            if path == "/api/asset-rename":
+                return self._api_asset_rename()
+            if path == "/api/asset-delete":
+                return self._api_asset_delete()
+            if path == "/api/open-path":
+                return self._api_open_path()
 
+            # Drain the body of an unknown route before answering. The socket is
+            # kept alive, so a body left unread is parsed as the START of the
+            # next request on that connection: a POST answered with 404 here used
+            # to turn the FOLLOWING request into a 501 "Unsupported method", which
+            # hides the real 404 behind a second, invented failure.
+            self._read_body()
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
@@ -1179,6 +1743,19 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     # --- endpoint implementations ---
+
+    def _serve_v2_index(self):
+        """Serve the workbench shell: builder/web/assets/v2/index.html.
+
+        Falls back to the old single-file UI while that file is being written,
+        so "/" never 404s. /legacy always serves the old UI.
+        """
+        path = os.path.join(HERE, "assets", "v2", "index.html")
+        if not os.path.isfile(path):
+            return self._serve_app_html()
+        with open(path, "rb") as fh:
+            body = fh.read()
+        return self._send_bytes(body, "text/html; charset=utf-8")
 
     def _serve_app_html(self):
         path = os.path.join(HERE, "app.html")
@@ -1238,40 +1815,47 @@ class Handler(BaseHTTPRequestHandler):
             body = fh.read()
         return self._send_bytes(body, ctype)
 
+    # TODO: extract the project scanning / rename / copy / delete block below
+    # into store/projects_store.py. Not in this pass: several agents are editing
+    # against server.py's current shape and the split would collide with them.
     def _api_projects_list(self):
-        """List projects: immediate subdirs of reports_root holding project.json.
+        """List every report under the reports root, at any depth up to three.
 
         Returns {"projects":[{"dir","title","template","mtime"}, ...]} sorted by
-        most-recently-modified first. The "templates" folder is skipped. Returns
-        an empty list (not an error) when no reports_root is configured.
+        most-recently-modified first. Returns an empty list (not an error) when
+        no reports_root is configured.
+
+        Reports used to sit one level below the root; they now sit three, at
+        PROJECT/MODULE/STAGE, and both layouts can be present at the same time.
+        Scanning one level deep therefore reported nothing at all after a report
+        root was reorganised. This walks down to depth three and stops descending
+        the moment a folder holds a project.json, so a report is found wherever
+        it sits.
+
+        The identifier stays what it always was -- the report's path relative to
+        the reports root, now "PROJECT/MODULE/STAGE" instead of "MODULE" -- which
+        is exactly what resolve_project_dir accepts and already guards for
+        containment, so a client can keep handing an entry's "dir" straight back
+        as ?dir=. Folders that can never be a report (bookkeeping dirs, images/,
+        out/, templates/) are skipped through the same _is_tree_dir the report
+        tree uses, so the two listings cannot disagree about what is a report.
         """
         root = CFG.reports_root
         out = []
+
+        def walk(parent, parts):
+            for name in _listdir_quiet(parent):
+                if not _is_tree_dir(parent, name):
+                    continue
+                path = os.path.join(parent, name)
+                here = parts + [name]
+                if _has_project(path):
+                    out.append(_project_row(path, here))
+                elif len(here) < 3:
+                    walk(path, here)
+
         if root and os.path.isdir(root):
-            for name in os.listdir(root):
-                if name == "templates" or name.startswith("_") \
-                        or name in _RESERVED_ROOT_DIRS:
-                    continue
-                pj = os.path.join(root, name, "project.json")
-                if not os.path.isfile(pj):
-                    continue
-                title = ""
-                template = ""
-                try:
-                    with open(pj, "r", encoding="utf-8") as fh:
-                        proj = json.load(fh)
-                    title = (proj.get("meta") or {}).get("title", "") or ""
-                    template = proj.get("template", "") or ""
-                except Exception:
-                    pass
-                out.append(
-                    {
-                        "dir": name,
-                        "title": title,
-                        "template": template,
-                        "mtime": os.path.getmtime(pj),
-                    }
-                )
+            walk(root, [])
         out.sort(key=lambda p: p["mtime"], reverse=True)
         return self._send_json({"projects": out})
 
@@ -1734,7 +2318,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json("current project must be a JSON object")
 
         project_dir = resolve_project_dir(dir_arg)
-        name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
+        # The delta names the report it belongs to, and that name is the ONLY
+        # address a pasted diff carries -- the CLI and the paste box both route
+        # by it when no dir is given alongside. It must therefore be the report's
+        # path under the reports root, not its folder's basename: with reports
+        # nested as <project>/<module>/<stage>, a basename is the stage name,
+        # which is shared by every module and can even name a different report.
+        # A delta cut for one report then applies cleanly to another and the
+        # edits never reach the one they were meant for.
+        name = os.path.relpath(project_dir, CFG.reports_root).replace("\\", "/")
+        if name in (".", "", os.curdir):
+            name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
         baseline_path = os.path.join(project_dir, "_baseline.json")
         if not os.path.isfile(baseline_path):
             return self._send_json({
@@ -1768,16 +2362,36 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _api_apply_update(self):
-        """Apply an uploaded update bundle (.zip) to the reports root.
+        """Apply an update package to the reports root.
 
-        Body: {"name": <filename>, "zip_b64": <base64 zip>}. The zip is stored
-        under reports_root/_updates/ and applied via the shared apply_update
-        module (full backup of every overwritten file first). Returns the
-        apply summary {note, actions:[{verb,rel,warn}], backup, logs}.
+        Body: {"name": <filename>, "zip_b64": <base64 zip>} for a package, or
+        {"dir": <report>, "diff_text" | "diff": <op-diff>} for a returned text
+        diff. A package is stored under reports_root/_updates/ and applied via
+        the shared apply_update module (full backup of every overwritten file
+        first). Returns the apply summary {note, actions:[{verb,rel,warn}],
+        backup, logs}.
+
+        BASELINE POLICY. A package carries the fingerprint of the state it was
+        cut from. When this machine's report has moved past that state, applying
+        would silently overwrite everything changed in between, so a MISMATCH is
+        now REFUSED with 409 {"error":"baseline_mismatch", packageBase,
+        localBase} -- it used to be only a warning.
+
+        A MISSING baseline is a different case and must NOT be refused: a report
+        that has never been exchanged has no _baseline.json at all, and refusing
+        it would lock it out of the exchange for good. Those are allowed through,
+        take an autosave snapshot first, and get a baseline stamped afterwards
+        (run_plan / apply_text_diff do the stamping).
+
+        The rule itself is apply_update.check_baseline's -- see
+        _baseline_verdict. It compares the local baseline's CONTENT with the
+        package's declared base_sha, never the current project.json.
         """
         if not CFG.reports_root:
             return self._send_error_json("no reports root configured", status=400)
         payload = self._read_json()
+        if payload.get("diff") or payload.get("diff_text"):
+            return self._apply_update_diff(payload)
         b64 = payload.get("zip_b64") or ""
         if not b64:
             return self._send_error_json("missing 'zip_b64'")
@@ -1793,12 +2407,88 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs(updates_dir, exist_ok=True)
         dest = os.path.join(updates_dir, name)
         atomic_write(dest, raw)
+        refusal = self._bundle_baseline_refusal(dest)
+        if refusal:
+            return self._send_json(refusal, status=409)
         # snapshot every project's current state BEFORE applying, so an update
         # bundle can never silently overwrite local edits beyond recovery.
         autosaved = autosave_all(CFG.reports_root, "preapply")
         apply_update = _import_apply_update()
         summary = apply_update.apply_bundle(CFG.reports_root, dest, dry=False)
         return self._send_json({"ok": True, "autosaved": autosaved, **summary})
+
+    def _bundle_baseline_refusal(self, bundle_path):
+        """Refuse a package cut from a state this machine has already moved past.
+
+        Returns the 409 body, or None when the package may be applied. A report
+        that has NO baseline yet is allowed through on purpose (and snapshotted
+        first) -- see the baseline policy in _api_apply_update. The verdict comes
+        from the shared library, never from a fingerprint of the live file.
+        """
+        apply_update = _import_apply_update()
+        try:
+            manifest, _actions = apply_update.read_bundle(CFG.reports_root,
+                                                          bundle_path)
+        except Exception:
+            return None       # an unreadable package fails later, with detail
+        manifest = manifest or {}
+        default_base = manifest.get("base_sha")
+        for pdir, spec in (manifest.get("projects") or {}).items():
+            base = (spec or {}).get("base_sha") if isinstance(spec, dict) else None
+            base = base or default_base
+            if not base:
+                continue
+            try:
+                project_dir = resolve_project_dir(pdir, create=False)
+            except ValueError:
+                continue
+            if not os.path.isfile(os.path.join(project_dir, "project.json")):
+                continue
+            verdict, refusal = _baseline_verdict(apply_update, project_dir,
+                                                 base, pdir)
+            if refusal:
+                return refusal
+            if verdict == "no_baseline":
+                # Never exchanged: full replace after a snapshot; run_plan
+                # stamps the first baseline afterwards.
+                autosave_snapshot(project_dir, "prebaseline")
+        return None
+
+    def _apply_update_diff(self, payload):
+        """Apply a returned op-diff (the counterpart of the GUI's Copy diff) to
+        one report. Same baseline policy as the package path."""
+        diff = payload.get("diff")
+        if diff is None:
+            try:
+                diff = json.loads(payload.get("diff_text") or "")
+            except Exception as exc:
+                return self._send_error_json("could not parse diff text: %s" % exc)
+        if not isinstance(diff, dict):
+            return self._send_error_json("diff must be a JSON object")
+        dir_arg = payload.get("dir") or diff.get("dir")
+        project_dir = resolve_project_dir(dir_arg, create=False)
+        if not os.path.isfile(os.path.join(project_dir, "project.json")):
+            return self._send_error_json("no project.json in dir", status=404)
+        apply_update = _import_apply_update()
+        verdict, refusal = _baseline_verdict(apply_update, project_dir,
+                                             diff.get("base_sha"), dir_arg)
+        if refusal:
+            return self._send_json(refusal, status=409)
+        # A missing baseline is allowed through on purpose: snapshot, apply, and
+        # let apply_text_diff stamp the baseline the next exchange compares to.
+        autosave_snapshot(project_dir,
+                          "prebaseline" if verdict == "no_baseline"
+                          else "preapply")
+        rel_dir = os.path.relpath(project_dir, CFG.reports_root).replace("\\", "/")
+        try:
+            result = apply_update.apply_text_diff(CFG.reports_root, diff, rel_dir)
+        except apply_update.BaselineMismatch as exc:
+            # The library re-checks; keep the answer the documented 409 rather
+            # than letting it surface as a 500.
+            return self._send_json(exc.as_dict(), status=409)
+        out = {"ok": True}
+        out.update(result)
+        return self._send_json(out)
 
     def _api_rollback(self):
         """Undo the most recent apply / paste-import by restoring the newest
@@ -1830,15 +2520,30 @@ class Handler(BaseHTTPRequestHandler):
         project_dir = resolve_project_dir(dir_arg)
         return self._send_json(restore_autosave(project_dir, name))
 
-    def _new_project_target(self, name):
-        """Validate a NEW project folder name -> (segment, abs path). Single
-        sanitized segment, contained under reports_root, not reserved, not '_'."""
+    def _new_project_target(self, name, parent_dir=None):
+        """Validate a NEW report folder name -> (segment, abs path). Single
+        sanitized segment, contained under reports_root, not reserved, not '_'.
+
+        The new folder is created NEXT TO the report being renamed or copied
+        (parent_dir), so a report at PROJ/MOD/STAGE stays inside its module
+        instead of being relocated to the reports root. A flat report has the
+        root as its parent and therefore behaves exactly as it did before.
+        """
         if not name or not isinstance(name, str):
             raise ValueError("missing new project name")
         seg = _sanitize_name(name.strip())
         if not seg or seg.startswith("_") or seg in _RESERVED_ROOT_DIRS:
             raise ValueError("invalid project name: %r" % name)
-        return seg, resolve_project_dir(seg)  # resolve_project_dir enforces containment
+        rel = seg
+        if parent_dir:
+            rel_parent = os.path.relpath(parent_dir, CFG.reports_root)
+            if rel_parent not in (".", ""):
+                rel = os.path.join(rel_parent, seg)
+        return seg, resolve_project_dir(rel)  # resolve_project_dir enforces containment
+
+    def _rel_dir(self, path):
+        """A project dir as the frontend addresses it: relative, forward slashes."""
+        return os.path.relpath(path, CFG.reports_root).replace("\\", "/")
 
     def _api_project_delete(self):
         """Move a project to reports_root/_trash/<name>-<ts>/ (recoverable, never
@@ -1858,32 +2563,74 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"ok": True, "trashed_to": dest.replace("\\", "/")})
 
     def _api_project_rename(self):
-        """Rename a project folder (and optionally its meta.title).
-        Body: {dir, new_name, title?}."""
+        """Rename a project or module FOLDER, or a report's TITLE.
+        Body: {dir, new_name, title?} -> {ok, dir, title?, moved}.
+
+        A report's folder is its ADDRESS. `dir` is the only thing an update
+        package or an op-diff carries, and the stage leaf of PROJECT/MODULE/STAGE
+        is read back as the report's stage. Moving that folder therefore orphans
+        every package already cut for the old path and invents a stage nobody
+        chose, so this endpoint refuses to do it: renaming a report writes
+        meta.title and leaves the folder exactly where it is (`moved: false`).
+
+        The rule is enforced here rather than trusted to the caller, because the
+        damage is silent and permanent for anyone holding an old package. A
+        folder that is not itself a report -- a project or a module container --
+        still moves as before.
+
+        A report asked to rename by `new_name` alone is therefore a request this
+        endpoint cannot carry out, and it is refused. It used to be rounded to
+        the nearest thing it could do -- write the folder name into meta.title --
+        which answered 200 to a caller that had asked for neither: a title it
+        never chose, and a folder that never moved.
+        """
         payload = self._read_json()
         src = resolve_project_dir(payload.get("dir"))
         if not os.path.isdir(src):
             return self._send_error_json("no such project", status=404)
-        seg, dest = self._new_project_target(payload.get("new_name"))
+
+        if _has_project(src):
+            title = payload.get("title")
+            if title is None and payload.get("new_name") is not None:
+                return self._send_error_json(
+                    "a report's folder is its address and is never moved; "
+                    "send 'title' to rename the report", status=400)
+            written = self._write_project_title(src, title)
+            return self._send_json({"ok": True, "dir": self._rel_dir(src),
+                                    "title": written, "moved": False})
+
+        seg, dest = self._new_project_target(payload.get("new_name"),
+                                             os.path.dirname(src))
         if os.path.normcase(dest) == os.path.normcase(src):
-            return self._send_json({"ok": True, "dir": seg})  # no-op
+            return self._send_json({"ok": True, "dir": self._rel_dir(dest)})  # no-op
         if os.path.exists(dest):
             return self._send_error_json("a project named '%s' already exists" % seg,
                                          status=409)
         shutil.move(src, dest)
-        title = payload.get("title")
-        if title is not None:
-            pj = os.path.join(dest, "project.json")
-            if os.path.isfile(pj):
-                try:
-                    with open(pj, encoding="utf-8") as fh:
-                        d = json.load(fh)
-                    d.setdefault("meta", {})["title"] = title
-                    atomic_write(pj, json.dumps(d, ensure_ascii=False,
-                                                indent=2).encode("utf-8"))
-                except Exception:
-                    pass
-        return self._send_json({"ok": True, "dir": seg})
+        written = self._write_project_title(dest, payload.get("title"))
+        return self._send_json({"ok": True, "dir": self._rel_dir(dest),
+                                "title": written, "moved": True})
+
+    def _write_project_title(self, project_dir, title):
+        """Set meta.title of the report in ``project_dir``. Returns what was
+        written, or None when there was nothing to write (no title asked for, or
+        the folder is a container rather than a report). Best effort, exactly as
+        it was when this lived inline in the rename handler: a document that
+        cannot be parsed keeps the name it has rather than failing the call."""
+        if title is None:
+            return None
+        pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            return None
+        try:
+            with open(pj, encoding="utf-8") as fh:
+                d = json.load(fh)
+            d.setdefault("meta", {})["title"] = title
+            atomic_write(pj, json.dumps(d, ensure_ascii=False,
+                                        indent=2).encode("utf-8"))
+            return title
+        except Exception:
+            return None
 
     def _api_project_copy(self):
         """Duplicate a project (project.json + images/ only, not the heavy
@@ -1892,7 +2639,8 @@ class Handler(BaseHTTPRequestHandler):
         src = resolve_project_dir(payload.get("dir"))
         if not os.path.isfile(os.path.join(src, "project.json")):
             return self._send_error_json("no such project", status=404)
-        seg, dest = self._new_project_target(payload.get("new_name"))
+        seg, dest = self._new_project_target(payload.get("new_name"),
+                                             os.path.dirname(src))
         if os.path.exists(dest):
             return self._send_error_json("a project named '%s' already exists" % seg,
                                          status=409)
@@ -1902,7 +2650,269 @@ class Handler(BaseHTTPRequestHandler):
         img = os.path.join(src, "images")
         if os.path.isdir(img):
             shutil.copytree(img, os.path.join(dest, "images"))
-        return self._send_json({"ok": True, "dir": seg})
+        return self._send_json({"ok": True, "dir": self._rel_dir(dest)})
+
+    # --- v2 workbench endpoints ---
+
+    def _api_tree(self):
+        """The three-level report shelf: {"projects":[{modules:[{reports:[...]}]}]}.
+
+        Flat legacy reports and the PROJECT/MODULE/STAGE layout are returned by
+        the same walk; see build_report_tree. /api/projects keeps its own flat
+        shape for the old UI and must not change.
+        """
+        return self._send_json({"projects": build_report_tree(CFG.reports_root)})
+
+    def _api_version(self):
+        """Local tool version. No network call is ever made from here: an
+        updater fills 'available'/'needsRestart' in when one exists."""
+        return self._send_json({"local": TOOL_VERSION, "available": None,
+                                "needsRestart": False})
+
+    def _api_report_new(self):
+        """Create a report (or a project / module shell).
+
+        Body {project, module, stage, name, mode:'inherit'|'template'|'docx',
+        from, template, clearValues} -> {"dir": "PROJ/MOD/STAGE"}.
+        """
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        body = self._read_json()
+        payload, status = _lazy_call(("core.report_new", "report_new"),
+                                     "create_report", (CFG.reports_root, body),
+                                     {"dir": ""})
+        return self._send_json(payload, status=status)
+
+    def _api_refcol(self):
+        """Build a reference column pulled from another report of this module.
+
+        Body {dir, srcReport, targetBlock, group, axis, title} ->
+        {"matches":[...], "column":{...}}. A snapshot, never a live link.
+        """
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        body = self._read_json()
+        payload, status = _lazy_call(("core.report_new", "report_new"),
+                                     "build_reference_column",
+                                     (CFG.reports_root, body),
+                                     {"matches": [], "column": None})
+        return self._send_json(payload, status=status)
+
+    def _api_preview_section(self):
+        """Render ONE section to page images. Body {dir, node} ->
+        {"pages":[{"png_b64","w","h"}], "ms": int}."""
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            return self._send_error_json("no project.json in dir", status=404)
+        node_id = body.get("node") or body.get("node_id")
+        cfg = None
+        try:
+            cfg = _project_config(project_dir, _read_json_quiet(pj) or {})
+        except Exception:
+            cfg = None      # the renderer may resolve its own config
+        payload, status = _lazy_call(("web.live_preview", "live_preview"),
+                                     "render_section",
+                                     (project_dir, cfg, node_id),
+                                     {"pages": [], "ms": 0})
+        return self._send_json(payload, status=status)
+
+    def _api_merge3(self):
+        """Three-way compare of an incoming report against the baseline.
+
+        Body {dir, incoming, allowBulkDelete?} -> 200 {merged, conflicts, auto,
+        pending, deletions, token, truncated: null}. Nothing is written: this
+        only computes what applying would do. ``token`` fingerprints the
+        project.json this merge was computed from and must be handed back to
+        /api/merge3-apply, which refuses to write over a report that moved in
+        the meantime.
+
+        A package missing so much of the common ancestor that it looks cut off
+        is refused with 409 {"error": "truncated", truncated: {...}} -- the body
+        carries what looks missing so the UI can say so and offer the override.
+        Re-post with allowBulkDelete: true to merge a genuine bulk deletion.
+        """
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        mine = _read_json_quiet(os.path.join(project_dir, "project.json")) or {}
+        base = _read_json_quiet(os.path.join(project_dir, "_baseline.json"))
+        if base is None:
+            base = {}       # never exchanged: every difference is a new change
+        theirs = body.get("incoming")
+        if not isinstance(theirs, dict):
+            return self._send_error_json("missing 'incoming' project object")
+        allow_bulk = bool(body.get("allowBulkDelete"))
+        payload, status = _lazy_call(
+            ("sync.merge3", "merge3"), "merge3", (base, mine, theirs, allow_bulk),
+            {"merged": None, "conflicts": [], "auto": 0, "pending": 0,
+             "deletions": [], "token": None, "truncated": None})
+        if status != 200 or payload.get("stub"):
+            return self._send_json(payload, status=status)
+        if payload.get("truncated"):
+            return self._send_json(_truncation_refusal(payload), status=409)
+        if payload.get("error"):
+            return self._send_error_json(payload["error"], status=400)
+        out = dict(payload)
+        # One name on the wire for the concurrency fingerprint.
+        out["token"] = payload.get("token") or payload.get("base_sha")
+        out.pop("base_sha", None)
+        out.setdefault("auto", 0)
+        out.setdefault("pending", len(payload.get("conflicts") or []))
+        out.setdefault("deletions", [])
+        out["truncated"] = None
+        return self._send_json(out)
+
+    def _api_merge3_apply(self):
+        """Write the outcome of a three-way merge.
+
+        Body {dir, merged, choices, token} -> 200 {ok, applied, snapshot}.
+        ``token`` is the one /api/merge3 returned. A refused apply writes
+        NOTHING -- no snapshot, no project.json, no baseline -- so every
+        validation runs before anything touches the disk and the snapshot is
+        taken inside apply_choices once they all pass.
+
+        400 {"error": "merge_token_missing"} when the caller sent no token;
+        409 {"error": "stale_merge", expected, actual} when the report changed
+        while the user was deciding, so applying would erase that change.
+        """
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        merged = body.get("merged")
+        choices = body.get("choices") or []
+        token = body.get("token")
+        if not isinstance(merged, dict) or "outline" not in merged:
+            return self._send_error_json(
+                "missing 'merged' report from /api/merge3", status=400)
+        if not token:
+            return self._send_json({"error": "merge_token_missing"}, status=400)
+        payload, status = _lazy_call(("sync.merge3", "merge3"), "apply_choices",
+                                     (project_dir, merged, choices, token),
+                                     {"ok": False})
+        if status != 200 or payload.get("stub"):
+            return self._send_json(payload, status=status)
+        err = payload.get("error")
+        if err == "stale_merge":
+            return self._send_json(
+                {"error": "stale_merge",
+                 "expected": payload.get("mergeBase") or token,
+                 "actual": payload.get("localBase")}, status=409)
+        if err == "merge_token_missing":
+            return self._send_json({"error": "merge_token_missing"}, status=400)
+        if err:
+            return self._send_error_json(err, status=400)
+        out = dict(payload)
+        out["ok"] = True
+        out.setdefault("applied", 0)
+        out.setdefault("snapshot", None)
+        return self._send_json(out)
+
+    def _api_assets(self, qs):
+        """The report's image pool. ?dir= -> {"assets":[...]}."""
+        project_dir = resolve_project_dir((qs.get("dir") or [None])[0],
+                                          create=False)
+        project = _read_json_quiet(os.path.join(project_dir, "project.json")) or {}
+        payload, status = _lazy_call(("store.assets_store", "assets_store"),
+                                     "list_assets", (project_dir, project),
+                                     {"assets": []})
+        return self._send_json(payload, status=status)
+
+    def _api_asset_tag(self):
+        """Set the tags of one stored file. Body {dir, file, tags}."""
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        file_name = body.get("file")
+        if not file_name:
+            return self._send_error_json("missing 'file'")
+        tags = body.get("tags") or []
+        payload, status = _lazy_call(("store.assets_store", "assets_store"),
+                                     "set_tags", (project_dir, file_name, tags),
+                                     {"ok": False, "tags": []})
+        return self._send_json(payload, status=status)
+
+    def _api_asset_rename(self):
+        """Rename a stored file and repoint every block that uses it.
+
+        Body {dir, from, to} -> {"renamed": n}. The project is snapshotted first
+        because the rename rewrites project.json.
+        """
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        old = body.get("from") or body.get("old")
+        new = body.get("to") or body.get("new")
+        if not old or not new:
+            return self._send_error_json("missing 'from' / 'to'")
+        pj = os.path.join(project_dir, "project.json")
+        project = _read_json_quiet(pj) or {}
+        autosave_snapshot(project_dir, "prerename")
+        payload, status = _lazy_call(("store.assets_store", "assets_store"),
+                                     "rename", (project_dir, project, old, new),
+                                     {"renamed": 0})
+        if status == 200 and not payload.get("stub"):
+            # the module hands back the rewritten project (or mutates the one it
+            # was given); persist whichever it is, then re-count the flags.
+            updated = payload.pop("project", None)
+            if not isinstance(updated, dict):
+                updated = project
+            atomic_write(pj, json.dumps(updated, ensure_ascii=False,
+                                        indent=2).encode("utf-8"))
+        return self._send_json(payload, status=status)
+
+    def _api_asset_delete(self):
+        """Delete a stored file, but only when nothing in the report points at it.
+
+        Body {dir, file} -> {"ok": true, "file": "images/<name>", "trashed": ...}.
+
+        The refusal is the point of the endpoint, and it is decided HERE rather
+        than in the browser: usage is derived from this report's project.json, so
+        a client holding a different report's document -- which is exactly what a
+        report switch produces for a moment -- cannot talk the server into
+        removing a figure that is in use. assets_store.delete raises ValueError
+        naming the sections that still use the file, which the dispatcher turns
+        into a 400 carrying that sentence.
+
+        Nothing is unlinked: the file moves to <report>/_trash/assets/, the same
+        way a deleted report moves to the reports root's trash.
+        """
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        file_name = body.get("file")
+        if not file_name:
+            return self._send_error_json("missing 'file'")
+        project = _read_json_quiet(os.path.join(project_dir, "project.json")) or {}
+        payload, status = _lazy_call(("store.assets_store", "assets_store"),
+                                     "delete", (project_dir, project, file_name),
+                                     {"ok": False})
+        return self._send_json(payload, status=status)
+
+    def _api_open_path(self):
+        """Open a file, or the folder holding it, with the OS handler.
+
+        Body {dir, file, folder}. `file` is relative to the report folder (e.g.
+        "out/report.docx"); the resolved path must stay under the reports root,
+        so this can never be turned into an arbitrary "open anything" call.
+        """
+        body = self._read_json()
+        project_dir = resolve_project_dir(body.get("dir"), create=False)
+        rel = (body.get("file") or "").replace("\\", "/").lstrip("/")
+        if ".." in rel.split("/"):
+            return self._send_error_json("forbidden", status=403)
+        target = os.path.abspath(os.path.join(project_dir, *rel.split("/"))
+                                 if rel else project_dir)
+        root_abs = os.path.abspath(CFG.reports_root)
+        try:
+            common = os.path.commonpath([root_abs, target])
+        except ValueError:
+            return self._send_error_json("forbidden", status=403)
+        if os.path.normcase(common) != os.path.normcase(root_abs):
+            return self._send_error_json("forbidden", status=403)
+        if body.get("folder"):
+            target = target if os.path.isdir(target) else os.path.dirname(target)
+        if not os.path.exists(target):
+            return self._send_error_json("not found", status=404)
+        ok = _open_with_os(target)
+        return self._send_json({"ok": ok, "path": target.replace("\\", "/")},
+                               status=200 if ok else 500)
 
 
 def _import_apply_update():
@@ -1929,15 +2939,25 @@ def _guess_content_type(path):
     ext = os.path.splitext(path)[1].lower()
     return {
         ".html": "text/html; charset=utf-8",
-        ".js": "application/javascript; charset=utf-8",
+        # ES modules must be served as JavaScript or the browser refuses them.
+        ".js": "text/javascript; charset=utf-8",
+        ".mjs": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8",
+        ".map": "application/json; charset=utf-8",
         ".png": "image/png",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
         ".svg": "image/svg+xml",
         ".json": "application/json; charset=utf-8",
+        ".txt": "text/plain; charset=utf-8",
+        ".md": "text/plain; charset=utf-8",
         ".woff2": "font/woff2",
         ".woff": "font/woff",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
     }.get(ext, "application/octet-stream")
 
 
@@ -2023,7 +3043,7 @@ def main(argv=None):
     if args.open_browser:
         import webbrowser
         import threading
-        url = "http://127.0.0.1:%d/app.html" % args.port
+        url = "http://127.0.0.1:%d/" % args.port
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()

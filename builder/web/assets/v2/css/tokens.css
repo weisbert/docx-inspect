@@ -1,0 +1,207 @@
+/* Report Workbench - design tokens.
+ *
+ * Transcribed from the token specification. These values are exact.
+ * Every other stylesheet composes from this file: no raw colour literal is
+ * allowed outside it.
+ *
+ * Principle: colour carries meaning, never decoration. Semantic colour appears
+ * only on over-spec values, blocking / attention / done banners, and focus.
+ * Chrome is grey.
+ *
+ * Dark mode is not implemented. The names are role-based, so a later theme
+ * redefines this block and nothing else.
+ */
+
+:root {
+  /* --- surfaces ------------------------------------------------------- */
+  --bg-app:        #e9ebee;  /* the ground the panels sit on */
+  --bg-panel:      #ffffff;
+  --bg-sunken:     #f4f5f7;  /* left rails, footers, inset strips */
+  --bg-subtle:     #fafbfc;  /* table meta rows, list headers */
+  --bg-rail:       #eceef1;  /* segmented-control track, tab strip */
+
+  /* --- ink ------------------------------------------------------------ */
+  --fg:            #15181c;
+  --fg-strong:     #2c343b;
+  --fg-muted:      #4c545c;
+  --fg-dim:        #858e97;
+  --fg-faint:      #b9c0c6;
+
+  /* --- lines ---------------------------------------------------------- */
+  --line:          #dcdfe3;  /* default border */
+  --line-soft:     #f1f3f5;  /* row separators inside a card */
+  --line-strong:   #c3c9cf;  /* control borders, overlay edge */
+  --line-inner:    #e2e5e8;
+
+  /* --- accent (focus, links, primary action) -------------------------- */
+  --accent:        #1f5fd0;
+  --accent-edge:   #1a54ba;
+  --accent-wash:   #e8effb;
+  --accent-line:   #b9cdf0;
+
+  /* --- over spec / blocking ------------------------------------------- */
+  --bad:           #c02a1f;
+  --bad-ink:       #8f1e16;
+  --bad-wash:      #fdecea;
+  --bad-line:      #e8a6a0;
+  --bad-line-soft: #f3c9c5;
+
+  /* --- attention ------------------------------------------------------ */
+  --warn:          #b4780a;
+  --warn-ink:      #7d5700;
+  --warn-ink-deep: #5c4a00;
+  --warn-strong:   #9a6a00;
+  --warn-wash:     #fdf3dd;
+  --warn-line:     #eddfae;
+
+  /* --- done ----------------------------------------------------------- */
+  --good:          #147a54;
+  --good-ink:      #0f5c40;
+  --good-wash:     #e6f4ee;
+  --good-line:     #b6dcc9;
+
+  /* --- notes carried alongside the document --------------------------- */
+  --note:          #5b3fa8;
+  --note-ink:      #4a2f95;
+  --note-wash:     #f0ecfb;
+  --note-line:     #d9cff5;
+
+  /* --- table, editor side --------------------------------------------- */
+  --grid-head:     #fdf6c3;  /* readable yellow for the editor header rows */
+  --grid-head-2:   #fbf0ad;  /* the grouped band above it */
+  --grid-head-3:   #fbf5d3;  /* a column excluded from checking */
+  --grid-head-line:#d9d0a0;
+  --grid-head-ink: #5c4a00;
+  --grid-sep:      #dbe6f4;  /* vertical bar between simulation groups */
+  --sel-edge:      #7ba3e8;
+  --sel-fill:      #eef3fc;
+
+  /* --- table, paper side ----------------------------------------------
+   * These must match the document template exactly. The split from the
+   * editor-side yellow is deliberate: the editor shows a readable yellow,
+   * the exported document and the preview paper show the saturated FFFF00.
+   */
+  --paper-head:    #FFFF00;
+  --paper-setting: #EEECE1;
+  --paper-flag:    #FF0000;
+  --paper-rule:    #000000;
+
+  /* --- toast ----------------------------------------------------------
+   * Bottom centre, dark chip with a small green dot on the left.
+   */
+  --toast-bg:      #15181c;
+  --toast-fg:      #ffffff;
+  --toast-dot:     #5ee6a8;
+
+  /* --- control ink ----------------------------------------------------
+   * The label colour a primary button carries on the accent fill.
+   */
+  --fg-on-accent:  #ffffff;
+
+  /* --- type -----------------------------------------------------------
+   * System stacks only. The tool runs offline, so there are no web fonts.
+   * --font-num is used for every numeric cell, always with tabular-nums and
+   * right alignment, so columns of numbers line up.
+   */
+  --font-ui:    -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-num:   "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
+  --font-paper: "Times New Roman", SimSun, serif;   /* preview paper only */
+
+  /* --- type scale ------------------------------------------------------
+   * Screen title  - home detail header
+   * Section title - panel section headings
+   * Panel title   - dialog and drawer titles
+   * Item title    - app name, breadcrumb leaf
+   * Body          - default interface text, form values
+   * Meta          - secondary text, hints
+   * Micro         - column headers, badges, counts
+   * Grid          - table cells and table header rows
+   */
+  --fs-screen-title:   18px;
+  --fs-section-title:  15px;
+  --fs-panel-title:    14px;
+  --fs-panel-title-lg: 14.5px;
+  --fs-item-title:     13.5px;
+  --fs-body:           12.5px;
+  --fs-meta:           11.5px;
+  --fs-micro:          11px;
+  --fs-grid:           11px;
+  --fs-grid-head:      11px;
+  --fs-grid-head-sm:   10.5px;
+
+  --fw-regular: 400;
+  --fw-strong:  600;
+  --fw-title:   650;
+
+  --lh-base: 1.5;
+
+  /* --- spacing ladder - use only these -------------------------------- */
+  --sp-2:  2px;
+  --sp-4:  4px;
+  --sp-6:  6px;
+  --sp-9:  9px;
+  --sp-12: 12px;
+  --sp-16: 16px;
+  --sp-22: 22px;
+  --sp-30: 30px;
+
+  /* --- radius --------------------------------------------------------- */
+  --r-grid:   2px;   /* table cells, inline chips inside a grid */
+  --r-badge:  3px;
+  --r-ctl:    4px;   /* buttons, inputs, menu items */
+  --r-card:   5px;   /* cards, panels */
+  --r-modal:  7px;   /* dialogs */
+  --r-pill:   999px; /* status pills */
+
+  /* --- elevation - exactly two ---------------------------------------- */
+  --sh-card:    0 1px 2px rgba(20,24,28,.04);
+  --sh-overlay: 0 8px 26px rgba(20,24,28,.18);
+
+  /* --- scrims --------------------------------------------------------- */
+  --scrim:      rgba(20,24,28,.34);  /* modal */
+  --scrim-soft: rgba(20,24,28,.28);  /* drawer, lighter */
+
+  /* --- controls -------------------------------------------------------
+   * Four button levels plus disabled. Height 28px, radius --r-ctl, body font.
+   * Inputs are 30px in forms and 28px in toolbars.
+   * Focus is a 2px accent border, not an outline ring: it must not shift
+   * layout. Invalid is a 1px --bad-line border on --bad-wash with --bad text.
+   */
+  --h-ctl:        28px;
+  --h-input:      30px;
+  --h-input-bar:  28px;
+  --bw-focus:     2px;
+
+  /* --- banners --------------------------------------------------------
+   * Three levels, each a left-edge bar plus a tinted body.
+   */
+  --banner-bar:  3px;
+  --banner-pad:  8px 11px;
+  --fs-banner:   12px;
+
+  /* --- empty states ---------------------------------------------------
+   * A drop target, not an illustration: dashed --fg-faint over --bg-sunken.
+   */
+  --bw-empty: 1.5px;
+
+  /* --- toast metrics --------------------------------------------------- */
+  --toast-bottom: 26px;
+  --toast-h:      34px;
+  --toast-dot-sz: 6px;
+  --fs-toast:     12.5px;
+  --toast-life:   6s;
+
+  /* --- table metrics --------------------------------------------------
+   * Row height is adjustable 21-32 through the density control.
+   * --tbl-sep-w is not decoration: it is how the exported table separator
+   * column is represented on screen. Keep it aligned with what the renderer
+   * emits.
+   */
+  --tbl-row-h:      25px;
+  --tbl-row-h-min:  21px;
+  --tbl-row-h-max:  32px;
+  --tbl-sep-w:      10px;
+  --tbl-sel-bw:     1px;   /* selection, inset outline over --sel-fill */
+  --tbl-active-bw:  2px;   /* active cell border, in --accent */
+  --tbl-handle-sz:  6px;   /* fill handle at the active cell bottom-right */
+}

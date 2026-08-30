@@ -196,6 +196,8 @@ def run():
         failures += check_import_xlsx()
         failures += check_validate_compliance()
         failures += check_export(root)
+        failures += check_projects_depth(root)
+        failures += check_figures_and_pdf()
         failures += check_paste_import(root)
         failures += check_templates(root)
         failures += check_new_from_template(root)
@@ -450,6 +452,217 @@ def check_export(root):
     return f
 
 
+def check_projects_depth(root):
+    """GET /api/projects must find a report wherever it sits under the root.
+
+    Reports moved from <root>/<MODULE> to <root>/<PROJECT>/<MODULE>/<STAGE>. A
+    listing that scans one level deep reports NONE of them after that move, which
+    is what emptied the previous interface's home page. Both depths are planted
+    here, and each has to come back addressed by its path under the root -- the
+    identifier the client hands straight back as ?dir=, so the entry must also
+    open. Response SHAPE is asserted key by key: the previous interface renders
+    these four fields and is not being changed to suit a new one.
+    """
+    nested = os.path.join(root, "proj_x", "MODULE_A", "CDR")
+    os.makedirs(nested, exist_ok=True)
+    project = {"schema_version": 1, "template": "test_tpl_v1",
+               "meta": {"title": "Nested three deep", "reviewers": [], "revisions": []},
+               "outline": []}
+    with open(os.path.join(nested, "project.json"), "w", encoding="utf-8") as fh:
+        json.dump(project, fh)
+    # A deleted report is parked under _trash/ and must never be offered.
+    ghost = os.path.join(root, "_trash", "MODULE_B")
+    os.makedirs(ghost, exist_ok=True)
+    with open(os.path.join(ghost, "project.json"), "w", encoding="utf-8") as fh:
+        json.dump(project, fh)
+
+    s, body = call("GET", "/api/projects")
+    rows = body.get("projects", []) if isinstance(body, dict) else []
+    dirs = [r.get("dir") for r in rows]
+    f = expect(s == 200 and "proj_x/MODULE_A/CDR" in dirs,
+               "projects finds a report three deep", "status=%s dirs=%r" % (s, dirs))
+    # proj_a was written by check_project_roundtrip directly under the root.
+    f += expect("proj_a" in dirs, "projects still finds a flat report", "dirs=%r" % dirs)
+    f += expect("_trash/MODULE_B" not in dirs and "MODULE_B" not in dirs,
+                "projects skips _trash", "dirs=%r" % dirs)
+
+    row = next((r for r in rows if r.get("dir") == "proj_x/MODULE_A/CDR"), {})
+    f += expect(
+        set(row) == {"dir", "title", "template", "mtime"}
+        and row.get("title") == "Nested three deep"
+        and row.get("template") == "test_tpl_v1"
+        and isinstance(row.get("mtime"), (int, float)),
+        "projects row keeps its four-key shape", "row=%r" % row,
+    )
+    # the identifier the listing hands out must be openable as-is
+    s2, b2 = call("GET", "/api/project?dir=proj_x/MODULE_A/CDR")
+    f += expect(
+        s2 == 200 and b2.get("meta_info", {}).get("exists") is True
+        and (b2.get("project") or {}).get("meta", {}).get("title") == "Nested three deep",
+        "a listed nested dir opens", "status=%s body=%r" % (s2, b2),
+    )
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Checks that need a template config the engine can really render. MINIMAL_CONFIG
+# above is deliberately minimal -- it exercises the server contract, not the
+# renderer -- so these borrow the golden render test's fixture rather than
+# growing a second full config that would drift away from it.
+# ---------------------------------------------------------------------------
+
+RENDER_PORT = PORT + 2
+
+#: One section, two figures: one deliberately blank ("cleared for this stage"),
+#: one naming a file that is not in the folder. The renderer reports both as
+#: missing_image; only the second is something anybody has to act on.
+FIGURE_PROJECT = {
+    "schema_version": 1,
+    "template": "golden_tpl_v1",
+    "meta": {"title": "Figure levels", "reviewers": [], "revisions": []},
+    "outline": [{
+        "id": "s1", "title": "Figures", "children": [], "blocks": [
+            {"type": "image", "id": "fig_blank", "file": "",
+             "caption": "Cleared for this stage", "width_cm": 8.0},
+            {"type": "image", "id": "fig_absent", "file": "images/absent.png",
+             "caption": "Named but not copied in", "width_cm": 8.0},
+        ],
+    }],
+}
+
+
+def renderable_config():
+    """The golden render fixture's config, or None when it is unavailable."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    try:
+        from test_render_golden import golden_config
+        return golden_config()
+    except Exception:
+        return None
+
+
+def serve(root, config_path, port):
+    """Start a second server on ``port`` and wait until it answers."""
+    httpd = server.make_server(port=port, root=root, config_path=config_path,
+                               bind="127.0.0.1")
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    for _ in range(50):
+        try:
+            req = Request("http://127.0.0.1:%d/api/health" % port, method="GET")
+            with urlopen(req) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            time.sleep(0.05)
+    return httpd
+
+
+def post_at(port, path, body=None):
+    """POST JSON to another port. Returns (status, parsed_json)."""
+    data = json.dumps(body if body is not None else {}).encode("utf-8")
+    req = Request("http://127.0.0.1:%d%s" % (port, path), data=data,
+                  method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return e.code, {}
+
+
+def check_figures_and_pdf():
+    """Blank-figure warning level, and two PDF exports in ONE server session."""
+    cfg = renderable_config()
+    if cfg is None:
+        record("blank figure is a note, absent file is a warning", "SKIP (no golden config)")
+        record("two PDF exports in one session", "SKIP (no golden config)")
+        return 0
+    tmp = tempfile.mkdtemp(prefix="builder_smoke_render_")
+    root = os.path.join(tmp, "reports")
+    pdir = os.path.join(root, "figs")
+    os.makedirs(os.path.join(pdir, "images"), exist_ok=True)
+    config_path = os.path.join(tmp, "golden_config.json")
+    with open(config_path, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False)
+    with open(os.path.join(pdir, "project.json"), "w", encoding="utf-8") as fh:
+        json.dump(FIGURE_PROJECT, fh, ensure_ascii=False)
+
+    # make_server writes the module-level CFG, which the harness's own server
+    # shares. Put it back, or every check after this one runs against the wrong
+    # reports root.
+    prev_root, prev_cfg = server.CFG.reports_root, server.CFG.template_config_path
+    httpd = serve(root, config_path, RENDER_PORT)
+    try:
+        f = check_figure_levels(RENDER_PORT)
+        f += check_pdf_twice(RENDER_PORT)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        server.CFG.reports_root = prev_root
+        server.CFG.template_config_path = prev_cfg
+    return f
+
+
+def check_figure_levels(port):
+    """A blank figure is a note; a figure naming an absent file is a warning.
+
+    The renderer cannot tell the two apart and calls both a warn-level
+    missing_image, so a freshly inherited report -- where every figure is
+    deliberately blank -- arrives with dozens of warnings that are the normal
+    state, burying the few that are not. The export manifest has to separate
+    them: blank drops to the informational level image_placeholder already uses,
+    a named file that is not on disk stays a warning.
+    """
+    s, body = post_at(port, "/api/export?dir=figs&fmt=docx")
+    if s != 200 or not isinstance(body, dict) or "warnings" not in body:
+        record("blank figure is a note, absent file is a warning", "FAIL")
+        print("      -> status=%s body=%r" % (s, str(body)[:300]))
+        return 1
+    imgs = [w for w in body["warnings"] if w.get("type") == "missing_image"]
+    blank = [w for w in imgs if str(w.get("detail") or "").strip() in ("", "(no file)")]
+    named = [w for w in imgs if w not in blank]
+    ok = (
+        len(blank) == 1 and blank[0].get("level") == "info"
+        and len(named) == 1 and named[0].get("level") == "warn"
+        and "absent.png" in str(named[0].get("detail"))
+        # and the counters the export panel groups by agree with the levels
+        and body.get("stats", {}).get("warns")
+        == sum(1 for w in body["warnings"] if w.get("level") == "warn")
+    )
+    return expect(ok, "blank figure is a note, absent file is a warning",
+                  "missing_image=%r stats=%r" % (imgs, body.get("stats")))
+
+
+def check_pdf_twice(port):
+    """Two PDF exports in ONE server session must both succeed.
+
+    COM is per-thread state and each request is served by a different thread, so
+    an export that initialised COM only by accident (through the first thread to
+    import pywin32) worked once and then failed with "CoInitialize has not been
+    called" until the server was restarted. Exporting twice is the whole test:
+    one export never showed the defect.
+
+    Skipped when the first export cannot run at all -- no Word, or no pywin32 on
+    this machine -- which is the honest reading, since the second can only be
+    asked about once the first has answered.
+    """
+    s1, b1 = post_at(port, "/api/export?dir=figs&fmt=pdf")
+    if s1 != 200:
+        record("two PDF exports in one session", "SKIP (no PDF export here)")
+        print("      -> first export: status=%s %s" % (s1, str(b1.get("error"))[:160]))
+        return 0
+    s2, b2 = post_at(port, "/api/export?dir=figs&fmt=pdf")
+    ok = (
+        s2 == 200 and b2.get("fmt") == "pdf"
+        and os.path.isfile(b2.get("abs", "").replace("/", os.sep))
+    )
+    return expect(ok, "two PDF exports in one session",
+                  "first=%s second=%s %s" % (s1, s2, str(b2.get("error"))[:200]))
+
+
 def check_paste_import(root):
     """POST /api/paste-import: full-replace from pasted text + structural diff.
 
@@ -631,8 +844,20 @@ def check_real_config():
 
     local_dir = os.path.abspath(os.path.join(HERE, "..", "..", "local"))
     cfgs = sorted(glob.glob(os.path.join(local_dir, "template_config_*.json")))
-    demo = os.path.join(local_dir, "demo_project")
-    if not cfgs or not os.path.isfile(os.path.join(demo, "project.json")):
+    # The sample report used to sit directly under the root and now sits three
+    # levels down; look for it at either depth, or this end-to-end check silently
+    # skips on exactly the machine it exists to guard.
+    demo_dir = ""
+    for depth in ("", "*/", "*/*/"):
+        hits = sorted(glob.glob(os.path.join(
+            local_dir, depth + "demo_project", "project.json")))
+        hits += sorted(glob.glob(os.path.join(
+            local_dir, depth + "demo_project", "*", "project.json")))
+        if hits:
+            demo_dir = os.path.relpath(
+                os.path.dirname(hits[0]), local_dir).replace(os.sep, "/")
+            break
+    if not cfgs or not demo_dir:
         record("real-config e2e (validate + export)", "SKIP (no local config)")
         return 0
 
@@ -668,7 +893,7 @@ def check_real_config():
                 time.sleep(0.05)
 
         # find the demo datatable
-        s, pj = rcall("GET", "/api/project?dir=demo_project")
+        s, pj = rcall("GET", "/api/project?dir=" + demo_dir + "")
         dt = None
 
         def _find(nodes):
@@ -695,7 +920,7 @@ def check_real_config():
         else:
             record("real validate-compliance == 4 flags", "SKIP (no datatable)")
 
-        s, ex = rcall("POST", "/api/export?dir=demo_project&fmt=docx", body={})
+        s, ex = rcall("POST", "/api/export?dir=" + demo_dir + "&fmt=docx", body={})
         ok = (
             s == 200
             and ex.get("fmt") == "docx"

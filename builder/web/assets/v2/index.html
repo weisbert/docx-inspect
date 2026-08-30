@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440">
+
+<!-- The shell is served from three addresses (/, /v2, /assets/v2/index.html) but its
+     assets live at one. The base makes every relative href/src below resolve to the
+     static route no matter which address the browser used. It does not affect
+     hash routes, absolute /api/ calls, or ES module specifiers (those resolve
+     against the importing module URL, not the base). -->
+<base href="/assets/v2/">
+<title>Report Workbench</title>
+
+<!-- Third-party stylesheets, checked in verbatim under vendor/ and never edited. -->
+<link rel="stylesheet" href="./vendor/jsuites.css">
+<link rel="stylesheet" href="./vendor/jspreadsheet.css">
+<link rel="stylesheet" href="./vendor/jspreadsheet.themes.css">
+
+<!-- Our own styles come last so they win over the vendor defaults.
+     tokens.css defines every colour and metric; app.css composes from it. -->
+<link rel="stylesheet" href="./css/tokens.css">
+<link rel="stylesheet" href="./css/app.css">
+
+<style>
+  /* Bootstrap-only styles. They exist so that the failure panel below renders
+     legibly even when app.css never loaded. Everything else lives in app.css. */
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg-app, #e9ebee);
+    color: var(--fg, #15181c);
+    font-family: var(--font-ui, -apple-system, "Segoe UI", sans-serif);
+    font-size: var(--fs-body, 12.5px);
+    line-height: var(--lh-base, 1.5);
+    /* Desktop tool. One width, no responsive breakpoints. */
+    min-width: 1440px;
+  }
+  #rw-boot-fail {
+    display: none;
+    box-sizing: border-box;
+    max-width: 720px;
+    margin: 60px auto;
+    padding: 22px;
+    background: var(--bg-panel, #ffffff);
+    border: 1px solid var(--line, #dcdfe3);
+    border-left: 3px solid var(--bad, #c02a1f);
+    border-radius: var(--r-ctl, 4px);
+  }
+  #rw-boot-fail h1 {
+    margin: 0 0 9px;
+    font-size: var(--fs-section-title, 15px);
+    font-weight: 650;
+    color: var(--bad-ink, #8f1e16);
+  }
+  #rw-boot-fail pre {
+    margin: 0 0 12px;
+    padding: 9px 12px;
+    overflow: auto;
+    max-height: 220px;
+    background: var(--bg-sunken, #f4f5f7);
+    border-radius: var(--r-ctl, 4px);
+    font-family: var(--font-num, Consolas, monospace);
+    font-size: var(--fs-meta, 11.5px);
+    color: var(--fg-muted, #4c545c);
+    white-space: pre-wrap;
+  }
+  #rw-boot-fail button {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--accent-edge, #1a54ba);
+    border-radius: var(--r-ctl, 4px);
+    background: var(--accent, #1f5fd0);
+    color: var(--fg-on-accent, #ffffff);
+    font-family: inherit;
+    font-size: var(--fs-body, 12.5px);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #rw-noscript {
+    max-width: 720px;
+    margin: 60px auto;
+    padding: 22px;
+    background: var(--bg-panel, #ffffff);
+    border: 1px solid var(--line, #dcdfe3);
+    border-radius: var(--r-ctl, 4px);
+  }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<!-- Shown only if boot.js throws before it mounts, so a syntax error in any
+     module is never a blank page. -->
+<div id="rw-boot-fail" role="alert">
+  <h1>Report Workbench failed to start</h1>
+  <pre id="rw-boot-fail-msg"></pre>
+  <button type="button" id="rw-boot-fail-retry">Retry</button>
+</div>
+
+<noscript>
+  <div id="rw-noscript">Report Workbench needs JavaScript enabled</div>
+</noscript>
+
+<script>
+/* Failure capture. Registered before any other script runs, so it also catches
+   a vendor file that failed to load. It never interferes with a healthy boot:
+   the panel is only revealed while #app is still empty. */
+(function () {
+  var panel = document.getElementById('rw-boot-fail');
+  var slot = document.getElementById('rw-boot-fail-msg');
+  var shown = false;
+
+  function mounted() {
+    var app = document.getElementById('app');
+    return !!(app && app.childElementCount > 0);
+  }
+
+  function fail(message) {
+    if (shown || mounted()) return;
+    shown = true;
+    slot.textContent = String(message || '');
+    panel.style.display = 'block';
+  }
+
+  window.addEventListener('error', function (ev) {
+    var el = ev && ev.target;
+    if (el && el !== window && (el.src || el.href)) {
+      fail('Failed to load ' + (el.src || el.href));
+      return;
+    }
+    fail((ev && ev.message) || 'Error');
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (ev) {
+    var reason = ev && ev.reason;
+    fail((reason && (reason.stack || reason.message)) || reason || 'Error');
+  });
+
+  /* Last resort: a module that resolves but never mounts. */
+  window.addEventListener('load', function () {
+    window.setTimeout(function () {
+      if (!mounted()) fail('The application did not mount.');
+    }, 4000);
+  });
+
+  document.getElementById('rw-boot-fail-retry')
+    .addEventListener('click', function () { window.location.reload(); });
+}());
+</script>
+
+<!-- Vendor runtime, in dependency order. Classic scripts, each publishing a
+     global: preact, preactHooks, htm, jSuites, jspreadsheet. jspreadsheet
+     depends on jsuites, so jsuites is loaded first. -->
+<script src="./vendor/preact.umd.js"></script>
+<script src="./vendor/hooks.umd.js"></script>
+<script src="./vendor/htm.umd.js"></script>
+<script src="./vendor/jsuites.js"></script>
+<script src="./vendor/jspreadsheet.js"></script>
+
+<!-- Application entry point. Plain ES modules, no build step. -->
+<script type="module" src="./js/boot.js"></script>
+
+</body>
+</html>

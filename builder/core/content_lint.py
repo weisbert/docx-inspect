@@ -2,26 +2,51 @@
 """content_lint.py -- pre-render content checks for a project.json.
 
 Pure functions with NO python-docx dependency, so a project can be linted before
-(or entirely without) an export -- e.g. by a fill script or a pre-push step.
+(or entirely without) an export -- e.g. by a fill script, by a pre-package step,
+or by the workbench's standing Check tab.
 
-Findings share the render manifest's warning shape and add a ``level``:
-    {"type": str, "level": "error"|"warn"|"info", "detail": str, "location": str}
+Every finding carries both the legacy render-manifest keys and the machine keys
+the Check tab reads:
+
+    {"type": str,        # legacy alias of "code"
+     "level": "error"|"warn"|"info",
+     "detail": str,      # legacy alias of "message"
+     "location": str,    # human path: section "Title" / block 2 (image)
+     "code": str,        # stable rule id
+     "message": str,     # plain English, from the MESSAGES table below
+     "loc": str,         # section number path, e.g. "4.2"
+     "nodeId": str|None, # outline node id
+     "blockId": str|None}
 
   * error -- would crash the renderer or silently drop a whole block / table, so
              the visible output is wrong in a way the user cannot see (must be
-             zero before exporting / shipping a bundle).
+             zero before exporting / shipping a package).
   * warn  -- renders, but the content is probably wrong or incomplete: a
-             compliance table with no condition rows, a result row that can
-             never red-flag, a figure with no caption, ...
-  * info  -- legitimate-but-worth-noting (e.g. a result row with an empty unit,
-             which the demo proves is valid). Default off in the GUI.
+             compliance table with no setting rows, a result row that can never
+             be marked over spec, a figure with no caption, ...
+  * info  -- legitimate-but-worth-noting, shown as "Notes": an image whose file
+             was cleared for the next stage, a result row with an empty unit.
+
+The only verdict this module knows about is "over spec". It never implies a
+pass / fail / unknown state for a row.
+
+Return shape of ``lint_project``: a ``LintReport``. It IS a dict with the three
+Check-tab groups::
+
+    {"errors": [...], "warnings": [...], "notes": [...]}
+
+so it serialises straight to JSON for the Check tab, AND it iterates as the flat
+list of findings in document order, which is what the export path does when it
+merges these findings into the render manifest. ``report.flat`` is that list
+explicitly; ``report.counts`` is the per-level tally.
 
 CLI:
     python builder/core/content_lint.py <project_dir> [--config <template.json>]
-    python builder/core/content_lint.py <project_dir> --json      # machine-readable
+    python builder/core/content_lint.py <project_dir> --json      # flat list
+    python builder/core/content_lint.py <project_dir> --grouped   # Check-tab dict
 
 Exit status is 1 when any ``error``-level finding exists (0 otherwise), so it can
-gate a fill / bundle workflow.
+gate a fill / package workflow.
 """
 import argparse
 import json
@@ -29,9 +54,9 @@ import os
 import sys
 
 # Canonical level for every warning type -- engine render-manifest types AND the
-# content_lint types below. Anything not listed defaults to "warn" (classify).
+# content_lint codes below. Anything not listed defaults to "warn" (classify).
 LEVELS = {
-    # engine render-manifest types (existing)
+    # engine render-manifest types
     "block_error": "error",
     "missing_image": "warn",
     "missing_logo": "warn",
@@ -39,26 +64,87 @@ LEVELS = {
     "row_clip_risk": "warn",
     "dangling_ref": "warn",
     "table_warning": "warn",
-    # tables.py sim_span guards (new, WS3)
+    # tables.py sim_span guard (same code the renderer emits)
     "sim_span_unmergeable": "error",
-    "sim_span_partial": "warn",
-    # content_lint structural types (new, WS3)
+    # content_lint structural codes
     "datatable_no_data": "error",
     "table_no_rows": "error",
     "row_missing_key": "error",
-    "sim_span_axes": "error",
     "image_path": "error",
     "free_table_bounds": "error",
     "no_setting_rows": "warn",
     "limit_no_flag": "warn",
     "empty_sim_result": "warn",
-    "sim_span_multi": "warn",
     "empty_section": "warn",
     "unknown_sim_key": "warn",
+    "image_placeholder": "info",
     "unit_empty": "info",
 }
 
 LEVEL_ORDER = {"error": 0, "warn": 1, "info": 2}
+
+# Which Check-tab group a level lands in.
+LEVEL_GROUP = {"error": "errors", "warn": "warnings", "info": "notes"}
+GROUP_KEYS = ("errors", "warnings", "notes")
+
+# ---------------------------------------------------------------------------
+# Frozen message table. Every user-visible sentence this module can produce is
+# here, in plain English -- nothing is assembled ad hoc at a call site. Keep the
+# wording aligned with the workbench glossary; do not invent a second phrase for
+# a rule that already has one.
+# ---------------------------------------------------------------------------
+MESSAGES = {
+    "image_path.absolute":
+        'Image file is an absolute path: "%(file)s". Store the file under images/ '
+        'and reference it as images/<name>',
+    "image_path.escapes":
+        'Image file points outside the report with "..": "%(file)s"',
+    "image_path.outside":
+        'Image file is not under images/: "%(file)s"',
+    "image_placeholder.blank":
+        "Image has no file yet - it is an empty frame waiting for a picture",
+    "missing_image.not_found":
+        'Image file "%(file)s" is missing from the report folder',
+    "no_caption.image":
+        "Image has no caption",
+    "no_caption.imagegrid":
+        "Image grid has no caption",
+    "table_no_rows.missing":
+        "Table has no rows",
+    "table_no_rows.not_list":
+        "Table rows are not a list of rows",
+    "free_table_bounds.merge":
+        "Merged cell at row %(r)s column %(c)s spanning %(rs)s x %(cs)s reaches "
+        "outside this %(nrows)d x %(ncols)d table",
+    "free_table_bounds.fill":
+        "Row shading is set for row %(idx)s, but this table has only %(nrows)d rows",
+    "datatable_no_data.block":
+        "Compliance table has no data",
+    "datatable_no_data.rows":
+        "Compliance table data has no rows",
+    "row_missing_key.not_object":
+        "Row %(i)d is not a row object",
+    "row_missing_key.missing":
+        'Row %(i)d ("%(item)s") is missing: %(keys)s',
+    "no_setting_rows.none":
+        "Compliance table has no setting rows - add the test conditions at the "
+        "top of the table",
+    "limit_no_flag.blank":
+        'Result row "%(item)s" has a spec but no limit set - this row is never '
+        'marked over spec',
+    "empty_sim_result.blank":
+        'Result row "%(item)s" has no simulation values yet',
+    "unit_empty.blank":
+        'Result row "%(item)s" has an empty unit',
+    "unknown_sim_key.undeclared":
+        'Row %(i)d uses simulation column "%(key)s", which this table does not '
+        'declare',
+    "sim_span_unmergeable.thin":
+        "A row spans the simulation columns, but simulation group(s) %(keys)s have "
+        "fewer than two columns - there is nothing to merge",
+    "empty_section.none":
+        "Section is empty - no text, no figures, no tables",
+}
 
 _REQUIRED_ROW_KEYS = ("cat", "item", "kind", "unit")
 _DEFAULT_AXES = ["MIN", "TYP", "MAX", "NTWC"]
@@ -75,6 +161,49 @@ def stamp_levels(warnings):
         if isinstance(w, dict) and "level" not in w:
             w["level"] = classify(w.get("type"))
     return warnings
+
+
+def message(mid, **kw):
+    """Render a frozen message. An unknown id falls back to the id itself rather
+    than raising, so a typo degrades to an ugly string instead of killing a lint
+    that exists to be a safety net."""
+    tpl = MESSAGES.get(mid)
+    if tpl is None:
+        return mid
+    try:
+        return tpl % kw if kw else tpl
+    except (KeyError, TypeError, ValueError):
+        return tpl
+
+
+class LintReport(dict):
+    """The Check tab's three groups, which also iterates as a flat findings list.
+
+    ``dict(report)`` / ``json.dumps(report)`` give
+    ``{"errors": [...], "warnings": [...], "notes": [...]}``;
+    ``list(report)`` / ``for f in report`` give the flat findings in document
+    order (the shape the export manifest merge wants). ``len(report)`` is the
+    dict's 3 -- use ``len(report.flat)`` for the finding count.
+    """
+
+    def __init__(self, findings=None):
+        flat = list(findings or [])
+        groups = {k: [] for k in GROUP_KEYS}
+        for f in flat:
+            groups[LEVEL_GROUP.get(f.get("level"), "warnings")].append(f)
+        dict.__init__(self, groups)
+        self.flat = flat
+
+    def __iter__(self):
+        return iter(self.flat)
+
+    @property
+    def counts(self):
+        return summarize(self.flat)
+
+    @property
+    def has_errors(self):
+        return bool(self["errors"])
 
 
 # ---------------------------------------------------------------------------
@@ -94,12 +223,43 @@ def _as_list(v):
     return list(v) if isinstance(v, (list, tuple)) else []
 
 
-def _row_sim_values(row):
-    """Flat list of a row's simulated axis values (multi-sim or flat schema)."""
+def _reference_group_keys(data):
+    """Keys of the value groups that hold ANOTHER report's numbers.
+
+    A reference column is a snapshot pulled from an earlier stage of the same
+    module. ``report_new.build_reference_column`` stamps it ``role="reference"``
+    and ``readOnly``; the table view treats either mark as read-only, so both are
+    honoured here. Such a column is not work done for this stage, so it never
+    answers "has this row been filled in".
+    """
+    keys = set()
+    for s in (data.get("sims") or []):
+        if not isinstance(s, dict):
+            continue
+        if s.get("role") == "reference" or s.get("readOnly"):
+            k = s.get("key")
+            if k is not None:
+                keys.add(k)
+    return keys
+
+
+def _row_sim_values(row, ref_keys=()):
+    """Flat list of a row's OWN simulated axis values (multi-sim or flat schema).
+
+    Groups named in ``ref_keys`` are left out: an inherited row carries the
+    previous stage's numbers beside empty cells of its own, and counting those
+    would report the row as done. When a row's ONLY group is a reference one, the
+    flat schema is read instead -- the same fallback ``tables.py`` makes when a
+    group has no per-row entry -- so a freshly inherited row reads as empty,
+    which is what it is.
+    """
     vals = []
     sims = row.get("sims")
-    if isinstance(sims, dict) and sims:
-        for sv in sims.values():
+    own = {}
+    if isinstance(sims, dict):
+        own = dict((k, v) for k, v in sims.items() if k not in ref_keys)
+    if own:
+        for sv in own.values():
             if isinstance(sv, dict):
                 vals += _as_list(sv.get("mtm"))
                 vals.append(sv.get("ntwc"))
@@ -123,27 +283,37 @@ def _is_empty(v):
 
 
 # ---------------------------------------------------------------------------
-# Block-level linters.
+# Block-level linters. ``add(code, message_id, **fields)`` is bound per block by
+# lint_project, so a rule never has to know about locations or node ids.
 # ---------------------------------------------------------------------------
 
 
-def _lint_image_file(fname, loc, add):
-    """A5: an image file must be project-relative under images/ (never absolute
-    or ..-escaping). An empty file is a legitimate not-yet-pasted placeholder."""
+def _lint_image_file(fname, add, project_dir=None):
+    """An image file must be project-relative under images/ (never absolute or
+    ..-escaping). A BLANK file is the legitimate "cleared for the next stage"
+    placeholder: a note, never a warning -- a freshly inherited report is full of
+    them by design."""
     if not fname:
+        add("image_placeholder", "image_placeholder.blank")
         return
     f = str(fname).replace("\\", "/")
     if f.startswith("/") or (len(f) >= 2 and f[1] == ":"):
-        add("image_path", 'image file is an absolute path: "%s"' % fname, loc)
+        add("image_path", "image_path.absolute", file=fname)
     elif ".." in f.split("/"):
-        add("image_path", 'image file escapes with "..": "%s"' % fname, loc)
+        add("image_path", "image_path.escapes", file=fname)
     elif not f.startswith("images/"):
-        add("image_path", 'image file is not under images/: "%s"' % fname, loc)
+        add("image_path", "image_path.outside", file=fname)
+    elif project_dir:
+        # Only when a folder is supplied: the standing Check tab can then report a
+        # missing picture without waiting for an export. The export path does NOT
+        # pass one, because the renderer already emits missing_image itself.
+        if not os.path.isfile(os.path.join(project_dir, *f.split("/"))):
+            add("missing_image", "missing_image.not_found", file=fname)
 
 
-def _lint_free_table(block, rows, loc, add):
+def _lint_free_table(block, rows, add):
     if not isinstance(rows, list):
-        add("table_no_rows", "table 'rows' is not a list", loc)
+        add("table_no_rows", "table_no_rows.not_list")
         return
     nrows = len(rows)
     ncols = max((len(r) for r in rows if isinstance(r, (list, tuple))), default=0)
@@ -153,9 +323,8 @@ def _lint_free_table(block, rows, loc, add):
         r, c = m.get("r", 0), m.get("c", 0)
         rs, cs = m.get("rs", 1), m.get("cs", 1)
         if r < 0 or c < 0 or r + rs > nrows or c + cs > ncols:
-            add("free_table_bounds",
-                "merge {r:%s,c:%s,rs:%s,cs:%s} is out of the %dx%d grid"
-                % (r, c, rs, cs, nrows, ncols), loc)
+            add("free_table_bounds", "free_table_bounds.merge",
+                r=r, c=c, rs=rs, cs=cs, nrows=nrows, ncols=ncols)
     rf = block.get("row_fills")
     if isinstance(rf, dict):
         for k in rf:
@@ -164,106 +333,99 @@ def _lint_free_table(block, rows, loc, add):
             except (TypeError, ValueError):
                 continue
             if ki < 0 or ki >= nrows:
-                add("free_table_bounds",
-                    "row_fills index %s is outside the %d rows" % (k, nrows), loc)
+                add("free_table_bounds", "free_table_bounds.fill",
+                    idx=k, nrows=nrows)
 
 
-def _lint_datatable(data, loc, add, default_axes, setting_kinds):
+def _lint_datatable(data, add, default_axes, setting_kinds):
     rows = data.get("rows")
     if not isinstance(rows, list):
-        add("datatable_no_data", "datatable data has no 'rows' list", loc)
+        add("datatable_no_data", "datatable_no_data.rows")
         return
-    sims = data.get("sims") or []
-    sim_keys = {s.get("key") for s in sims if isinstance(s, dict) and s.get("key")}
-    first_sim_axes = None
-    for s in sims:
-        if isinstance(s, dict):
-            first_sim_axes = _axis_count(s, default_axes)
-            break
-    if first_sim_axes is None:
-        first_sim_axes = len(default_axes)   # implicit single sim group
-    n_sim_groups = max(1, len(sims))
+    sims = [s for s in (data.get("sims") or []) if isinstance(s, dict)]
+    sim_keys = {s.get("key") for s in sims if s.get("key")}
+    ref_keys = _reference_group_keys(data)
 
     has_setting = False
     any_sim_span = False
     for ri, row in enumerate(rows):
         if not isinstance(row, dict):
-            add("row_missing_key", "row %d is not an object" % ri, loc)
+            add("row_missing_key", "row_missing_key.not_object", i=ri)
             continue
         missing = [k for k in _REQUIRED_ROW_KEYS if k not in row]
         if missing:
-            add("row_missing_key",
-                "row %d ('%s') is missing key(s): %s"
-                % (ri, row.get("item", ""), ", ".join(missing)), loc)
+            add("row_missing_key", "row_missing_key.missing",
+                i=ri, item=row.get("item", ""), keys=", ".join(missing))
         kind = row.get("kind")
         is_setting = kind in setting_kinds
         if is_setting:
             has_setting = True
-        if not is_setting:
-            # B1: a result row with a spec but no limit direction never red-flags.
+        else:
+            # A result row with a spec but no limit direction can never be marked
+            # over spec -- the one verdict this tool has. A warning, not an error.
             if _is_empty(row.get("limit")) and _row_has_spec(row):
-                add("limit_no_flag",
-                    "result row '%s' has a spec but limit is empty -> it can never "
-                    "red-flag" % row.get("item", ""), loc)
-            # all-empty sim values -> an unfilled placeholder row.
-            if all(_is_empty(v) for v in _row_sim_values(row)):
-                add("empty_sim_result",
-                    "result row '%s' has all-empty sim values (unfilled?)"
-                    % row.get("item", ""), loc)
-            # info: empty unit string (legitimate, e.g. a ratio -- default off).
+                add("limit_no_flag", "limit_no_flag.blank", item=row.get("item", ""))
+            # all-empty sim values of this stage's OWN groups -> an unfilled
+            # placeholder row. A reference column beside it is somebody else's
+            # work and never counts as filled in.
+            if all(_is_empty(v) for v in _row_sim_values(row, ref_keys)):
+                add("empty_sim_result", "empty_sim_result.blank",
+                    item=row.get("item", ""))
+            # note: empty unit string (legitimate, e.g. a ratio).
             if "unit" in row and row.get("unit", "") == "":
-                add("unit_empty",
-                    "result row '%s' has an empty unit" % row.get("item", ""), loc)
+                add("unit_empty", "unit_empty.blank", item=row.get("item", ""))
         rsims = row.get("sims")
         if isinstance(rsims, dict) and sim_keys:
             for k in rsims:
                 if k not in sim_keys:
-                    add("unknown_sim_key",
-                        "row %d references undeclared sim key '%s'" % (ri, k), loc)
+                    add("unknown_sim_key", "unknown_sim_key.undeclared", i=ri, key=k)
         if row.get("sim_span"):
             any_sim_span = True
 
-    # The recurring pain point: a compliance table with NO condition/setting row.
+    # The recurring real-world mistake: a compliance table with NO setting rows.
     if rows and not has_setting:
-        add("no_setting_rows",
-            "compliance table has no condition/setting rows -- add them (use a "
-            "table preset so the condition rows are never forgotten)", loc)
-    # A sim_span value now merges across ALL sim groups' axis columns (the whole
-    # sim area), so multiple sim groups are fine. The only genuinely unmergeable
-    # case is a sim area with fewer than 2 axis columns total.
+        add("no_setting_rows", "no_setting_rows.none")
+    # sim_span merges each simulation group's own axis columns INDEPENDENTLY
+    # (tables.py merges cc[0]..cc[-1] per group), so several groups are fine and a
+    # group of two axes merges cleanly. The only unmergeable case -- and the exact
+    # condition the renderer warns about -- is a group with fewer than 2 axis
+    # columns. Mirrored here so the mistake is caught before the export.
     if any_sim_span:
-        total_sim_axes = sum(_axis_count(s, default_axes)
-                             for s in sims if isinstance(s, dict)) or first_sim_axes
-        if total_sim_axes < 2:
-            add("sim_span_unmergeable",
-                "sim_span row(s) but the sim area has %d axis column(s) (<2) -- "
-                "nothing to merge" % total_sim_axes, loc)
+        if sims:
+            thin = [s.get("key") or "(unnamed)" for s in sims
+                    if _axis_count(s, default_axes) < 2]
+        else:
+            # implicit single group taking the template's axis labels
+            thin = ["(default)"] if len(default_axes) < 2 else []
+        if thin:
+            add("sim_span_unmergeable", "sim_span_unmergeable.thin",
+                keys=", ".join(thin))
 
 
-def _lint_block(block, loc, add, default_axes, setting_kinds):
+def _lint_block(block, add, default_axes, setting_kinds, project_dir=None):
     bt = block.get("type")
     if bt == "image":
-        _lint_image_file(block.get("file"), loc, add)
+        _lint_image_file(block.get("file"), add, project_dir)
         if not (block.get("caption") or "").strip():
-            add("no_caption", "image has no caption", loc)
+            add("no_caption", "no_caption.image")
     elif bt == "imagegrid":
         for it in (block.get("items") or []):
             if isinstance(it, dict):
-                _lint_image_file(it.get("file"), loc, add)
+                _lint_image_file(it.get("file"), add, project_dir)
         if not (block.get("caption") or "").strip():
-            add("no_caption", "image grid has no caption", loc)
+            add("no_caption", "no_caption.imagegrid")
     elif bt == "table":
         rows = block.get("rows")
         if rows is None:
-            add("table_no_rows", "table block has no 'rows' key", loc)
+            add("table_no_rows", "table_no_rows.missing")
         else:
-            _lint_free_table(block, rows, loc, add)
+            _lint_free_table(block, rows, add)
     elif bt == "datatable":
         data = block.get("data")
         if not isinstance(data, dict):
-            add("datatable_no_data", "datatable block has no 'data' dict", loc)
+            add("datatable_no_data", "datatable_no_data.block")
         else:
-            _lint_datatable(data, loc, add, default_axes, setting_kinds)
+            _lint_datatable(data, add, default_axes, setting_kinds)
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +433,18 @@ def _lint_block(block, loc, add, default_axes, setting_kinds):
 # ---------------------------------------------------------------------------
 
 
-def lint_project(project, cfg=None):
-    """Return a list of findings for ``project`` (a parsed project.json dict).
+def lint_project(project, cfg=None, project_dir=None):
+    """Lint ``project`` (a parsed project.json dict) and return a ``LintReport``.
 
     ``cfg`` (optional) is the template config; its ``compliance.axis_labels`` /
-    ``compliance.setting_kinds`` calibrate the axis-count and condition-row rules.
+    ``compliance.setting_kinds`` calibrate the axis-count and setting-row rules.
+    ``project_dir`` (optional) is the report folder: pass it to also report
+    pictures whose file is missing from disk, which lets the Check tab stand on
+    its own without an export. The export path leaves it out, because the
+    renderer reports missing pictures itself.
+
+    The report is a dict of the Check tab's ``errors`` / ``warnings`` / ``notes``
+    groups AND iterates as the flat findings list -- see ``LintReport``.
     """
     findings = []
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -283,36 +452,46 @@ def lint_project(project, cfg=None):
     default_axes = comp.get("axis_labels", _DEFAULT_AXES)
     setting_kinds = set(comp.get("setting_kinds", _DEFAULT_SETTING_KINDS))
 
-    def add(t, detail, location):
-        findings.append({"type": t, "level": classify(t),
-                         "detail": detail, "location": location})
+    def emit(code, mid, location, loc, node_id, block_id, kw):
+        text = message(mid, **kw)
+        findings.append({
+            "type": code, "level": classify(code),
+            "detail": text, "location": location,
+            "code": code, "message": text, "loc": loc,
+            "nodeId": node_id, "blockId": block_id,
+        })
 
-    def walk(node):
+    def walk(node, path):
         if not isinstance(node, dict):
             return
         title = node.get("title", "")
+        node_id = node.get("id")
         loc0 = 'section "%s"' % title
         blocks = node.get("blocks") or []
         children = node.get("children") or []
         has_fixed = bool(node.get("fixed_body"))
         if not blocks and not children and not has_fixed:
-            add("empty_section",
-                "section has no blocks, no fixed body, and no sub-sections", loc0)
+            emit("empty_section", "empty_section.none", loc0, path, node_id, None, {})
         for idx, block in enumerate(blocks):
             if not isinstance(block, dict):
                 continue
-            loc = '%s / block %d (%s)' % (loc0, idx, block.get("type", "?"))
-            _lint_block(block, loc, add, default_axes, setting_kinds)
-        for c in children:
-            walk(c)
+            location = '%s / block %d (%s)' % (loc0, idx, block.get("type", "?"))
+            block_id = block.get("id")
 
-    for node in (project.get("outline") or []):
-        walk(node)
-    return findings
+            def add(code, mid, _location=location, _bid=block_id, **kw):
+                emit(code, mid, _location, path, node_id, _bid, kw)
+
+            _lint_block(block, add, default_axes, setting_kinds, project_dir)
+        for ci, c in enumerate(children):
+            walk(c, "%s.%d" % (path, ci + 1))
+
+    for ni, node in enumerate(project.get("outline") or []):
+        walk(node, "%d" % (ni + 1))
+    return LintReport(findings)
 
 
 def summarize(findings):
-    """{'error': n, 'warn': n, 'info': n} for a findings list."""
+    """{'error': n, 'warn': n, 'info': n} for a findings list (or a LintReport)."""
     out = {"error": 0, "warn": 0, "info": 0}
     for f in findings or []:
         lv = f.get("level", "warn")
@@ -330,7 +509,12 @@ def main(argv=None):
     ap.add_argument("project_dir", help="folder containing project.json")
     ap.add_argument("--config", help="template config json (for setting_kinds/axes)")
     ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
-    ap.add_argument("--info", action="store_true", help="include info-level findings in text output")
+    ap.add_argument("--grouped", action="store_true",
+                    help="JSON grouped into errors/warnings/notes (the Check tab shape)")
+    ap.add_argument("--info", action="store_true",
+                    help="include info-level findings in text output")
+    ap.add_argument("--files", action="store_true",
+                    help="also report pictures missing from the report folder")
     a = ap.parse_args(argv)
 
     proj_path = os.path.join(a.project_dir, "project.json")
@@ -344,12 +528,15 @@ def main(argv=None):
         with open(a.config, encoding="utf-8") as fh:
             cfg = json.load(fh)
 
-    findings = lint_project(project, cfg)
-    findings.sort(key=lambda f: LEVEL_ORDER.get(f.get("level"), 1))
+    report = lint_project(project, cfg, a.project_dir if a.files else None)
+    findings = sorted(report.flat, key=lambda f: LEVEL_ORDER.get(f.get("level"), 1))
 
+    if a.grouped:
+        print(json.dumps(dict(report), ensure_ascii=False, indent=2))
+        return 1 if report.has_errors else 0
     if a.json:
         print(json.dumps(findings, ensure_ascii=False, indent=2))
-        return 1 if any(f["level"] == "error" for f in findings) else 0
+        return 1 if report.has_errors else 0
 
     counts = summarize(findings)
     for f in findings:

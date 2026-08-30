@@ -11,7 +11,9 @@ document (portrait body flow -- never a new page, never landscape, never a page-
         is shrunk inline rather than spilling onto a new page or rotating the page.
 
   * render_free_table(doc, rows, cfg, ...) -- an arbitrary rows/cols table with optional
-        header shading, cell merges, and per-column widths.
+        header shading, cell merges, and per-column widths. Row shading is driven by a
+        per-row KIND (header / setting / result) mapped to a fill through the config,
+        with the older index-keyed ``row_fills`` map kept as a fallback.
 
 Nothing domain specific is hardcoded here: column widths, fonts, axis labels (including the
 unbreakable narrow-axis token), fill colors, limit directions and the flag color all arrive
@@ -555,10 +557,94 @@ def render_datatable(doc, data, cfg):
 
 
 # ---------------------------------------------------------------------------
+# Free-table row kinds (kind -> fill), replacing index-keyed row shading
+# ---------------------------------------------------------------------------
+# A free table's row shading used to be addressed by ROW INDEX (``row_fills``),
+# so inserting a row shifted every colour below it. A row now carries a KIND
+# instead, and the kind is mapped to a fill through the template config -- the
+# same idea the compliance renderer already uses (``setting_kinds`` + ``fills``).
+#
+# Two carriers are accepted, because the row model is a bare list of cell values
+# and JSON cannot hang an attribute off a list:
+#   * ``row_kinds`` -- a block-level list positionally parallel to ``rows``
+#     (``None`` for "no kind"), or a {row_index: kind} map;
+#   * an inline ``kind`` on a row written as a dict ``{"cells": [...], "kind": ...}``.
+# The inline kind wins when both are present.
+FREE_ROW_KINDS = ("header", "setting", "result")
+
+# Fallback fill for a "setting" row when the template config names none. The
+# free_table config section historically carries only ``header_fill``; a template
+# overrides the whole map with ``free_table.kind_fills`` (or ``fills``).
+_DEFAULT_SETTING_FILL = "EEECE1"
+
+
+def _row_cells(row):
+    """The cell values of a free-table row (list row, or dict row's ``cells``)."""
+    if isinstance(row, dict):
+        cells = row.get("cells")
+        return cells if isinstance(cells, (list, tuple)) else []
+    return row if isinstance(row, (list, tuple)) else []
+
+
+def _inline_row_kind(row):
+    """The ``kind`` carried by a dict row, or None."""
+    if isinstance(row, dict):
+        k = row.get("kind")
+        if isinstance(k, str) and k:
+            return k
+    return None
+
+
+def free_kind_fills(cfg, header_fill=None):
+    """Map row kind -> hex6 fill for a free table (``None`` = leave unshaded).
+
+    ``cfg`` is the template config's ``free_table`` section. A template may name
+    the whole map under ``kind_fills`` (or ``fills``); anything it leaves out
+    keeps the default. A per-table ``header_fill`` still wins for the header kind
+    so a preset can carry its own header shade.
+    """
+    hfill = header_fill or cfg.get("header_fill", "D9D9D9")
+    fills = {"header": hfill, "setting": _DEFAULT_SETTING_FILL, "result": None}
+    src = cfg.get("kind_fills")
+    if not isinstance(src, dict):
+        src = cfg.get("fills")
+    if isinstance(src, dict):
+        for k, v in src.items():
+            if k == "header" and header_fill:
+                continue                      # per-table header_fill wins
+            fills[k] = v or None
+    return fills
+
+
+def _row_kind_list(rows, row_kinds):
+    """Per-row kind for every row: the block-level ``row_kinds`` (parallel list or
+    {index: kind} map) overridden by any inline kind on a dict row."""
+    n = len(rows)
+    out = [None] * n
+    if isinstance(row_kinds, dict):
+        for k, v in row_kinds.items():
+            try:
+                i = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < n and isinstance(v, str) and v:
+                out[i] = v
+    elif isinstance(row_kinds, (list, tuple)):
+        for i, v in enumerate(row_kinds[:n]):
+            if isinstance(v, str) and v:
+                out[i] = v
+    for i, row in enumerate(rows):
+        inline = _inline_row_kind(row)
+        if inline:
+            out[i] = inline
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Public: free-table renderer (arbitrary rows/cols)
 # ---------------------------------------------------------------------------
 def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
-                      row_fills=None, header_fill=None, row_h=None):
+                      row_fills=None, header_fill=None, row_h=None, row_kinds=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
         header_fill, border{val,sz,color}, font_pt(optional).
 
@@ -570,9 +656,21 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     config default -- lets a table library preset carry its own header shade (e.g.
     an amber-headed sign-off summary table) without changing every free table.
 
-    ``row_fills`` (optional): map of row-index -> hex6 fill, letting a caller shade
-    whole rows (e.g. band condition rows vs result rows). Header rows keep the header
-    fill; a row_fills entry on a non-header row overrides to that colour.
+    ``row_kinds`` (optional): the row kinds -- a list positionally parallel to
+    ``rows`` (``None`` per row for "no kind") or a {row_index: kind} map. A kind is
+    one of ``FREE_ROW_KINDS`` and is mapped to a fill by ``free_kind_fills``, so a
+    colour travels WITH its row instead of with its index: inserting a row no longer
+    shifts every colour below it. A row written as a dict ``{"cells": [...],
+    "kind": ...}`` carries its kind inline and that inline kind wins.
+
+    ``row_fills`` (optional, legacy): map of row-index -> hex6 fill, letting a caller
+    shade whole rows (e.g. band condition rows vs result rows).
+
+    Shading precedence for a row: a KIND the fill map knows wins (its mapped value may
+    be ``None``, meaning "leave unshaded"); otherwise a header row takes the header
+    fill and any other row takes its ``row_fills`` entry. Data with no kinds therefore
+    renders exactly as before -- ``row_fills`` stays supported so the older editor,
+    which knows nothing about kinds, keeps drawing the same bands.
 
     RETURN SHAPE (CONTRACT): the same result-dict shape as render_datatable --
     {"table": <Table or None>, "total_rows": int, "flagged_rows": 0,
@@ -581,12 +679,14 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
      ``table`` is None when there are no rows to render."""
     if not rows:
         return {"table": None, "total_rows": 0, "flagged_rows": 0, "warnings": []}
-    ncols = max(len(r) for r in rows)
+    ncols = max(len(_row_cells(r)) for r in rows)
     nrows = len(rows)
     hfill = header_fill or cfg.get("header_fill", "D9D9D9")
     bd = cfg.get("border", {"val": "single", "sz": 4, "color": "000000"})
     font_pt = cfg.get("font_pt")
     rfills = {int(k): v for k, v in (row_fills or {}).items()}
+    kinds = _row_kind_list(rows, row_kinds)
+    kind_fills = free_kind_fills(cfg, header_fill)
 
     table = doc.add_table(rows=nrows, cols=ncols)
     table.alignment = 1
@@ -602,21 +702,30 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
                     table.cell(r, idx).width = Cm(cw)
 
     for r, rowvals in enumerate(rows):
+        cells = _row_cells(rowvals)
+        kind = kinds[r]
+        # kind -> fill wins when the map knows the kind (a mapped None means
+        # "unshaded"); otherwise fall back to header_rows / the legacy row_fills.
+        if kind in kind_fills:
+            fill = kind_fills[kind]
+        elif r < header_rows:
+            fill = hfill
+        else:
+            fill = rfills.get(r)
+        is_head = r < header_rows or kind == "header"
         for c in range(ncols):
-            val = rowvals[c] if c < len(rowvals) else ""
+            val = cells[c] if c < len(cells) else ""
             cell = table.cell(r, c)
-            if r < header_rows:
-                _shade(cell, hfill)
-            elif r in rfills:
-                _shade(cell, rfills[r])
+            if fill:
+                _shade(cell, fill)
             runs = val.get("runs") if isinstance(val, dict) else None
             if isinstance(runs, list):
-                _set_cell_runs(cell, runs, font_pt, header_bold=(r < header_rows))
+                _set_cell_runs(cell, runs, font_pt, header_bold=is_head)
             elif font_pt:
-                _set_cell_text(cell, val, font_pt, bold=(r < header_rows), align="center")
+                _set_cell_text(cell, val, font_pt, bold=is_head, align="center")
             else:
                 cell.text = "" if val is None else str(val)
-                if r < header_rows:
+                if is_head:
                     for p in cell.paragraphs:
                         for run in p.runs:
                             run.font.bold = True

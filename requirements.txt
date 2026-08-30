@@ -2,3 +2,19 @@ lxml==6.1.1
 python-docx==1.2.0
 typing_extensions==4.15.0
 openpyxl==3.1.5
+
+# Optional -- live section preview only.
+#
+# These two turn a single section into Word page images: pywin32 drives Word
+# through COM, pymupdf turns the PDF it produces into PNGs. Neither is imported
+# at module load: builder/web/live_preview.py imports them inside the functions
+# that need them and raises LivePreviewUnavailable with a plain-English reason
+# when one is missing. Without them everything else works -- export, the
+# approximate preview, every screen -- and the page-image button says why it
+# cannot run instead of failing.
+#
+# pywin32 has no wheel off Windows, so the marker keeps this file installable
+# everywhere. Neither package needs Word to INSTALL; Word is only needed to
+# render, and its absence is reported at render time, not at install time.
+pymupdf==1.27.2.3
+pywin32==312; sys_platform == "win32"

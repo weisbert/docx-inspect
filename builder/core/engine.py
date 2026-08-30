@@ -816,10 +816,17 @@ def _render_ref_run(p, ref_id, ref_targets, warn=None):
     (``bm_<block_id>_num``, the scheme step 1 established). The field shows the
     number live and -- via the ``\\h`` switch -- is a Ctrl+click hyperlink.
 
-    ``ref_targets`` maps a known block id to a short label (e.g. "Figure" /
-    "Table") used only as the un-refreshed placeholder text. A reference whose
-    target is missing (dangling) degrades to a visible red "[ref: ...]" marker
-    plus a ``dangling_ref`` manifest warning -- it never aborts the render."""
+    ``ref_targets`` maps a known block id to the target caption's COMPUTED NUMBER
+    ("<chap>-<seq>", e.g. "4-1"), which becomes the field's placeholder text. That
+    matters beyond tidiness: Word does not refresh fields when it exports to PDF,
+    so a proof image (and any freshly opened, un-refreshed document) shows exactly
+    this placeholder. A bare label such as "Figure" would print as "Figure" where
+    the reader expects "4-1"; the number keeps the un-refreshed text identical to
+    what F9 will compute. See _collect_ref_targets for the numbering rules.
+
+    A reference whose target is missing (dangling) degrades to a visible red
+    "[ref: ...]" marker plus a ``dangling_ref`` manifest warning -- it never
+    aborts the render."""
     if not ref_id or ref_id not in ref_targets:
         r = p.add_run("[ref: %s]" % (ref_id or "?"))
         run_fmt(r, color="FF0000")
@@ -1163,13 +1170,141 @@ def _collect_ref_targets(outline):
     return targets
 
 
-def _build_outline(doc, cfg, outline, names, on_progress=None):
+# ===========================================================================
+# Section-only rendering (proof / live preview of ONE section)
+# ===========================================================================
+# A proof render emits a single outline node (its heading, its blocks and its
+# descendants) with no cover and no table of contents. Everything a reader sees
+# must nevertheless carry the numbers the block has in the COMPLETE document,
+# because:
+#
+#   * caption numbers are fields -- STYLEREF 1 \s (chapter) + SEQ Figure|Table
+#     \* ARABIC \s 1 (counter, reset at each Heading 1) -- and Word does NOT
+#     refresh fields when it exports to PDF, so the page image shows each field's
+#     cached placeholder text;
+#   * cross-references are REF fields whose placeholder is likewise cached;
+#   * heading numbers are NOT fields but list autonumbering, which Word DOES
+#     compute live, so they need the numbering itself to start at the right value.
+#
+# Hence the three-part answer implemented below:
+#   1. _build_outline walks the WHOLE outline to advance the chapter / figure /
+#      table counters and only *emits* the selected subtree, so every placeholder
+#      is the number the block has in the full document;
+#   2. ref_targets is collected from the WHOLE outline, so a reference pointing
+#      outside the emitted section still resolves instead of degrading to a red
+#      "[ref: ...]" dangling marker;
+#   3. the ancestor headings are synthesised as HIDDEN paragraphs and the heading
+#      autonumber gets startOverride values for the ancestor path, so a Heading 1
+#      exists for STYLEREF to resolve against and the emitted headings number as
+#      "4", "4.2", "4.2.1" rather than restarting at "1".
+
+
+def _locate_section(outline, node_id):
+    """Find ``node_id`` in the outline; return the root-to-target chain or None.
+
+    The chain is a list of (node, sibling_index_1based) from the top-level
+    section down to the target itself, so chain[-1][0] is the target node and
+    [i for _n, i in chain] is its heading number path (e.g. [4, 2] for "4.2")."""
+    if not node_id:
+        return None
+
+    def walk(nodes, prefix):
+        for idx, node in enumerate(nodes or [], start=1):
+            chain = prefix + [(node, idx)]
+            if node.get("id") == node_id:
+                return chain
+            found = walk(node.get("children", []), chain)
+            if found:
+                return found
+        return None
+
+    return walk(outline or [], [])
+
+
+def _apply_heading_start_overrides(doc, num_id, number_path):
+    """Make the heading autonumber start at ``number_path`` instead of 1.1.1...
+
+    The heading styles all reference one <w:num> instance; adding a
+    <w:lvlOverride><w:startOverride/></w:lvlOverride> per level restarts that
+    level at the given value the first time it is used. For a section-only render
+    of node "4.2" the path is [4, 2], so the (hidden) chapter heading numbers as
+    "4" and the emitted target heading as "4.2"; deeper levels keep their natural
+    start of 1. A no-op when the numbering definition cannot be found."""
+    numbering = doc.part.numbering_part.element
+    target = None
+    for num in numbering.findall(qn("w:num")):
+        if num.get(qn("w:numId")) == str(num_id):
+            target = num
+            break
+    if target is None:
+        return
+    for ilvl, start in enumerate(number_path or []):
+        try:
+            start = int(start)
+        except (TypeError, ValueError):
+            continue
+        if start < 1:
+            continue
+        ov = OxmlElement("w:lvlOverride")
+        ov.set(qn("w:ilvl"), str(ilvl))
+        so = OxmlElement("w:startOverride")
+        so.set(qn("w:val"), str(start))
+        ov.append(so)
+        target.append(ov)
+
+
+def _render_hidden_heading(doc, text, level):
+    """Emit a Heading ``level`` paragraph marked as hidden text.
+
+    Used only by section-only renders, for the ancestors of the selected node.
+    Hidden text is excluded from layout and from printing (and therefore from the
+    PDF / page images) by default, yet it still participates in list autonumbering
+    and is still found by a STYLEREF field -- which is exactly what is needed so a
+    proof of "4.2" reports chapter 4. The Heading 1 chapter rule (bottom border)
+    and its large space-after are cleared so nothing of it can show through."""
+    p = doc.add_paragraph(style="Heading %d" % max(1, min(level, 9)))
+    r = p.add_run(text or "")
+    rpr = r._r.get_or_add_rPr()
+    rpr.append(OxmlElement("w:vanish"))
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.page_break_before = False
+    pPr = p._p.get_or_add_pPr()
+    for old in pPr.findall(qn("w:pBdr")):
+        pPr.remove(old)
+    bdr = OxmlElement("w:pBdr")
+    none_bottom = OxmlElement("w:bottom")
+    none_bottom.set(qn("w:val"), "none")
+    none_bottom.set(qn("w:sz"), "0")
+    none_bottom.set(qn("w:space"), "0")
+    none_bottom.set(qn("w:color"), "auto")
+    bdr.append(none_bottom)
+    pPr.append(bdr)
+    # the paragraph mark itself must be hidden too, or Word keeps an empty line.
+    # <w:rPr> is the last child of <w:pPr> in the schema, so append it after every
+    # other paragraph-format change above.
+    mark_rpr = OxmlElement("w:rPr")
+    mark_rpr.append(OxmlElement("w:vanish"))
+    pPr.append(mark_rpr)
+    return p
+
+
+def _build_outline(doc, cfg, outline, names, on_progress=None, section_only=None):
     """Render the outline; returns {"warnings": [...], "stats": {...}}.
 
     Each block renders inside try/except so one malformed block degrades to a
     visible red error line and a manifest entry instead of aborting the whole
     export. Caption / figure counters are incremented BEFORE the block body so a
-    failure mid-render leaves the numbering of later blocks unchanged."""
+    failure mid-render leaves the numbering of later blocks unchanged.
+
+    ``section_only`` (an outline node id) restricts what is EMITTED to that node
+    and its descendants. The walk still visits the whole outline so the chapter /
+    figure / table counters -- and therefore every caption and cross-reference
+    placeholder -- carry the numbers the block has in the complete document; only
+    the rendering (and the warnings, the block count and the progress callback) is
+    limited to the selected subtree. See the section-only notes above for why that
+    matters and how the heading numbering is anchored. Raises ValueError when the
+    id is not in the outline."""
     body_name = names["body_name"]
     list_ctx = ListCtx(doc, names["list_ids"]) if names.get("list_ids") else None
     fixed_bodies = cfg.get("fixed_bodies", {})
@@ -1178,7 +1313,24 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
 
     # Cross-reference targets (block id -> "<chap>-<seq>" placeholder) gathered in
     # a pre-pass so a paragraph may reference a figure/table that appears later.
+    # ALWAYS over the whole outline, even for a section-only render: a reference
+    # that points at a figure in another section must still resolve.
     ref_targets = _collect_ref_targets(outline)
+
+    # Section-only: locate the target, anchor the heading autonumber to its number
+    # path and synthesise its (hidden) ancestor headings so the STYLEREF chapter
+    # field finds a Heading 1 carrying the right chapter number.
+    chain = None
+    if section_only:
+        chain = _locate_section(outline, section_only)
+        if chain is None:
+            raise ValueError("section_only: outline node id not found: %r"
+                             % (section_only,))
+        an = cfg.get("styles", {}).get("headings", {}).get("autonumber", {})
+        _apply_heading_start_overrides(doc, an.get("num_id", 88),
+                                       [idx for _nd, idx in chain])
+        for lvl, (ancestor, _idx) in enumerate(chain[:-1], start=1):
+            _render_hidden_heading(doc, ancestor.get("title", ""), lvl)
 
     # chapter-sequence counters: keyed by chapter number
     state = {"chap": 0, "img_seq": {}, "tbl_seq": {},
@@ -1196,7 +1348,7 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
             n += 1 + (1 if nd.get("fixed_body") else len(nd.get("blocks") or []))
             n += _steps(nd.get("children"))
         return n
-    total_steps = _steps(outline) or 1
+    total_steps = _steps([chain[-1][0]] if chain else outline) or 1
 
     def report(node):
         state["done"] += 1
@@ -1206,42 +1358,51 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
             except Exception:
                 pass
 
-    def walk(node, depth):
+    def walk(node, depth, emit=True):
         level = depth + 1
         if level == 1:
             state["chap"] += 1
             state["img_seq"][state["chap"]] = 0
             state["tbl_seq"][state["chap"]] = 0
         chap = state["chap"]
-        head_p = doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
-        # Each new top-level chapter starts on a fresh page. Use the paragraph's
-        # "page break before" property (not an explicit break run) so Word/PDF add
-        # no blank page when the heading already sits at a page top, and so it is
-        # honored natively by the PDF conversion. Chapter 1 is skipped: the TOC
-        # already ends with a page break, so it starts fresh without one.
-        if level == 1 and chap > 1 and cfg.get("chapter_page_break", True):
-            head_p.paragraph_format.page_break_before = True
-        if list_ctx:
-            list_ctx.new_section()   # numbered lists restart per section
-        report(node)                  # heading rendered
+        # Section-only: everything before the target is walked for its counters
+        # only; emitting switches on at the target and stays on for its subtree.
+        emit = emit or (section_only is not None and node.get("id") == section_only)
+        if emit:
+            head_p = doc.add_paragraph(node["title"], style=f"Heading {min(level, 9)}")
+            # Each new top-level chapter starts on a fresh page. Use the paragraph's
+            # "page break before" property (not an explicit break run) so Word/PDF add
+            # no blank page when the heading already sits at a page top, and so it is
+            # honored natively by the PDF conversion. Chapter 1 is skipped: the TOC
+            # already ends with a page break, so it starts fresh without one. A
+            # section-only render is a fragment with no cover or TOC, so it never
+            # opens with a page break either.
+            if (level == 1 and chap > 1 and cfg.get("chapter_page_break", True)
+                    and section_only is None):
+                head_p.paragraph_format.page_break_before = True
+            if list_ctx:
+                list_ctx.new_section()   # numbered lists restart per section
+            report(node)                  # heading rendered
 
         # fixed body wins over blocks
         fb_key = node.get("fixed_body")
         if fb_key and fb_key in fixed_bodies:
-            try:
-                _render_fixed_body(doc, fixed_bodies[fb_key], names, list_ctx)
-            except Exception as ex:
-                _render_block_error(doc, ex)
-                warn({"type": "block_error",
-                      "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
-                      "location": "chapter %d / fixed_body %s" % (chap, fb_key)})
-            report(node)
+            if emit:
+                try:
+                    _render_fixed_body(doc, fixed_bodies[fb_key], names, list_ctx)
+                except Exception as ex:
+                    _render_block_error(doc, ex)
+                    warn({"type": "block_error",
+                          "detail": "%s: %s" % (type(ex).__name__, str(ex)[:120]),
+                          "location": "chapter %d / fixed_body %s" % (chap, fb_key)})
+                report(node)
         else:
             for idx, block in enumerate(node.get("blocks", [])):
                 btype = block.get("type")
-                state["total_blocks"] += 1
                 # Counters increment BEFORE the body so a failure does not skew
-                # the numbering of subsequent figures/tables.
+                # the numbering of subsequent figures/tables. They also advance for
+                # blocks a section-only render skips, which is the whole point: the
+                # emitted section keeps its document-wide figure/table numbers.
                 if btype in ("image", "imagegrid"):
                     state["img_seq"][chap] += 1
                 seq = state["img_seq"][chap]
@@ -1249,6 +1410,9 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
                 if btype in ("datatable", "table") and cap:
                     state["tbl_seq"][chap] += 1
                 tbl_seq = state["tbl_seq"][chap]
+                if not emit:
+                    continue
+                state["total_blocks"] += 1
                 try:
                     if btype == "para":
                         _render_para(doc, block, names,
@@ -1298,10 +1462,10 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
                 report(node)          # one block rendered
 
         for child in node.get("children", []):
-            walk(child, depth + 1)
+            walk(child, depth + 1, emit)
 
     for node in outline:
-        walk(node, 0)
+        walk(node, 0, section_only is None)
 
     warnings = state["warnings"]
     stats = {
@@ -1318,11 +1482,23 @@ def _build_outline(doc, cfg, outline, names, on_progress=None):
 # ===========================================================================
 # Top-level render
 # ===========================================================================
-def render_report(project, cfg, project_dir, out_path, on_progress=None):
+def render_report(project, cfg, project_dir, out_path, on_progress=None,
+                  section_only=None):
     """Render the project to ``out_path`` and return a result manifest.
 
     ``on_progress`` (optional) is called ``on_progress(done, total, label)`` as the
     outline renders (once per heading + per block), for a live export progress bar.
+
+    ``section_only`` (optional, an outline node id) renders ONE section as a proof
+    fragment: no cover, no table of contents, only that node's heading, blocks and
+    descendants. The numbering pass and the cross-reference table still run over
+    the WHOLE outline, so every caption and every REF placeholder shows the number
+    the block has in the complete document (Word does not refresh fields when it
+    exports to PDF, so those cached placeholders are what a proof image shows).
+    The section's ancestor headings are emitted as hidden paragraphs and the
+    heading autonumber is anchored to the section's number path, so headings read
+    "4.2" rather than restarting at "1". Raises ValueError for an unknown node id.
+    ``section_only=None`` renders the full document exactly as before.
 
     RETURN SHAPE (CONTRACT, steps 2-4 depend on it):
         {
@@ -1363,10 +1539,18 @@ def render_report(project, cfg, project_dir, out_path, on_progress=None):
 
     _build_header(doc, styles, meta, cfg["_logo_path"])
     _build_footer(doc, styles)
-    _build_cover(doc, cfg, meta)
-    _build_toc(doc, cfg)
+    if section_only is None:
+        _build_cover(doc, cfg, meta)
+        _build_toc(doc, cfg)
+    else:
+        # A full render puts the cover on page 1, so the first page deliberately
+        # carries no header/footer. A one-section fragment has no cover: keeping
+        # that suppression would show a proof page with no header at all, which
+        # is exactly the layout detail a proof is meant to check.
+        doc.sections[0].different_first_page_header_footer = False
     outline_result = _build_outline(doc, cfg, project.get("outline", []), names,
-                                    on_progress=on_progress)
+                                    on_progress=on_progress,
+                                    section_only=section_only)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     doc.save(out_path)
@@ -1381,6 +1565,16 @@ def render_report(project, cfg, project_dir, out_path, on_progress=None):
     stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
     stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
     return {"out_path": out_path, "warnings": warnings, "stats": stats}
+
+
+def render_section_docx(project, cfg, project_dir, out_path, node_id):
+    """Render a single outline node to ``out_path`` -- the proof-render entry point.
+
+    A thin, explicitly named wrapper over ``render_report(..., section_only=...)``
+    for the live-preview path, which renders one section at a time and turns the
+    resulting .docx into page images. Same return manifest as render_report."""
+    return render_report(project, cfg, project_dir, out_path,
+                         section_only=node_id)
 
 
 def _result_out_path(result):
@@ -1431,6 +1625,8 @@ def main(argv=None):
     ap.add_argument("project_folder", help="folder containing project.json")
     ap.add_argument("--config", help="template config json (else env / auto-resolve)")
     ap.add_argument("--out", help="output directory (default <project_folder>/out)")
+    ap.add_argument("--section", help="render only this outline node id (proof mode: "
+                                      "no cover, no contents, full-document numbering)")
     args = ap.parse_args(argv)
 
     project_dir = os.path.abspath(args.project_folder)
@@ -1446,9 +1642,14 @@ def main(argv=None):
 
     name = os.path.basename(project_dir.rstrip(os.sep)) or "report"
     out_dir = os.path.abspath(args.out) if args.out else os.path.join(project_dir, "out")
-    out_path = os.path.join(out_dir, f"{name}.docx")
+    suffix = ("_section_%s" % args.section) if args.section else ""
+    out_path = os.path.join(out_dir, f"{name}{suffix}.docx")
 
-    result = render_report(project, cfg, project_dir, out_path)
+    if args.section:
+        result = render_section_docx(project, cfg, project_dir, out_path,
+                                     args.section)
+    else:
+        result = render_report(project, cfg, project_dir, out_path)
     out = _result_out_path(result) or out_path
     print("OK ->", out)
     if isinstance(result, dict):
