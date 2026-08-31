@@ -23,9 +23,11 @@
 //   * POST /api/image            storing a pasted or dropped picture
 //   Images are served by api.imgUrl() from the one file route the server has.
 //
-// What it hands to the editor (js/views/editor.js) rather than doing itself:
-//   * inserting into a block. The tray sets a drag payload and calls back;
-//     the editor decides where content lands, because it owns the outline.
+// What it hands to the block cards (js/views/blocks.js) rather than doing
+// itself:
+//   * inserting into a block. The tray sets a drag payload and publishes
+//     isAssetDrag() / readAssetDrag() to read it back; the card the drag lands
+//     on decides where the content goes, because it owns that block.
 //
 // No user-facing string is invented here: every one comes from the frozen
 // string list.
@@ -42,10 +44,11 @@ import {
  * cross-view contract
  * ------------------------------------------------------------------ */
 
-// Payload type set on a card drag. The editor reads it with readAssetDrag()
-// when something is dropped on a figure block or into prose. 'text/plain' is
-// set alongside it -- carrying 'images/<name>' -- so a drop into a plain text
-// field degrades to the file name rather than to nothing.
+// Payload type set on a card drag. The block cards read it with isAssetDrag()
+// and readAssetDrag() when something is dropped on a figure block or into
+// prose. 'text/plain' is set alongside it -- carrying 'images/<name>' -- so a
+// drop into a plain text field outside the editor degrades to the file name
+// rather than to nothing.
 export const ASSET_DRAG_MIME = 'application/x-rw-asset';
 
 // Fired on window after a picture is stored, so a view that is not holding the
@@ -62,6 +65,26 @@ export function notifyAssetsChanged() {
   } catch (err) {
     /* a browser without CustomEvent simply keeps the list it has */
   }
+}
+
+// True when this drag is carrying a tray card.
+//
+// It reads dataTransfer.types and NOT getData(), because a browser hides the
+// payload of a drag in flight -- during dragenter and dragover only the type
+// list is readable, and getData() answers '' until the drop. A target has to
+// decide whether it accepts the drag before the drop, so the type list is the
+// only thing there is to decide on.
+//
+// It is also the gate a drop target should use before calling readAssetDrag():
+// that function falls back to text/plain, which a tray card sets alongside the
+// payload, and text/plain is also what a drag of arbitrary selected words
+// carries. Accepting one of those as a file path is how a figure block ends up
+// pointing at a file that was never there.
+export function isAssetDrag(ev) {
+  const dt = ev && (ev.dataTransfer || (ev.originalEvent && ev.originalEvent.dataTransfer));
+  const types = dt && dt.types;
+  if (!types) return false;
+  return Array.prototype.indexOf.call(types, ASSET_DRAG_MIME) !== -1;
 }
 
 // Read a card drag payload. Returns {file, name, w, h} or null.
@@ -503,7 +526,18 @@ export function AssetTray(props) {
 
   useEffect(() => {
     const onPaste = (ev) => {
-      if (!liveRef.current.dir) return;
+      // Exactly as the drop listener below: a card that handled the paste
+      // itself has already called preventDefault, and the tray only picks up
+      // what nothing else claimed. Without this the two of them BOTH stored the
+      // picture on one keystroke -- the figure card posted it to /api/image and
+      // the tray posted it again -- so images/ gained two files from one
+      // Ctrl+V, onFill could point the block at the second one, and the extra
+      // file then sat in the tray as an unused asset to be hunted down.
+      //
+      // The test is what the event says, not what the target looks like: a
+      // handler that decided this paste is its own says so by preventing the
+      // default, whatever kind of element it happens to hang on.
+      if (ev.defaultPrevented || !liveRef.current.dir) return;
       const files = imageFilesFrom(ev.clipboardData);
       if (!files.length) return;         // plain text paste is none of our business
       ev.preventDefault();

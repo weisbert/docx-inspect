@@ -1427,6 +1427,145 @@ def build_report_tree(root):
 
 
 # ---------------------------------------------------------------------------
+# Helpers: the trash.
+#
+# A delete never unlinks anything: the folder is MOVED to <root>/_trash/ under a
+# timestamped name. That has always been true, but nothing could read it back,
+# so a delete was a one-way door behind a confirmation promising it was not.
+#
+# Putting a folder back needs one fact the timestamped name does not carry: the
+# path it came FROM. A report at PROJ/MOD/STAGE trashed as "STAGE-20260830-..."
+# is otherwise indistinguishable from a flat report of the same name, and
+# guessing wrong files it somewhere it never lived. So the delete writes a
+# sidecar next to the folder -- "<entry>.trashinfo.json", {from, deleted} --
+# and the restore reads it. The sidecar sits BESIDE the folder rather than
+# inside it, so what was trashed comes back byte for byte.
+#
+# Entries trashed before the sidecar existed are still listed and still
+# restorable: their origin is derived from the entry name with its timestamp
+# suffix removed, which lands them at the reports root, and the listing says so
+# rather than pretending to know more than it does.
+# ---------------------------------------------------------------------------
+
+TRASH_DIRNAME = "_trash"
+TRASH_INFO_SUFFIX = ".trashinfo.json"
+_TRASH_STAMP_RE = re.compile(r"-\d{8}-\d{6}(?:-\d+)?$")
+
+
+def _trash_root(root):
+    return os.path.join(root, TRASH_DIRNAME)
+
+
+def _trash_entry_id(name):
+    """Validate one trash entry id -- a single folder name under _trash.
+
+    Rejected before any path is built: separators (either platform's), the two
+    relative names, a Windows drive prefix, and the empty string. Containment is
+    still enforced afterwards by resolve_project_dir; this is the cheap guard
+    that keeps a crafted id from ever reaching it.
+    """
+    seg = str(name or "").strip()
+    if not seg or seg in (".", "..") or seg != os.path.basename(seg):
+        raise ValueError("invalid trash entry")
+    if "/" in seg or "\\" in seg or ":" in seg:
+        raise ValueError("invalid trash entry")
+    return seg
+
+
+def _origin_from_name(entry_id):
+    """Where an entry with no sidecar came from: its name without the stamp."""
+    base = _TRASH_STAMP_RE.sub("", entry_id)
+    return base or entry_id
+
+
+def _safe_origin(origin):
+    """A restore target as a list of path segments, or ValueError.
+
+    The origin is read off disk, so it is treated as input: every segment must
+    be an ordinary folder name. That keeps a restore from writing into the
+    bookkeeping folders (_trash, _backups, ...) even if the sidecar is edited by
+    hand, and resolve_project_dir then enforces the reports root itself.
+    """
+    parts = [p for p in str(origin or "").replace("\\", "/").split("/") if p]
+    if not parts:
+        raise ValueError("the trash entry does not name where it came from")
+    for p in parts:
+        if p in (".", "..") or p.startswith("_") or p in _RESERVED_ROOT_DIRS:
+            raise ValueError("invalid restore path: %r" % origin)
+        if ":" in p:
+            raise ValueError("invalid restore path: %r" % origin)
+    return parts
+
+
+def _count_reports_under(path, depth=3):
+    """How many reports a trashed folder holds (itself included)."""
+    if _has_project(path):
+        return 1
+    if depth <= 0:
+        return 0
+    total = 0
+    for name in _listdir_quiet(path):
+        child = os.path.join(path, name)
+        if os.path.isdir(child) and not name.startswith("_"):
+            total += _count_reports_under(child, depth - 1)
+    return total
+
+
+def _trash_entry(root, entry_id):
+    """One row of the trash listing, or None when the entry is not a folder."""
+    folder = os.path.join(_trash_root(root), entry_id)
+    if not os.path.isdir(folder):
+        return None
+    info = _read_json_quiet(folder + TRASH_INFO_SUFFIX)
+    info = info if isinstance(info, dict) else {}
+    origin = str(info.get("from") or "").strip()
+    remembered = bool(origin)
+    if not origin:
+        origin = _origin_from_name(entry_id)
+    try:
+        deleted = float(info.get("deleted") or os.path.getmtime(folder))
+    except (OSError, TypeError, ValueError):
+        deleted = 0.0
+    project = _read_json_quiet(os.path.join(folder, "project.json")) or {}
+    title = str((project.get("meta") or {}).get("title") or "")
+    if not title:
+        title, _desc = _dir_meta(folder)
+    occupied = False
+    try:
+        occupied = os.path.exists(resolve_project_dir(origin))
+    except ValueError:
+        occupied = True          # unrestorable path: not a free target either
+    return {
+        "id": entry_id,
+        "name": title or origin.split("/")[-1] or entry_id,
+        "dir": origin,
+        "knownOrigin": remembered,
+        "deleted": deleted,
+        "reports": _count_reports_under(folder),
+        "occupied": occupied,
+    }
+
+
+def list_trash(root):
+    """Every restorable entry in the trash, newest deletion first."""
+    if not root:
+        return []
+    trash = _trash_root(root)
+    if not os.path.isdir(trash):
+        return []
+    rows = []
+    for name in _listdir_quiet(trash):
+        try:
+            entry = _trash_entry(root, _trash_entry_id(name))
+        except ValueError:
+            entry = None         # a name this server would never have written
+        if entry:
+            rows.append(entry)
+    rows.sort(key=lambda r: r["deleted"], reverse=True)
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Helpers: v2 endpoints whose implementation module is not written yet.
 #
 # Every v2 endpoint below is wired to a real module function with a fixed
@@ -1622,6 +1761,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_template_get(qs)
             if path == "/api/tree":
                 return self._api_tree()
+            if path == "/api/trash":
+                return self._api_trash()
             if path == "/api/assets":
                 return self._api_assets(qs)
             if path == "/api/version":
@@ -1692,6 +1833,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_autosave_restore()
             if path == "/api/project-delete":
                 return self._api_project_delete()
+            if path == "/api/trash-restore":
+                return self._api_trash_restore()
             if path == "/api/project-rename":
                 return self._api_project_rename()
             if path == "/api/project-copy":
@@ -2547,20 +2690,95 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_project_delete(self):
         """Move a project to reports_root/_trash/<name>-<ts>/ (recoverable, never
-        a hard delete). Body: {dir}."""
+        a hard delete). Body: {dir}.
+
+        The move also writes "<entry>.trashinfo.json" beside the folder, holding
+        the path it came from and when it went. That is the one fact the entry
+        name cannot carry and the one fact a restore needs -- see the trash
+        helpers above. The answer keeps every key it has always had and adds the
+        entry's id, so a caller can name what it just trashed.
+        """
         if not CFG.reports_root:
             return self._send_error_json("no reports root configured", status=400)
         payload = self._read_json()
         project_dir = resolve_project_dir(payload.get("dir"))
         if not os.path.isdir(project_dir):
             return self._send_error_json("no such project", status=404)
+        origin = self._rel_dir(project_dir)
         name = os.path.basename(project_dir.rstrip(os.sep)) or "project"
-        trash = os.path.join(CFG.reports_root, "_trash")
+        trash = _trash_root(CFG.reports_root)
         os.makedirs(trash, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest = os.path.join(trash, "%s-%s" % (name, ts))
+        # Two deletes in the same second must not collide: shutil.move onto an
+        # existing directory moves the folder INSIDE it, which would bury one
+        # entry in another and lose its sidecar.
+        entry_id = "%s-%s" % (name, ts)
+        n = 1
+        while os.path.exists(os.path.join(trash, entry_id)):
+            entry_id = "%s-%s-%d" % (name, ts, n)
+            n += 1
+        dest = os.path.join(trash, entry_id)
         shutil.move(project_dir, dest)
-        return self._send_json({"ok": True, "trashed_to": dest.replace("\\", "/")})
+        try:
+            atomic_write(dest + TRASH_INFO_SUFFIX, json.dumps(
+                {"from": origin, "deleted": time.time()},
+                ensure_ascii=False, indent=2).encode("utf-8"))
+        except OSError:
+            pass   # the entry is still listed and still restorable, by its name
+        return self._send_json({"ok": True, "id": entry_id, "from": origin,
+                                "trashed_to": dest.replace("\\", "/")})
+
+    def _api_trash(self):
+        """Everything in the trash, newest deletion first: {"items":[...]}.
+
+        Each item carries the id the restore takes, the name to show, the path
+        it came from, whether that path was recorded or guessed, when it went,
+        how many reports it holds, and whether anything occupies that path as
+        this listing is read -- which is the state a restore would refuse on,
+        read once here rather than guessed at by the caller.
+        """
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        return self._send_json({"items": list_trash(CFG.reports_root)})
+
+    def _api_trash_restore(self):
+        """Move one trash entry back where it came from. Body: {id}.
+
+        Refuses rather than overwrites: if anything at all occupies the original
+        path the answer is 409 with code "occupied" and NOTHING is moved. The
+        destination is resolved through resolve_project_dir, so a restore can
+        never write outside the reports root, and every segment of the recorded
+        origin is checked first -- the sidecar is a file on disk and is treated
+        as input, not as this server's own word.
+        """
+        if not CFG.reports_root:
+            return self._send_error_json("no reports root configured", status=400)
+        payload = self._read_json()
+        entry_id = _trash_entry_id(payload.get("id"))
+        src = resolve_project_dir(os.path.join(TRASH_DIRNAME, entry_id))
+        if not os.path.isdir(src):
+            return self._send_error_json("no such trash entry", status=404)
+
+        info = _read_json_quiet(src + TRASH_INFO_SUFFIX)
+        info = info if isinstance(info, dict) else {}
+        origin = str(info.get("from") or "").strip() or _origin_from_name(entry_id)
+        parts = _safe_origin(origin)
+        dest = resolve_project_dir("/".join(parts))
+        if os.path.exists(dest):
+            return self._send_json(
+                {"error": "something already occupies %s" % "/".join(parts),
+                 "code": "occupied", "dir": "/".join(parts)}, status=409)
+
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.move(src, dest)
+        try:
+            os.remove(src + TRASH_INFO_SUFFIX)
+        except OSError:
+            pass   # a leftover sidecar names a folder that is no longer there
+        return self._send_json({"ok": True, "id": entry_id,
+                                "dir": self._rel_dir(dest)})
 
     def _api_project_rename(self):
         """Rename a project or module FOLDER, or a report's TITLE.

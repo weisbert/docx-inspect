@@ -4,6 +4,15 @@
  * One job: find a report and open it. Creating, renaming, duplicating,
  * deleting and importing are secondary and all live in dialogs launched here.
  *
+ * Three things bring a report into existence and all three are on the top bar,
+ * at the same level, because they are the same kind of act: `New report`,
+ * `Import Word report`, and `Apply an external update`. The third one is here
+ * rather than inside a report because a package is addressed to the reports
+ * ROOT -- /api/apply-update writes every member it names, so one package can
+ * create reports that do not exist yet, and those belong to nothing already on
+ * the shelf. The dialog it opens is sync.js's ImportDialog, mounted here; the
+ * editor's exchange pill keeps the outbound half, which really is per-report.
+ *
  * Shape (widths are fixed; this is a desktop window, there are no breakpoints):
  *
  *   52px top bar
@@ -28,6 +37,7 @@
 import { store, useStore } from '../store.js';
 import * as api from '../api.js';
 import { relativeTime, classNames } from '../util.js';
+import { ImportDialog } from './sync.js';
 import {
   Button, IconButton, Field, Chips, Dialog, Menu, EmptyState, Pill, Toast,
   html, Fragment, useState, useEffect, useMemo, useRef, useCallback,
@@ -54,6 +64,9 @@ const T = {
   designSystem: 'Design system',
   newReport: 'New report',
   importWord: 'Import Word report',
+  // The ONE name receiving a package has. The same words are the shelf button
+  // and the dialog's own title, so the product never calls it two things.
+  applyUpdate: 'Apply an external update',
   settings: 'Settings',
 
   colReport: 'Report',
@@ -71,6 +84,17 @@ const T = {
   remove: 'Delete',
   exportIt: 'Export',
   nothingHere: 'Nothing here yet — create a report or import a Word file',
+  restore: 'Restore',
+  deletedWhen: (when) => 'Deleted ' + when,
+  restored: (name) => 'Restored ' + name,
+  notRestored: (dir) => 'Not restored — something is already at ' + dir,
+  notRestoredBody:
+    'Nothing was moved. A report now occupies the path this one was deleted from, so ' +
+    'putting it back would overwrite it. Rename or move what is there, then restore ' +
+    'this again.',
+  originUnknown: (name) =>
+    'The original path was not recorded — this goes back to the top level as ' + name,
+  nothingInTrash: 'Nothing here yet',
   overSpec: (n) => n + ' over spec',
   noSpecProblems: 'No spec problems',
   neverExchanged: 'Never exchanged',
@@ -113,7 +137,12 @@ const T = {
   deleteReport: 'Delete report',
   deleteModule: 'Delete module',
   deleteProject: 'Delete project',
-  movesToTrash: (name) => 'This moves ' + name + ' to the trash. You can restore it from History.',
+  // The confirmation names WHERE the restore is, and there is exactly one
+  // such place: the shelf's own Trash. It used to say History, which is a
+  // per-report drawer reached from inside a report -- the one door a
+  // deleted report no longer opens.
+  movesToTrash: (name) =>
+    'This moves ' + name + ' to the trash. You can restore it from Trash.',
   moduleHolds: (n) => 'This module holds ' + n + ' reports. All of them go to the trash together.',
   typeToConfirm: (name) => 'Type ' + name + ' to confirm',
   moveToTrash: 'Move to trash',
@@ -315,6 +344,102 @@ function isDocx(file) {
   return !!file && /\.docx$/i.test(file.name || '');
 }
 
+function isZip(file) {
+  return !!file && /\.zip$/i.test(file.name || '');
+}
+
+// Whether a drag is carrying a FILE. The shelf claims those and leaves every
+// other drag alone -- text dragged into the search box still lands there.
+function dragHasFile(ev) {
+  const types = ev && ev.dataTransfer ? ev.dataTransfer.types : null;
+  return !!types && Array.prototype.indexOf.call(types, 'Files') >= 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * An update package, read on the shelf
+ *
+ * What the dialog is handed is built here; the dialog itself is sync.js's, and
+ * there is only one of it. A package read HERE is always a root-level bundle:
+ * the shelf has no report to merge a returned document into, and the archive
+ * may name reports that do not exist yet. sync.js's own reader answers the
+ * other question -- "is there a returned document for THIS report inside" --
+ * which is the editor's path and stays there.
+ *
+ * Nothing is decompressed to draw the manifest: the central directory alone
+ * carries every member's name and size. update.json is the one entry inflated,
+ * because a package's declared ancestor and its note live in it, and a dialog
+ * that said "this package does not name the state it was cut from" without
+ * looking would be stating something it had not checked.
+ * ------------------------------------------------------------------ */
+
+function zipDirectory(buffer) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const decoder = new TextDecoder('utf-8');
+  let eocd = -1;
+  const floor = Math.max(0, bytes.length - 66000);
+  for (let i = bytes.length - 22; i >= floor; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('not a zip archive');
+  const count = view.getUint16(eocd + 10, true);
+  let p = view.getUint32(eocd + 16, true);
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > bytes.length || view.getUint32(p, true) !== 0x02014b50) break;
+    const nameLen = view.getUint16(p + 28, true);
+    const entry = {
+      method: view.getUint16(p + 10, true),
+      csize: view.getUint32(p + 20, true),
+      size: view.getUint32(p + 24, true),
+      offset: view.getUint32(p + 42, true),
+      name: decoder.decode(bytes.subarray(p + 46, p + 46 + nameLen)),
+    };
+    if (!entry.name.endsWith('/')) entries.push(entry);
+    p += 46 + nameLen + view.getUint16(p + 30, true) + view.getUint16(p + 32, true);
+  }
+  return { bytes: bytes, view: view, entries: entries };
+}
+
+async function zipEntryText(zip, entry) {
+  const at = entry.offset;
+  if (zip.view.getUint32(at, true) !== 0x04034b50) throw new Error('damaged zip entry');
+  const start = at + 30 + zip.view.getUint16(at + 26, true) + zip.view.getUint16(at + 28, true);
+  const raw = zip.bytes.subarray(start, start + entry.csize);
+  if (entry.method === 0) return new TextDecoder('utf-8').decode(raw);
+  if (entry.method === 8 && typeof DecompressionStream === 'function') {
+    const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return await new Response(stream).text();
+  }
+  throw new Error('unsupported zip compression');
+}
+
+// -> the descriptor ImportDialog takes: the package's facts, every member it
+// carries, the state it says it was cut from, and its note.
+async function readRootPackage(file) {
+  const buffer = await file.arrayBuffer();
+  const zip = zipDirectory(buffer);
+  let manifest = null;
+  const declared = zip.entries.filter((e) => e.name === 'update.json')[0];
+  if (declared) {
+    try {
+      manifest = JSON.parse(await zipEntryText(zip, declared));
+    } catch (err) {
+      manifest = null;         // an unreadable manifest is not a read one
+    }
+  }
+  return {
+    kind: 'bundle',
+    name: baseName(file.name),
+    size: buffer.byteLength,
+    created: file.lastModified ? file.lastModified / 1000 : Date.now() / 1000,
+    entries: zip.entries,
+    zipB64: await fileToBase64(file),
+    note: String((manifest && manifest.note) || ''),
+    declaredBase: (manifest && manifest.base_sha) ? String(manifest.base_sha) : null,
+  };
+}
+
 function baseName(path) {
   const parts = String(path || '').replace(/\\/g, '/').split('/');
   return parts[parts.length - 1] || String(path || '');
@@ -352,7 +477,10 @@ export function Home() {
   const [menu, setMenu] = useState(null);
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pkg, setPkg] = useState(null);
+  const [trash, setTrash] = useState([]);
   const listRef = useRef(null);
+  const packageInputRef = useRef(null);
 
   useEffect(() => {
     let live = true;
@@ -366,6 +494,25 @@ export function Home() {
       live = false;
     };
   }, []);
+
+  // What is in the trash is read here rather than inside the dialog, because
+  // the rail carries its count whether the dialog is open or not, and a delete
+  // has to change that count on the spot.
+  const refreshTrash = useCallback(async () => {
+    try {
+      const payload = await api.request('GET', '/api/trash');
+      const items = (payload && payload.items) || [];
+      setTrash(items);
+      return items;
+    } catch (err) {
+      setTrash([]);
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshTrash();
+  }, [refreshTrash]);
 
   const refresh = useCallback(async () => {
     try {
@@ -507,6 +654,42 @@ export function Home() {
     if (file) startImport(file);
   };
 
+  /* ---- receiving an update package ---- */
+
+  // The package is read here only far enough to describe it; nothing is written
+  // until the dialog's own button is pressed, and the dialog says so.
+  const takePackage = async (file) => {
+    if (!isZip(file)) return;
+    setBusy(true);
+    try {
+      setPkg(await readRootPackage(file));
+    } catch (err) {
+      store.pushBanner({ level: 'error', code: 'apply-update', message: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // A real input in the document rather than the detached one the Word import
+  // uses, so the shelf's file picker is a thing the page owns and a test can
+  // drive.
+  const pickPackage = () => {
+    if (packageInputRef.current) packageInputRef.current.click();
+  };
+
+  // One answer to a dropped file, used by the empty state and by the whole
+  // shelf behind it, so where the pointer happens to be does not change what a
+  // drop means.
+  const takeDropped = (ev) => {
+    const files = ev && ev.dataTransfer ? ev.dataTransfer.files : null;
+    const file = files && files[0];
+    if (isZip(file)) {
+      takePackage(file);
+      return;
+    }
+    if (isDocx(file)) startImport(file);
+  };
+
   /* ---- the four operations ---- */
 
   const runCreate = async (form) => {
@@ -621,12 +804,29 @@ export function Home() {
   };
 
   // Every delete moves the folder to the trash -- the server never hard-deletes,
-  // which is why all three confirmations can promise it is recoverable.
+  // which is why all three confirmations can promise it is recoverable. The
+  // trash is re-read straight away: the promise the confirmation just made is
+  // only true if the entry is on the shelf's Trash list a moment later.
   const runDelete = async (target) => {
     await api.projectDelete(target.dir);
     await refresh();
+    await refreshTrash();
     setSel({ kind: 'all' });
     showToast(T.movedToTrash(target.label));
+  };
+
+  // The other half of that promise. The server refuses rather than overwrites
+  // when something occupies the original path, so the failure is thrown on to
+  // the dialog, which keeps the entry listed and says what did not happen.
+  const runRestore = async (entry) => {
+    const result = await api.request('POST', '/api/trash-restore', {
+      body: { id: entry.id },
+    });
+    await refresh();
+    await refreshTrash();
+    setSel({ kind: 'all' });
+    showToast(T.restored(entry.name));
+    return result;
   };
 
   const runExport = async (report) => {
@@ -820,7 +1020,20 @@ export function Home() {
     stages.map((s) => ({ value: s, label: s })));
 
   return html`
-    <div class="rw-app">
+    <div
+      class="rw-app"
+      onDragOver=${(ev) => {
+        if (!dialog && !pkg && dragHasFile(ev)) ev.preventDefault();
+      }}
+      onDrop=${(ev) => {
+        // The empty state is its own drop target and answers first, preventing
+        // the default before the event reaches here -- so one dropped file is
+        // never read twice. A dialog on screen owns the pointer entirely.
+        if (ev.defaultPrevented || dialog || pkg) return;
+        ev.preventDefault();
+        takeDropped(ev);
+      }}
+    >
       <div class="rw-topbar">
         <span class="rw-topbar__mark" aria-hidden="true">R</span>
         <span class="rw-topbar__name">${T.appName}</span>
@@ -831,6 +1044,7 @@ export function Home() {
           ${updateReady
             ? html`<${Pill} tone="accent">${T.update(version.fixes == null ? 0 : version.fixes)}<//>`
             : null}
+          <${Button} onClick=${pickPackage} disabled=${busy}>${T.applyUpdate}<//>
           <${Button} onClick=${pickAndImport} disabled=${busy}>${T.importWord}<//>
           <${Button} level="primary" onClick=${() => openCreate({})}>${T.newReport}<//>
         </div>
@@ -846,9 +1060,14 @@ export function Home() {
           expanded=${expanded}
           onToggle=${toggle}
           templates=${templates}
+          trash=${trash}
           onNew=${() => openCreate({ what: all.length ? 'module' : 'project' })}
           onProjectMenu=${openProjectMenu}
           onModuleMenu=${openModuleMenu}
+          onTrash=${() => {
+            refreshTrash();
+            setDialog({ kind: 'trash' });
+          }}
           onStub=${(label) => setDialog({ kind: 'stub', label: label })}
         />
 
@@ -863,6 +1082,7 @@ export function Home() {
               <div class="rw-btnrow">
                 <${Button} onClick=${() => openCreate({})}>${T.newReport}<//>
                 <${Button} onClick=${pickAndImport} disabled=${busy}>${T.importWord}<//>
+                <${Button} onClick=${pickPackage} disabled=${busy}>${T.applyUpdate}<//>
                 <${Button}
                   level="tertiary"
                   onClick=${() => setDialog({ kind: 'stub', label: T.settings })}
@@ -890,14 +1110,11 @@ export function Home() {
                 <div class="rw-rows__tail">
                   <${EmptyState}
                     title=${query || stage ? T.noResults : T.nothingHere}
-                    onDrop=${(ev) => {
-                      const files = ev.dataTransfer && ev.dataTransfer.files;
-                      const file = files && files[0];
-                      if (isDocx(file)) startImport(file);
-                    }}
+                    onDrop=${takeDropped}
                   >
                     <${Button} level="primary" onClick=${() => openCreate({})}>${T.newReport}<//>
                     <${Button} onClick=${pickAndImport}>${T.importWord}<//>
+                    <${Button} onClick=${pickPackage}>${T.applyUpdate}<//>
                   <//>
                 </div>`
               : html`
@@ -941,11 +1158,13 @@ export function Home() {
             dialog=${dialog}
             projects=${all}
             templates=${templates}
+            trash=${trash}
             onClose=${() => setDialog(null)}
             onCreate=${runCreate}
             onRename=${runRename}
             onDuplicate=${runDuplicate}
             onDelete=${runDelete}
+            onRestore=${runRestore}
           />`
         : null}
 
@@ -958,6 +1177,34 @@ export function Home() {
             onDismiss=${() => setToast(null)}
           />`
         : null}
+
+      <input
+        ref=${packageInputRef}
+        type="file"
+        class="rw-hidden"
+        accept=".zip"
+        onChange=${(ev) => {
+          const file = ev.target.files && ev.target.files[0];
+          ev.target.value = '';
+          takePackage(file);
+        }}
+      />
+
+      ${pkg
+        ? html`
+          <${ImportDialog}
+            dir=""
+            pkg=${pkg}
+            baseline=${{ none: false, sha: '' }}
+            onClose=${() => setPkg(null)}
+            onDone=${async () => {
+              setPkg(null);
+              // The package may have CREATED reports, so the shelf is re-read
+              // rather than patched: what changed is not knowable from here.
+              await refresh();
+            }}
+          />`
+        : null}
     </div>`;
 }
 
@@ -968,7 +1215,7 @@ export function Home() {
 function Rail(props) {
   const {
     projects, sel, onSelect, query, onQuery, expanded, onToggle,
-    templates, onNew, onProjectMenu, onModuleMenu, onStub,
+    templates, trash, onNew, onProjectMenu, onModuleMenu, onTrash, onStub,
   } = props;
 
   return html`
@@ -1040,7 +1287,8 @@ function Rail(props) {
         <div class="rw-tree">
           <${FootRow} label=${T.templates} count=${templates.length}
                       onClick=${() => onStub(T.templates)} />
-          <${FootRow} label=${T.trash} onClick=${() => onStub(T.trash)} />
+          <${FootRow} label=${T.trash} count=${(trash || []).length}
+                      onClick=${onTrash} />
           <${FootRow} label=${T.designSystem} glyph="›"
                       onClick=${() => onStub(T.designSystem)} />
         </div>
@@ -1268,6 +1516,7 @@ function Dialogs(props) {
   if (dialog.kind === 'rename') return html`<${RenameDialog} ...${props} />`;
   if (dialog.kind === 'duplicate') return html`<${DuplicateDialog} ...${props} />`;
   if (dialog.kind === 'delete') return html`<${DeleteDialog} ...${props} />`;
+  if (dialog.kind === 'trash') return html`<${TrashDialog} ...${props} />`;
   return html`<${StubDialog} ...${props} />`;
 }
 
@@ -1283,13 +1532,16 @@ function StubDialog({ dialog, onClose }) {
     <//>`;
 }
 
-function DialogError({ message }) {
+// One failure banner for every dialog here. `title` names the operation that did
+// not happen when there is a better word for it than "something went wrong" --
+// a refused restore is not a fault, it is an answer.
+function DialogError({ title, message }) {
   if (!message) return null;
   return html`
     <div class="rw-banner rw-banner--blocking rw-dialog__alert" role="alert">
       <span class="rw-banner__glyph" aria-hidden="true">✕</span>
       <div class="rw-banner__body">
-        <div class="rw-banner__title">${T.wentWrong}</div>
+        <div class="rw-banner__title">${title || T.wentWrong}</div>
         <div>${message}</div>
       </div>
     </div>`;
@@ -1644,6 +1896,73 @@ function DuplicateDialog({ dialog, onClose, onDuplicate }) {
                  if (ev.key === 'Enter') submit();
                }} />
       <//>
+    <//>`;
+}
+
+// The other end of every delete confirmation on this screen. Nothing here
+// hard-deletes and nothing here ever did -- the folders have been sitting in
+// the trash all along -- so the only thing this dialog adds is the door.
+//
+// One row per entry: what it was called, the path it came from, when it went,
+// and the button that puts it back. The path matters as much as the name: two
+// reports in different modules are both called `CDR`, and the row has to say
+// which one is about to come back.
+//
+// A refused restore is an ANSWER, not a fault. The server refuses rather than
+// overwrites when something already occupies the original path, and when it
+// does the entry stays listed, nothing on disk moves, and the banner says what
+// did not happen and what would make it possible.
+function TrashDialog({ trash, onClose, onRestore }) {
+  const [failure, setFailure] = useState(null);
+  const [working, setWorking] = useState('');
+  const items = trash || [];
+
+  const restore = async (entry) => {
+    if (working) return;
+    setFailure(null);
+    setWorking(entry.id);
+    try {
+      await onRestore(entry);
+    } catch (err) {
+      const payload = (err && err.payload) || null;
+      const occupied = payload && payload.code === 'occupied';
+      setFailure({
+        title: occupied ? T.notRestored(String(payload.dir || entry.dir)) : null,
+        message: occupied ? T.notRestoredBody : errorText(err),
+      });
+    } finally {
+      setWorking('');
+    }
+  };
+
+  return html`
+    <${Dialog}
+      title=${T.trash}
+      width=${640}
+      onClose=${onClose}
+      footer=${html`<${Button} onClick=${onClose}>${T.close}<//>`}
+    >
+      <${DialogError} title=${failure && failure.title}
+                      message=${failure && failure.message} />
+      ${items.length
+        ? html`
+          <div class="rw-timeline">
+            ${items.map((entry) => html`
+              <div class="rw-timeline__item" key=${entry.id}>
+                <div class="rw-timeline__body">
+                  <div class="rw-timeline__title">${entry.name}</div>
+                  <div class="rw-meta">
+                    ${entry.dir} · ${T.deletedWhen(relativeTime(entry.deleted))}
+                  </div>
+                  ${entry.knownOrigin === false
+                    ? html`<div class="rw-meta">${T.originUnknown(entry.dir)}</div>`
+                    : null}
+                </div>
+                <${Button} level="tertiary" disabled=${!!working}
+                           onClick=${() => restore(entry)}>${T.restore}<//>
+              </div>`)}
+          </div>`
+        : html`<${EmptyState} title=${T.nothingInTrash} />`}
     <//>`;
 }
 

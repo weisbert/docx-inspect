@@ -38,6 +38,13 @@ import { store, useStore } from '../store.js';
 import * as api from '../api.js';
 import { computeCaptionNumbers, groupBlocks } from '../util.js';
 import { Button, IconButton, Field, Banner, Dialog } from '../components/index.js';
+// The asset tray owns the drag payload its cards carry, so it owns reading it
+// back too: these two are its published readers, not a second copy of the
+// format. The tray promises "Drag onto a figure block or into the text to
+// insert" and the blocks the drag lands on are here, which is why this file is
+// the importer. Nothing flows the other way -- views/assets.js imports nothing
+// from here -- so there is no cycle.
+import { isAssetDrag, readAssetDrag, notifyAssetsChanged } from './assets.js';
 
 const preact = globalThis.preact;
 const preactHooks = globalThis.preactHooks;
@@ -602,6 +609,12 @@ async function storeImage(dir, section, file) {
   const result = await api.putImage(dir, section || '', name, base64);
   const stored = toImagesPath(result && result.file);
   if (!stored) throw new Error(String((result && result.file) || ''));
+  // A card is the ONE handler that stores a picture pasted or dropped onto it,
+  // so images/ has just grown behind the tray's back and only this file knows.
+  // The tray otherwise re-reads the pool when a save lands, which is a debounce
+  // away; telling it now is what keeps the file it did not write from being
+  // missing from the pool that is supposed to list every one.
+  notifyAssetsChanged();
   return stored;
 }
 
@@ -626,6 +639,18 @@ function imageFilesFrom(transfer) {
     }
   }
   return out;
+}
+
+// The 'images/<name>' a tray card is carrying, or '' when this drag is not one.
+//
+// The MIME is checked FIRST and the payload is only read after it is there:
+// readAssetDrag also accepts text/plain, which every tray card sets alongside
+// the payload but so does a drag of any selected words on the page, and a
+// figure block that accepted those would point at a file that never existed.
+function assetPathFrom(event) {
+  if (!isAssetDrag(event)) return '';
+  const payload = readAssetDrag(event);
+  return payload && payload.file ? toImagesPath(payload.file) : '';
 }
 
 /* ------------------------------------------------------------------ *
@@ -708,6 +733,18 @@ function CardHead(props) {
   } = props;
   const [menu, setMenu] = useState(null);
 
+  // THE HEAD IS THE CARD'S ONLY DRAG HANDLE. The wrapper js/views/editor.js
+  // draws around this card carries no draggable attribute, so this is the one
+  // element a card reorder can start from; the card BODY belongs to whatever is
+  // inside it -- a grid, a text run, a figure -- and a press there must reach
+  // that content, never the browser's drag machinery. Do not mark anything in a
+  // card body draggable, and do not put the attribute back on the wrapper: the
+  // two of them stacked is how a press on a table cell used to drag the whole
+  // card away as a ghost, taking the mouse stream with it.
+  //
+  // The dragstart below bubbles to the wrapper, which owns the reorder state
+  // and gates it: a press on a control that sits ON this head (the tools, the
+  // width select) is that control's, and is cancelled there.
   return html`
     <div class="rw-card__head" draggable="true"
          onDragStart=${(event) => {
@@ -768,6 +805,7 @@ export function ProseCard(props) {
   const { blocks, numbers, index, first, last, acts, selected, marks } = props;
   const boxRef = useRef(null);
   const focusedRef = useRef(false);
+  const [assetOver, setAssetOver] = useState(false);
   const wanted = useMemo(() => proseToHtml(blocks, numbers), [blocks, numbers]);
   const [markup, setMarkup] = useState(wanted);
   const [picker, setPicker] = useState(false);
@@ -822,9 +860,39 @@ export function ProseCard(props) {
       <div class="rw-card__body">
         <div
           ref=${boxRef}
-          class=${cx('rw-prose', marks && 'rw-prose--marks')}
+          class=${cx('rw-prose', marks && 'rw-prose--marks', assetOver && 'rw-drop rw-drop--over')}
           contenteditable="true"
           spellcheck="false"
+          onDragOver=${(event) => {
+            // ONLY an asset drag is claimed here. A contenteditable is a drop
+            // target of the browser's own accord, so text dragged within the
+            // prose, and a card being reordered over it, are left exactly as
+            // they were -- this handler never sees them.
+            if (!isAssetDrag(event)) return;
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+            if (!assetOver) setAssetOver(true);
+          }}
+          onDragLeave=${() => setAssetOver(false)}
+          onDrop=${(event) => {
+            // The tray card also carries text/plain, and the browser's default
+            // for a drop into editable text is to TYPE it: the literal string
+            // 'images/<name>' used to land in the paragraph. Preventing the
+            // default is what stops that, and a figure block goes in instead --
+            // which is what the tray's hint promised and the only way a picture
+            // can reach the document at all.
+            const rel = assetPathFrom(event);
+            setAssetOver(false);
+            if (!rel) return;
+            event.preventDefault();
+            // Above or below the whole prose card, by which half of it the drop
+            // landed in. A figure is never pushed INTO the middle of a card: a
+            // paragraph run is one card, and splitting it here would leave a
+            // boundary the author never asked for.
+            const box = event.currentTarget.getBoundingClientRect();
+            const where = event.clientY < box.top + box.height / 2 ? 'before' : 'after';
+            if (acts.insertFigure) acts.insertFigure(index, rel, where);
+          }}
           onFocus=${() => { focusedRef.current = true; }}
           onBlur=${() => {
             // Leaving the card hands authority back to the model: commit what
@@ -889,6 +957,29 @@ export function FigureCard(props) {
     }, pushError);
   };
 
+  // A card dragged out of the asset tray. The file is already stored under
+  // images/ -- that is what the tray IS -- so nothing is uploaded: the block is
+  // simply pointed at it. Answers whether the drag was one, so the caller can
+  // fall through to the file path when it was not.
+  const takeAsset = (event) => {
+    const rel = assetPathFrom(event);
+    if (!rel) return false;
+    block.file = rel;
+    acts.changed();
+    return true;
+  };
+
+  // Accepting the drop is what makes the tray's hint true, and the tray sets
+  // both this block's drop AND the whole-figure one below. preventDefault on
+  // dragover is the only way a drop event is ever delivered, so it is the
+  // difference between a target and a silent no-op.
+  const acceptAssetDrag = (event) => {
+    if (!isAssetDrag(event)) return false;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    return true;
+  };
+
   const meta = block.file
     ? block.file.slice('images/'.length) + (size ? '  ' + size.w + ' × ' + size.h : '')
     : '';
@@ -912,7 +1003,19 @@ export function FigureCard(props) {
         <input ref=${fileRef} type="file" accept="image/*" class="rw-hidden"
                onChange=${(event) => { take(event.currentTarget.files); event.currentTarget.value = ''; }} />
         ${block.file ? html`
-          <div class="rw-figure">
+          <div class=${cx('rw-figure', over && 'rw-drop rw-drop--over')}
+               onDragOver=${(event) => { if (acceptAssetDrag(event) && !over) setOver(true); }}
+               onDragLeave=${() => setOver(false)}
+               onDrop=${(event) => {
+                 // A figure that already holds a picture is a drop target too:
+                 // the drop REPLACES what is there. Without it the only way to
+                 // put a stored file into a filled block was Replace and the
+                 // file picker, and a card dragged onto it did nothing at all.
+                 if (!isAssetDrag(event)) return;
+                 event.preventDefault();
+                 setOver(false);
+                 takeAsset(event);
+               }}>
             <img class="rw-figure__img" src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
                  style=${{ width: (block.width_cm || 15.5) * 26 + 'px' }}
                  onLoad=${(event) => {
@@ -928,8 +1031,26 @@ export function FigureCard(props) {
           <div class=${cx('rw-empty', over && 'rw-empty--over')} tabIndex="0"
                onDragOver=${(event) => { event.preventDefault(); if (!over) setOver(true); }}
                onDragLeave=${() => setOver(false)}
-               onDrop=${(event) => { event.preventDefault(); setOver(false); take(imageFilesFrom(event.dataTransfer)); }}
-               onPaste=${(event) => take(imageFilesFrom(event.clipboardData))}
+               onDrop=${(event) => {
+                 event.preventDefault();
+                 setOver(false);
+                 // A tray card first: it carries no file, so the file path
+                 // below would read an empty list and do nothing at all.
+                 if (takeAsset(event)) return;
+                 take(imageFilesFrom(event.dataTransfer));
+               }}
+               onPaste=${(event) => {
+                 const files = imageFilesFrom(event.clipboardData);
+                 if (!files.length) return;
+                 // This card is storing the picture, so nothing else may. The
+                 // asset tray listens for paste on the document and steps aside
+                 // for a paste that was already claimed; saying so is what keeps
+                 // one keystroke from writing images/ twice. Only claimed when
+                 // there is really a picture here, so a text paste still reaches
+                 // whatever else wants it.
+                 event.preventDefault();
+                 take(files);
+               }}
                onClick=${() => fileRef.current && fileRef.current.click()}>
             <div class="rw-empty__title">${T.dropHint}</div>
             <div class="rw-micro">${T.storedIn}</div>
@@ -960,10 +1081,24 @@ export function FigureGridCard(props) {
     const file = files && files[0];
     if (!file) return;
     storeImage(dir, acts.sectionId, file).then((stored) => {
-      while (items.length <= slot) items.push({ file: '', sub: '' });
-      items[slot] = Object.assign({}, items[slot], { file: stored });
-      acts.changed();
+      fill(slot, stored);
     }, pushError);
+  };
+
+  const fill = (slot, stored) => {
+    while (items.length <= slot) items.push({ file: '', sub: '' });
+    items[slot] = Object.assign({}, items[slot], { file: stored });
+    acts.changed();
+  };
+
+  // A card dragged out of the asset tray, into this cell. Already stored, so
+  // the cell is pointed at it; an occupied cell is replaced, exactly as a
+  // figure block is. Answers whether the drag was one.
+  const takeAsset = (slot, event) => {
+    const rel = assetPathFrom(event);
+    if (!rel) return false;
+    fill(slot, rel);
+    return true;
   };
 
   return html`
@@ -998,9 +1133,18 @@ export function FigureGridCard(props) {
                      onDragLeave=${() => setOver(-1)}
                      onDrop=${(event) => {
                        event.preventDefault(); setOver(-1);
+                       if (takeAsset(slot, event)) return;
                        take(slot, imageFilesFrom(event.dataTransfer));
                      }}
-                     onPaste=${(event) => take(slot, imageFilesFrom(event.clipboardData))}
+                     onPaste=${(event) => {
+                       // Claimed, so the asset tray's document listener steps
+                       // aside and one paste writes one file. See the figure
+                       // card's zone above.
+                       const files = imageFilesFrom(event.clipboardData);
+                       if (!files.length) return;
+                       event.preventDefault();
+                       take(slot, files);
+                     }}
                      tabIndex="0"
                      onClick=${() => { slotRef.current = slot; if (fileRef.current) fileRef.current.click(); }}>
                   ${item.file
@@ -1398,6 +1542,28 @@ export function BlockCard(props) {
       const length = proseRunLength(siblings, start);
       Array.prototype.splice.apply(siblings, [start, length].concat(next));
       commitEdit();
+    },
+    // A figure dropped out of the asset tray onto the card that begins at
+    // `start`, placed WHOLE cards away from it -- 'before' the card or 'after'
+    // its last block -- never inside one. The file is already stored under
+    // images/, so this only points a new block at it; anything that is not a
+    // path under images/ is refused here rather than repaired, exactly as
+    // toImagesPath refuses it everywhere else.
+    //
+    // Same in-place splice and same announcement as replaceProse: `siblings` IS
+    // node.blocks, the editor holds that array, and nothing above it changes
+    // identity, so commitEdit's revision bump is the only signal the save loop
+    // gets. onChange then lets the frame redraw with the new card in it.
+    insertFigure: (start, file, where) => {
+      const rel = toImagesPath(file);
+      if (!rel || !siblings) return;
+      const created = makeBlock('image', cfg);
+      if (!created) return;
+      created.file = rel;
+      const at = where === 'before' ? start : start + proseRunLength(siblings, start);
+      siblings.splice(Math.max(0, Math.min(at, siblings.length)), 0, created);
+      commitEdit();
+      if (onChange) onChange();
     },
   };
 

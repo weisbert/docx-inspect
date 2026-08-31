@@ -1237,3 +1237,23 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
   color: var(--fg-dim); font-size: var(--fs-micro); pointer-events: none;
 }
 .rw-select--small { height: var(--h-input-bar); }
+
+/* The insert seam, at rest. The seam between two cards is the only way to add
+   a block to a section that already holds one, and its plus was drawn at
+   opacity 0 until a pointer happened to find it -- the one route in was
+   invisible. It now rests in the line colours, quiet enough not to compete
+   with the cards it sits between, and comes forward on hover, on focus and
+   while its menu is open. The seam is a real control as well as a drawn one
+   (role, name and a tab stop -- see js/views/editor.js), so the focus rules
+   here are the keyboard's version of the hover. */
+.rw-seam--visible::before { background: var(--line-soft); }
+.rw-seam--visible .rw-seam__plus {
+  opacity: 1; border-color: var(--line); color: var(--fg-faint);
+}
+.rw-seam--visible:hover .rw-seam__plus,
+.rw-seam--visible:focus-visible .rw-seam__plus,
+.rw-seam--visible.rw-seam--open .rw-seam__plus {
+  border-color: var(--accent); color: var(--accent);
+}
+.rw-seam--visible:focus-visible { outline: none; }
+.rw-seam--visible:focus-visible::before { background: var(--accent-line); }

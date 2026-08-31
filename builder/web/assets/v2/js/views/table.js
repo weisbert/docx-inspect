@@ -874,6 +874,24 @@ export function TableBlock(props) {
     },
   }), []);
 
+  /* ---- who owns a gesture over the grid ---------------------------- *
+   *
+   * ONE predicate, asked of the control itself: is one of its cells being
+   * edited right now? Every gesture the grid host claims -- the keyboard, the
+   * clipboard, the context menu -- steps aside while the answer is yes,
+   * because a cell editor is a component with its own claim on all three.
+   *
+   * It asks the OWNER whether it is busy rather than testing what kind of
+   * element the event landed on. An enumeration of element types is how the
+   * card wrapper's drag guard was written, and it missed a bare <td>; the
+   * editor the control opens is a <td> as well, so the same enumeration would
+   * miss it here for the same reason. `ws.edition` is the control's own record
+   * of the open editor, so it cannot drift from what is on screen.  */
+  const editing = useCallback(() => {
+    const ws = sheetRef.current;
+    return !!(ws && ws.edition && ws.edition.length);
+  }, []);
+
   /* ---- keyboard and paste ---------------------------------------- */
 
   useEffect(() => {
@@ -881,10 +899,6 @@ export function TableBlock(props) {
     if (!host) return undefined;
 
     const inside = (target) => !!(target && host.contains(target));
-    const editing = () => {
-      const ws = sheetRef.current;
-      return !!(ws && ws.edition && ws.edition.length);
-    };
 
     const onKeyDown = (ev) => {
       if (!inside(ev.target) || editing()) return;
@@ -972,7 +986,13 @@ export function TableBlock(props) {
   };
 
   const deleteRow = () => {
-    const sel = selection || { y1: activeCell().y, y2: activeCell().y };
+    // selectionRef, not the selection state, and for the same reason every
+    // other action here reads it: a right-click moves the cursor to the cell
+    // under the pointer through the ref, and the state that follows it has not
+    // landed by the time the menu that was built in the same handler is
+    // clicked. Reading the state would act on wherever the cursor was BEFORE
+    // the right-click.
+    const sel = selectionRef.current || { y1: activeCell().y, y2: activeCell().y };
     const from = sel.y1;
     const count = sel.y2 - sel.y1 + 1;
     mutate(() => {
@@ -1047,7 +1067,7 @@ export function TableBlock(props) {
   };
 
   const setRowKind = (kind) => {
-    const sel = selection || { y1: activeCell().y, y2: activeCell().y };
+    const sel = selectionRef.current || { y1: activeCell().y, y2: activeCell().y };
     mutate(() => {
       for (let y = sel.y1; y <= sel.y2; y++) {
         if (block.type === 'datatable') {
@@ -1066,7 +1086,7 @@ export function TableBlock(props) {
   };
 
   const fillDown = () => {
-    const sel = selection;
+    const sel = selectionRef.current;
     if (!sel || sel.y2 <= sel.y1) return;
     mutate(() => {
       const fresh = gridModel(block, cfg);
@@ -1233,6 +1253,21 @@ export function TableBlock(props) {
   /* ---- the context menu ------------------------------------------- */
 
   const onContextMenu = (ev) => {
+    // While a cell editor is open the right-click belongs to the EDITOR: the
+    // user wants Paste, Select all, Undo on the text under the caret, and every
+    // entry this menu carries acts on the row instead. So the grid does not
+    // claim the gesture, and it does not preventDefault -- the browser's own
+    // edit menu is the right answer here.
+    //
+    // stopPropagation as well, and for a reason worth keeping: the control
+    // listens for contextmenu on the DOCUMENT. Its handler preventDefaults
+    // whenever it is editing, which would swallow the edit menu this branch
+    // exists to let through, and if the editor has been closed underneath it,
+    // it walks the (now detached) target up through parentElement looking for
+    // its own root and reads .classList of null. That TypeError reached the
+    // global error trap and told the user something was broken, when the whole
+    // truth was that this menu does not apply here.
+    if (editing()) { ev.stopPropagation(); return; }
     ev.preventDefault();
     // A right-click acts on the cell under the pointer, so move the active cell
     // there first -- otherwise the menu would act on wherever the last click was.

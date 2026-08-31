@@ -11,7 +11,7 @@
  *   SyncDrawer     494px  outbound: what changed, copy it, take a package back
  *   ImportDialog   820px  a package's facts, its baseline verdict, its manifest
  *   MergeModal    1180px  the three-way merge, one decision per touched passage
- *   HistoryDrawer  494px  ONE timeline: snapshots, exchanges, restores, trash
+ *   HistoryDrawer  494px  ONE timeline: snapshots, exchanges, restores
  *
  * Nothing here writes project.json on its own. The endpoints that do
  * (/api/merge3-apply, /api/apply-update, /api/paste-import) are reached only
@@ -223,13 +223,10 @@ const TEXT = {
   fAll: 'All',
   fExchanges: 'Exchanges',
   fRestores: 'Restores',
-  fTrash: 'Trash',
   restoreState: 'Restore this state',
   tagExchange: 'Exchange',
   tagRestore: 'Restore',
   tagSnapshot: 'Snapshot',
-  restore: 'Restore',
-  deletedWhen: (when) => 'Deleted ' + when,
 
   /* -- an operation held back because the document is not on disk --
    * The frozen counterpart of the restart trio above: the same fact, the same
@@ -1811,11 +1808,15 @@ export function MergeModal(props) {
  * The history drawer
  * ================================================================== */
 
+// Three filters, and no Trash. A deleted report is not in this report's history:
+// deleting happens on the shelf, what it produces is listed on the shelf, and this
+// drawer is reached from inside a report -- which is precisely the door a deleted
+// report no longer opens. The chip that used to sit here rendered a hard-coded
+// empty state whatever was in the trash, which is worse than not offering it.
 const FILTERS = [
   { value: 'all', label: TEXT.fAll },
   { value: 'exchange', label: TEXT.fExchanges },
   { value: 'restore', label: TEXT.fRestores },
-  { value: 'trash', label: TEXT.fTrash },
 ];
 
 export function HistoryDrawer(props) {
@@ -1905,26 +1906,23 @@ export function HistoryDrawer(props) {
 
         ${busy ? html`<div class="rw-sync__busy"><${Spinner} /> ${TEXT.loading}</div>` : null}
 
-        ${filter === 'trash' ? html`
-          <${EmptyState} title=${TEXT.nothingHere} />`
-          : html`
-          <div class="rw-timeline">
-            ${shown.length ? shown.map((item) => html`
-              <div class="rw-timeline__item" key=${item.name}>
-                <div class="rw-timeline__when">${relativeTime(item.mtime)}</div>
-                <div class="rw-timeline__body">
-                  <div class="rw-timeline__title">${item.title}</div>
-                  <div class="rw-meta">${formatBytes(item.size)}</div>
-                </div>
-                <${Pill} tone=${item.kind === 'exchange' ? 'note' : 'neutral'}>${item.tag}<//>
-                ${newestExchange && item.name === newestExchange.name
-                  ? html`<${Button} level="tertiary" onClick=${rollBack}>${TEXT.rollBack}<//>`
-                  : html`<${Button} level="tertiary" onClick=${() => restore(item.name)}>
-                           ${TEXT.restoreState}
-                         <//>`}
-              </div>`)
-              : (busy ? null : html`<${EmptyState} title=${TEXT.nothingHere} />`)}
-          </div>`}
+        <div class="rw-timeline">
+          ${shown.length ? shown.map((item) => html`
+            <div class="rw-timeline__item" key=${item.name}>
+              <div class="rw-timeline__when">${relativeTime(item.mtime)}</div>
+              <div class="rw-timeline__body">
+                <div class="rw-timeline__title">${item.title}</div>
+                <div class="rw-meta">${formatBytes(item.size)}</div>
+              </div>
+              <${Pill} tone=${item.kind === 'exchange' ? 'note' : 'neutral'}>${item.tag}<//>
+              ${newestExchange && item.name === newestExchange.name
+                ? html`<${Button} level="tertiary" onClick=${rollBack}>${TEXT.rollBack}<//>`
+                : html`<${Button} level="tertiary" onClick=${() => restore(item.name)}>
+                         ${TEXT.restoreState}
+                       <//>`}
+            </div>`)
+            : (busy ? null : html`<${EmptyState} title=${TEXT.nothingHere} />`)}
+        </div>
       </div>
     <//>`;
 }

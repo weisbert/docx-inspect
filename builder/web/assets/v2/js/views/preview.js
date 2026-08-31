@@ -12,7 +12,9 @@
  *   <ExportDialog />           mount once anywhere; it renders itself only while
  *                              store.overlay.kind === 'export'.
  *   <ExportMenu dir=... />     the header's `Export` control, ready to drop in.
- *   <ExportChip />             the header progress chip for a background export.
+ *   <ExportChip />             the chip a background export leaves behind: progress
+ *                              while it runs, then the finish, and it stays - and
+ *                              reopens the result - until the user dismisses it.
  *   openExport(dir, fmt)       starts an export and opens the dialog.
  *   selectBlock(dir, node, id) the "go to this block" call the checklist and the
  *                              preview's Jump to editor use.
@@ -52,7 +54,7 @@ import * as api from '../api.js';
 import { computeCaptionNumbers, formatBytes, classNames, numericValue, simAxisValues, axisValue, flagsFrom } from '../util.js';
 import {
   html, Fragment, Button, IconButton, SegmentedControl, Dialog, Banner,
-  EmptyState, Pill, Spinner, Menu,
+  EmptyState, Pill, Spinner, Menu, Toast,
   useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback,
 } from '../components/index.js';
 
@@ -993,6 +995,12 @@ export function selectBlock(dir, nodeId, blockId) {
 
 const OVERSCAN = 700;   // px of document built above and below the viewport
 
+// How long a press stays armed after the input that ended it, and how long a
+// scroll this view performed itself stays attributable to this view. Both are
+// short enough to be one gesture and long enough to cross a frame or two.
+const HAND_GRACE_MS = 180;
+const OWN_SCROLL_MS = 300;
+
 export function PreviewTab(props) {
   const dir = props.dir;
   const project = useStore((s) => s.project);
@@ -1107,15 +1115,6 @@ export function PreviewTab(props) {
     }
   }, []);
 
-  const onScroll = useCallback(() => {
-    if (rafPending.current) return;
-    rafPending.current = true;
-    window.requestAnimationFrame(() => {
-      rafPending.current = false;
-      readViewport();
-    });
-  }, [readViewport]);
-
   // Scrolling by hand releases the follow. What counts as "by hand" is the
   // INPUT, not the scroll event: building a section, loading a figure or the
   // spacers settling all move the scroll position, and none of those is the user
@@ -1124,16 +1123,86 @@ export function PreviewTab(props) {
     if (store.get().ui.follow) store.setUi({ follow: false });
   }, []);
 
+  // A PRESS IS NOT A SCROLL.
+  //
+  // The document carries controls of its own - every block has Jump to editor -
+  // and a press on one used to release the follow before the button's own click
+  // ever ran, so the single control whose whole job is "take me to this block"
+  // quietly cost the follow that had put the block on screen. The same held for
+  // the keyboard: Space on a focused Jump button is that button being pressed,
+  // not the paper being scrolled.
+  //
+  // Asking what was pressed would mean listing what a control looks like, and
+  // the next control this view gains would fall straight through the list. So
+  // nothing is listed. A press only ARMS a release; what fires it is the paper
+  // ACTUALLY MOVING while the press is held - a drag that scrolls, the scroll
+  // bar, a scroll key. A button that scrolls nothing releases nothing.
+  //
+  // Two details make that hold in practice:
+  //
+  //  * The press outlives its own end event by HAND_GRACE_MS. The browser
+  //    dispatches a scroll a frame or two after the input that caused it, and a
+  //    quick tap of a scroll key is over before that scroll arrives.
+  //  * A scroll THIS VIEW performed is not the user scrolling. Following the
+  //    caret is itself a scroll, and it lands right after the click that asked
+  //    for it, so every programmatic move is stamped and ignored for
+  //    OWN_SCROLL_MS. Without that, Jump to editor would release the follow by
+  //    way of the very scroll it asked for.
+  //
+  // The wheel needs no arming: there is no such thing as a wheel that means
+  // something other than "move this document".
+  const hand = useRef(null);
+  const selfScrolledAt = useRef(0);
+
+  const dropHand = useCallback(() => {
+    const held = hand.current;
+    if (!held) return;
+    hand.current = null;
+    window.removeEventListener(held.end, held.off, true);
+    if (held.timer) window.clearTimeout(held.timer);
+  }, []);
+
+  const endHand = useCallback(() => {
+    const held = hand.current;
+    if (!held || held.timer) return;
+    held.timer = window.setTimeout(dropHand, HAND_GRACE_MS);
+  }, [dropHand]);
+
+  // `end` is the event that ends this press: mouseup, touchend, keyup. It is
+  // listened for on the window, so a press that ends outside the panel - or
+  // outside the document - still ends.
+  const takeHand = useCallback((end) => {
+    dropHand();
+    const held = { end: end, off: null, timer: 0 };
+    held.off = () => endHand();
+    hand.current = held;
+    window.addEventListener(end, held.off, true);
+  }, [dropHand, endHand]);
+
+  useEffect(() => dropHand, [dropHand]);
+
+  const onScroll = useCallback(() => {
+    const ours = Date.now() - selfScrolledAt.current < OWN_SCROLL_MS;
+    if (hand.current && !ours) release();
+    if (rafPending.current) return;
+    rafPending.current = true;
+    window.requestAnimationFrame(() => {
+      rafPending.current = false;
+      readViewport();
+    });
+  }, [readViewport, release]);
+
   const onScrollKey = useCallback((ev) => {
     const keys = ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '];
-    if (keys.indexOf(ev.key) >= 0) release();
-  }, [release]);
+    if (keys.indexOf(ev.key) >= 0) takeHand('keyup');
+  }, [takeHand]);
 
   const scrollTo = useCallback((top) => {
     const box = scrollRef.current;
     if (!box) return;
     const next = Math.max(0, top);
     if (Math.abs(box.scrollTop - next) < 1) return;
+    selfScrolledAt.current = Date.now();
     box.scrollTop = next;
     setView({ top: next, h: box.clientHeight });
   }, []);
@@ -1159,6 +1228,7 @@ export function PreviewTab(props) {
         : null;
       if (!target) target = inner.querySelector('[data-node="' + cssEscape(sections[index].id) + '"]');
       if (!target) return;
+      selfScrolledAt.current = Date.now();
       inner.scrollTop = Math.max(0, target.offsetTop - 10);
       setView({ top: inner.scrollTop, h: inner.clientHeight });
     });
@@ -1307,7 +1377,9 @@ export function PreviewTab(props) {
           <//>
         </div>` : null}
       <div class="rw-preview__doc" ref=${scrollRef} onScroll=${onScroll}
-           onWheel=${release} onTouchStart=${release} onMouseDown=${release}
+           onWheel=${release}
+           onMouseDown=${() => takeHand('mouseup')}
+           onTouchStart=${() => takeHand('touchend')}
            onKeyDown=${onScrollKey}>
         <div style=${{ height: leadPad + 'px' }} aria-hidden="true"></div>
         ${built}
@@ -1516,6 +1588,8 @@ export const Preview = RightPanel;
 
 const jobListeners = new Set();
 let job = null;
+let jobSeq = 0;                 // identity that survives patchJob's copies
+let announcedJob = 0;           // the job whose finish has already been said out loud
 let openPathAvailable = true;   // set false the first time the endpoint 404s
 
 /* -- flushing before a write ----------------------------------------
@@ -1575,7 +1649,12 @@ export function useExportJob() {
 function startExport(dir, fmt, options) {
   const opts = options || {};
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  jobSeq += 1;
   setJob({
+    // patchJob replaces the object on every event, so identity is this number,
+    // not the reference: it is what tells the chip whether a finish has already
+    // been announced.
+    id: jobSeq,
     dir: dir,
     fmt: fmt,
     // 'held' is an export that has not started: the document could not be
@@ -1814,30 +1893,49 @@ function ArtefactRow(props) {
     </div>`;
 }
 
-// The dialog is mounted in two places - beside the header's Export control and
-// inside the right panel - so it exists however the editor chooses to wire the
-// export up. Only the first instance to mount draws it; the rest stand down, so
-// two mounts never become two dialogs.
-let dialogHost = null;
-
-function useDialogSeat() {
-  const token = useRef(null);
-  const [, bump] = useState(0);
-  // Claimed after EVERY render, not only on mount: collapsing the right panel
-  // unmounts one of the two instances, and the other must be able to pick the
-  // seat up on its next render rather than leaving the dialog homeless.
-  useEffect(() => {
+// The dialog and the chip are each mounted in two places - beside the header's
+// Export control and inside the right panel - so they exist however the editor
+// chooses to wire the export up. Only one instance of each draws; the rest stand
+// down, so two mounts never become two dialogs or two chips.
+//
+// The seat is claimed after EVERY render, not only on mount, and giving it up
+// WAKES the instances that were standing by. Collapsing the right panel unmounts
+// one of the two, and the survivor has to be able to pick the seat up even when
+// nothing else would have re-rendered it - otherwise a finished export's chip
+// leaves the header the moment the panel is collapsed and never comes back.
+function makeSeat() {
+  let host = null;
+  const standingBy = new Set();
+  return function useSeat() {
+    const token = useRef(null);
     if (!token.current) token.current = {};
-    if (dialogHost === null) {
-      dialogHost = token.current;
-      bump((n) => n + 1);
-    }
-  });
-  useEffect(() => () => {
-    if (dialogHost === token.current) dialogHost = null;
-  }, []);
-  return dialogHost !== null && dialogHost === token.current;
+    const [, bump] = useState(0);
+    useEffect(() => {
+      if (host === null) {
+        host = token.current;
+        bump((n) => n + 1);
+      }
+    });
+    useEffect(() => {
+      const me = token.current;
+      const wake = () => bump((n) => n + 1);
+      standingBy.add(wake);
+      return () => {
+        standingBy.delete(wake);
+        if (host === me) {
+          host = null;
+          standingBy.forEach((fn) => {
+            try { fn(); } catch (err) { /* a stale instance must not block the seat */ }
+          });
+        }
+      };
+    }, []);
+    return host !== null && host === token.current;
+  };
 }
+
+const useDialogSeat = makeSeat();
+const useChipSeat = makeSeat();
 
 export function ExportDialog() {
   const overlay = useStore((s) => s.overlay);
@@ -1945,6 +2043,10 @@ export function ExportDialog() {
 
 // The header's Export control: the default is Word and PDF, the menu also offers
 // Word on its own.
+// It also carries the background export's chip: the chip belongs in the header,
+// beside this control, so a backgrounded export stays reachable with the right
+// panel collapsed. Both mounts share one seat, so this never doubles the chip in
+// the panel head.
 export function ExportMenu(props) {
   const dir = props.dir;
   const [menu, setMenu] = useState(null);
@@ -1965,19 +2067,92 @@ export function ExportMenu(props) {
         <${Menu} x=${menu.x} y=${menu.y} items=${items} ariaLabel=${S.exportLabel}
                  onClose=${() => setMenu(null)} />` : null}
       <${ExportDialog} />
+      <${ExportChip} />
     <//>`;
 }
 
-// The chip a background export leaves behind. Renders nothing unless there is
-// one, so it is safe to mount unconditionally.
+/* ---- the chip a background export leaves behind ----
+ *
+ * `Run in the background` closes the dialog, and this chip is the ONLY way back
+ * to the job. It used to render nothing unless the export was still running, so
+ * the instant the export FINISHED the chip disappeared - taking the file list,
+ * the Open file / Open folder controls, the timings and the check summary with
+ * it, and saying nothing at all about having finished. The one button pressed so
+ * the user could keep working was the one that made the result unreachable; the
+ * only recovery was to export again and wait in front of it.
+ *
+ * So the chip now outlives the job: it shows progress while the export runs, it
+ * ANNOUNCES the finish once, and it stays until the user dismisses it, reopening
+ * the finished dialog - file, folder, path, timings, checks - on click.
+ */
+
+// What the chip says, and how loudly, for each state a backgrounded job reaches.
+function chipState(state) {
+  if (!state) return null;
+  if (state.status === 'running') {
+    const pct = state.total ? Math.min(100, Math.round((state.done / state.total) * 100)) : null;
+    return {
+      tone: 'accent',
+      done: false,
+      text: (state.fmt === 'pdf' ? S.exportingBoth : S.exportingWord)
+        + (pct === null ? '' : ' ' + pct + '%'),
+    };
+  }
+  if (state.status === 'error') return { tone: 'bad', done: true, text: S.somethingWrong };
+  if (state.status === 'held') return { tone: 'warn', done: true, text: S.notExported };
+  const result = state.result || {};
+  const pages = result.pages || (result.stats && result.stats.pages) || null;
+  return {
+    tone: 'good',
+    done: true,
+    text: pages ? T('finishedPages', { n: pages }) : S.finished,
+  };
+}
+
 export function ExportChip() {
   const state = useExportJob();
-  if (!state || state.status !== 'running' || !state.background) return null;
-  const pct = state.total ? Math.min(100, Math.round((state.done / state.total) * 100)) : null;
+  const seated = useChipSeat();
+  const [notice, setNotice] = useState(null);
+  const live = !!state && !!state.background;
+  const settled = live && state.status !== 'running';
+
+  // The announcement. It fires once per job, on the transition out of running,
+  // and only for the instance holding the seat, so two mounts never speak twice.
+  useEffect(() => {
+    if (!seated || !settled) return;
+    if (announcedJob === state.id) return;
+    announcedJob = state.id;
+    setNotice(chipState(state));
+  }, [seated, settled, live && state.id, live && state.status]);
+
+  if (!seated || !live) return null;
+  const shown = chipState(state);
+  const open = () => store.set({ overlay: { kind: 'export', dir: state.dir, fmt: state.fmt } });
+
+  // Dismissing is offered only once the job has settled: while it runs, the way
+  // to stop it is Cancel export, inside the dialog. Letting go of a finished job
+  // while its dialog stands open would leave that dialog with nothing to show,
+  // so the overlay goes with it.
+  const dismiss = () => {
+    const overlay = store.get().overlay;
+    if (overlay && overlay.kind === 'export') store.set({ overlay: null });
+    setNotice(null);
+    setJob(null);
+  };
+
+  const first = artefactsOf(state.result)[0] || null;
   return html`
-    <${Pill} tone="accent"
-             onClick=${() => store.set({ overlay: { kind: 'export', dir: state.dir, fmt: state.fmt } })}>
-      ${state.fmt === 'pdf' ? S.exportingBoth : S.exportingWord}${pct === null ? '' : ' ' + pct + '%'}
+    <${Fragment}>
+      <${Pill} tone=${shown.tone} onClick=${open}>${shown.text}<//>
+      ${shown.done ? html`
+        <${IconButton} glyph=${String.fromCharCode(0x2715)} small=${true} title=${S.close}
+                       onClick=${dismiss} />` : null}
+      ${notice ? html`
+        <${Toast} text=${notice.text}
+                  action=${notice.tone === 'good' && openPathAvailable && first ? S.openFile : null}
+                  onAction=${() => openPath(state.dir, first ? first.rel : '', false)}
+                  dismissLabel=${S.close}
+                  onDismiss=${() => setNotice(null)} />` : null}
     <//>`;
 }
 

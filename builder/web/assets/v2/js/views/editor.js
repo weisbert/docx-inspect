@@ -843,7 +843,21 @@ function OutlineRow(props) {
          aria-current=${selected ? 'true' : null}
          aria-label=${row.number + ' ' + (text(row.node.title) || S.untitledSection)}
          draggable="true"
-         onDragStart=${(ev) => props.onDragStart(ev, row)}
+         onDragStart=${(ev) => {
+           // The row is the handle, but the things ON it are not part of it.
+           // A press on the twisty is that twisty's, and the rename editor puts
+           // a real input in this row, so a drag that begins on any of them is
+           // cancelled rather than turned into a section move -- the same rule
+           // the block cards follow, for the same reason: a press on something
+           // interactive must never become a drag ghost.
+           const from = ev.target;
+           if (from && from.closest && from.closest(
+             'input,textarea,select,button,a,[contenteditable="true"],.rw-tree__twisty')) {
+             ev.preventDefault();
+             return;
+           }
+           props.onDragStart(ev, row);
+         }}
          onDragEnd=${props.onDragEnd}
          onClick=${() => props.onSelect(row)}
          onKeyDown=${(ev) => {
@@ -1193,6 +1207,52 @@ function cmd(name, value) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Who owns the keystroke
+ * ------------------------------------------------------------------ */
+
+// Is something inside a card holding the keyboard right now?
+//
+// THIS IS ASKED, NEVER GUESSED FROM A TAG LIST, and that is the whole point.
+// The frame's shortcuts used to step aside for
+// `input,textarea,select,[contenteditable="true"]`, which is a list of the
+// things the author happened to think of. A compliance-table cell is a bare
+// <td> and the grid's own container is a bare <div>, so neither is on that
+// list -- and one press on a cell followed by one Delete deleted the whole
+// table card: every row, every value, the caption. An enumeration will keep
+// missing things; these two questions do not.
+//
+//   * THE GRID IS ASKED ABOUT ITSELF. The control publishes its own state:
+//     `jspreadsheet.current` is the worksheet the last press landed in -- it
+//     sets it on a press inside a grid and clears it the moment a press lands
+//     anywhere else -- and a non-empty `edition` means a cell editor is open.
+//     Either way the grid is the component the keys belong to, and it handles
+//     Delete itself.
+//   * EVERYTHING ELSE IS ASKED OF THE FOCUSED ELEMENT, and what it is asked is
+//     whether it is holding a TEXT CARET -- the thing both of these keys would
+//     take away. `isContentEditable` is true for a prose run whatever tag it
+//     wears, and a control with a caret reports a numeric `selectionStart`
+//     (some input types throw when asked, which is itself a no).
+//
+// It stops there on purpose. A focused BUTTON is not holding a caret and does
+// not want either key, and treating it as busy would kill Ctrl+F for the rest
+// of the session after one press on a toolbar control. The card-level Delete
+// has a second condition of its own for that: the card must have been
+// selected, which only a press on its head does.
+export function keyboardIsClaimed() {
+  const lib = typeof window !== 'undefined' ? window.jspreadsheet : null;
+  if (lib && lib.current) return true;
+  const el = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!el || el === document.body || el === document.documentElement) return false;
+  if (el.isContentEditable) return true;
+  try {
+    if (typeof el.selectionStart === 'number') return true;
+  } catch (err) {
+    /* a control that refuses the question is not holding a caret */
+  }
+  return false;
+}
+
 function FormatToolbar(props) {
   const { caret, node } = props;
   const active = !!caret;
@@ -1317,6 +1377,9 @@ const BLOCK_TYPE_LABEL = {
 // The stand-in card, used only while views/blocks.js is not present. It shows
 // what the block holds so the frame can be worked on, and nothing more: editing
 // a block belongs to that file.
+// Its head carries draggable="true" because the head IS the drag handle: the
+// card wrapper the frame draws around it is not draggable, so without this the
+// stand-in card could not be reordered by hand at all.
 function FallbackCard(props) {
   const { block, blocks, dir } = props;
   const kind = block ? block.type : 'para';
@@ -1324,7 +1387,7 @@ function FallbackCard(props) {
   const paragraphs = blocks || [block];
   return html`
     <div class=${cx('rw-card', props.selected && 'rw-card--selected')}>
-      <div class="rw-card__head">
+      <div class="rw-card__head" draggable="true">
         <span class=${cx('rw-card__marker',
           kind === 'para' ? 'rw-card__marker--prose'
             : (kind === 'image' || kind === 'imagegrid') ? 'rw-card__marker--figure'
@@ -1475,12 +1538,25 @@ function Canvas(props) {
     edit(() => { node.blocks = next; });
   };
 
+  // The seam is the ONLY way into a section that already holds a block, so it
+  // is drawn at rest rather than summoned by a pointer that has to find it
+  // first: rw-seam--visible keeps the '+' on screen in the line colour and
+  // brings it forward on hover, on focus and while its menu is open. It is a
+  // real control as well as a drawn one -- role, name and a tab stop -- so the
+  // one route in is reachable without a mouse. A keyboard opening anchors the
+  // menu to the seam's own box, because a key press carries no coordinates.
   const seam = (at, index) => html`
-    <div class=${cx('rw-seam', overSeam === index && 'rw-seam--over',
+    <div class=${cx('rw-seam', 'rw-seam--visible', overSeam === index && 'rw-seam--over',
                     menu.open && 'rw-seam--open')}
          key=${'seam' + index}
-         title=${S.insertHere}
+         role="button" tabIndex="0"
+         title=${S.insertHere} aria-label=${S.insertHere}
          onClick=${(ev) => menu.openAt(ev, insertItems(at), S.insertHere)}
+         onKeyDown=${(ev) => {
+           if (ev.key !== 'Enter' && ev.key !== ' ') return;
+           ev.preventDefault();
+           menu.openBelow(ev, insertItems(at), S.insertHere);
+         }}
          onDragOver=${(ev) => {
            if (dragIndex < 0) return;
            ev.preventDefault();
@@ -1522,11 +1598,36 @@ function Canvas(props) {
             <div key=${'card' + start}
                  data-card-start=${String(start)}
                  data-block-id=${block && block.id ? block.id : null}
-                 draggable=${props.editingHere ? null : 'true'}
                  onDragStart=${(ev) => {
-                   const target = ev.target;
-                   if (target && target.closest
-                       && target.closest('[contenteditable="true"],input,textarea,select')) {
+                   // DRAG OWNERSHIP, and it is deliberately explicit.
+                   //
+                   // The wrapper carries NO draggable attribute. A card is
+                   // reordered by its HEAD -- the handle views/blocks.js marks
+                   // draggable -- and the card's BODY is content that belongs
+                   // to whatever sits inside it: a grid, a text run, a figure.
+                   //
+                   // The wrapper used to be draggable itself and stepped aside
+                   // only for [contenteditable="true"], input, textarea and
+                   // select. A compliance-table cell is a <td>, which is none
+                   // of those, so a press-and-drag across cells started a
+                   // native drag of the whole card: the browser painted the
+                   // card as a drag ghost and took the mouse stream, the grid
+                   // never saw mousemove or mouseup, its range selection never
+                   // happened -- and nothing threw, so the screen simply looked
+                   // frozen.
+                   //
+                   // This handler still lives on the wrapper because the
+                   // reorder state does; it runs on the dragstart the head
+                   // bubbles up. Anything else that reaches it began in the
+                   // body -- an <img> is draggable with no attribute at all --
+                   // or on a control ON the head, and is cancelled rather than
+                   // adopted, so no press inside a card can become a ghost.
+                   if (ev.defaultPrevented) return;
+                   const from = ev.target;
+                   const near = (sel) => (from && from.closest ? from.closest(sel) : null);
+                   const head = near('.rw-card__head');
+                   const control = near('button,select,input,textarea,a,[contenteditable="true"]');
+                   if (!head || control) {
                      ev.preventDefault();
                      return;
                    }
@@ -1535,7 +1636,36 @@ function Canvas(props) {
                    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
                  }}
                  onDragEnd=${() => { setDragIndex(-1); setOverSeam(-1); }}
-                 onMouseDown=${() => props.onSelectBlock(block && block.id ? block.id : null, start)}>
+                 onMouseDown=${(ev) => {
+                   // SELECTION OWNERSHIP, by the same rule the dragstart above
+                   // follows, and for the same reason.
+                   //
+                   // Selecting a card is a deliberate act ON THE CARD, so it
+                   // is claimed only from the card's own chrome: the head.
+                   // This used to fire for any press that reached the wrapper,
+                   // which meant a press on a table cell armed the selection at
+                   // the table -- and the frame's Delete then deleted the card
+                   // the user was typing into. A press in the BODY belongs to
+                   // whatever sits there, so it moves the cursor (the preview
+                   // follows it) and CLEARS the selection, because the user is
+                   // now working inside the card rather than acting on it.
+                   //
+                   // Controls that sit on the head are not the head: the head
+                   // is asked which of its own descendants take the focus for
+                   // themselves -- tabIndex is 0 or more on exactly those and
+                   // -1 on the plain spans the head is otherwise made of -- so
+                   // a tool the head grows later needs no edit here.
+                   const id = block && block.id ? block.id : null;
+                   const from = ev.target;
+                   const head = from && from.closest ? from.closest('.rw-card__head') : null;
+                   let claims = !!head;
+                   for (let el = from; claims && el && el !== head; el = el.parentElement) {
+                     if (el.isContentEditable) claims = false;
+                     else if (typeof el.tabIndex === 'number' && el.tabIndex >= 0) claims = false;
+                   }
+                   if (claims) props.onSelectBlock(id, start);
+                   else props.onCursorBlock(id);
+                 }}>
               ${BlockCard
                 ? html`<${BlockCard}
                     block=${block} blocks=${card.blocks || [block]} card=${card}
@@ -2112,6 +2242,14 @@ export function Editor(props) {
         return;
       }
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'f' || ev.key === 'F')) {
+        // Moving the caret to the outline search is the FRAME's shortcut, so
+        // it is only the frame's to take while nothing inside a card is
+        // holding the keyboard. It used to be claimed unconditionally, above
+        // even the old field guard, and it fired from inside a prose card
+        // mid-sentence and from inside an open cell editor: the caret was
+        // lost, and because the key was swallowed no browser find happened
+        // either. Left alone, the keystroke reaches whatever owns it.
+        if (keyboardIsClaimed()) return;
         ev.preventDefault();
         if (searchRef.current) searchRef.current.focus();
         return;
@@ -2136,7 +2274,15 @@ export function Editor(props) {
         if (ui && ui.rightOpen === false) return;
         return;
       }
-      if (ev.key === 'Delete' && !inField && selectedStart >= 0) {
+      // Deleting a card is the CARD's shortcut. Two things have to be true for
+      // it, and the first is the one that was missing: nothing inside a card
+      // may be holding the keyboard. `inField` alone let a grid cell through --
+      // a <td> is not on its list -- and jspreadsheet's own document handler
+      // takes Delete too, so both ran and a press on one cell followed by one
+      // Delete destroyed the whole table. The second is that the user actually
+      // selected this card, which now means a press on its head; a press in a
+      // card's body clears the selection instead of arming it.
+      if (ev.key === 'Delete' && !keyboardIsClaimed() && selectedStart >= 0) {
         ev.preventDefault();
         const node = currentRow && currentRow.node;
         const blocks = (node && node.blocks) || [];
@@ -2238,13 +2384,21 @@ export function Editor(props) {
                     <${Canvas}
                       node=${currentRow.node} dir=${dir} cfg=${cfg} project=${project}
                       canvasRef=${canvasRef}
-                      editingHere=${!!caret}
                       editingMarks=${editingMarks}
                       selectedBlock=${selectedBlock}
                       selectedStart=${selectedStart}
                       onSelectBlock=${(id, start) => {
                         setSelectedBlock(id || null);
                         setSelectedStart(start === undefined ? -1 : start);
+                        if (id) store.setUi({ cursorNode: nodeId, cursorBlock: id });
+                      }}
+                      onCursorBlock=${(id) => {
+                        // Where the user is WORKING, which is not the same
+                        // thing as what they have selected. The preview
+                        // follows this; the card-level Delete does not, so
+                        // pressing into a card's body drops the selection.
+                        setSelectedBlock(id || null);
+                        setSelectedStart(-1);
                         if (id) store.setUi({ cursorNode: nodeId, cursorBlock: id });
                       }}
                       onDeleteCard=${deleteCard}
