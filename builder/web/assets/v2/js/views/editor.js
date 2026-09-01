@@ -701,19 +701,18 @@ function Header(props) {
     if (report) store.navigate({ view: 'editor', dir: report.dir, node: store.lastNodeFor(report.dir) });
   };
 
-  const overflow = () => ([
-    {
-      label: S.editingMarks, glyph: '¶',
-      onClick: () => store.setUi({ marks: !(ui && ui.marks) }),
-    },
-    {
-      label: (ui && ui.assetsOpen) ? S.collapse : S.assets, glyph: '▭',
-      onClick: () => store.setUi({ assetsOpen: !(ui && ui.assetsOpen) }),
-    },
-    { label: S.textExchange, glyph: '↻', separatorBefore: true, onClick: props.onExchange },
-    { label: S.history, glyph: '⟲', onClick: props.onHistory },
-    { label: S.back, glyph: '‹', separatorBefore: true, onClick: () => store.navigate({ view: 'home' }) },
-  ]);
+  // THERE IS NO OVERFLOW MENU.
+  //
+  // There was one, and all five of its entries were already on the screen at
+  // the same time: Back is the ‹ at the far left, Text exchange is the pill,
+  // History is the button beside it, Assets is the tray's own Expand strip,
+  // and Editing marks is the ¶ in the prose toolbar -- where it acts, on
+  // prose. An overflow menu earns its place when the bar cannot fit
+  // everything; this window is a fixed 1440px with no breakpoints, so nothing
+  // ever moved into it and it was a second copy of the bar, permanently.
+  //
+  // If something later genuinely has nowhere else to go, it goes here and this
+  // comment goes away. Until then, one control, one place.
 
   return html`
     <${Fragment}>
@@ -768,8 +767,6 @@ function Header(props) {
             }], S.exportLabel)}>
               ${S.exportLabel}<span class="rw-btn__caret" aria-hidden="true"> ▾</span>
             <//>`}
-        <${IconButton} glyph="⋯" title=${S.more}
-                       onClick=${(ev) => menu.openBelow(ev, overflow(), S.more)} />
       </header>
       ${menu.node}
     <//>`;

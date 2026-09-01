@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * test_v2_home_chrome.js -- every action on the shelf appears once, where it
- * acts. Measured in a real browser.
+ * test_v2_chrome_once.js -- every action appears once, where it acts. Measured
+ * in a real browser, on the shelf AND in the editor.
  *
- * Run:  node builder/tests/test_v2_home_chrome.js
- *       node builder/tests/test_v2_home_chrome.js --headed
+ * Run:  node builder/tests/test_v2_chrome_once.js
+ *       node builder/tests/test_v2_chrome_once.js --headed
  *
  * WHY THIS FILE EXISTS
  *   The shelf carried the same three actions twice: once on the top bar as
@@ -30,10 +30,15 @@
  *   3. `Settings` is reachable, on the top bar, and opens;
  *   4. `New report` is beside the breadcrumb, once;
  *   5. its caret offers exactly the three starting points, and choosing one
- *      opens the create dialog with that choice ALREADY MADE.
+ *      opens the create dialog with that choice ALREADY MADE;
+ *   6. in the EDITOR, no menu entry repeats a control that is already on
+ *      screen. The editor's ⋯ carried five entries and every one of them --
+ *      Back, Text exchange, History, Assets, Editing marks -- was visible at
+ *      the same moment somewhere else. An overflow menu earns its place when
+ *      the bar cannot fit everything, and this window is a fixed 1440px.
  *
- *   Assertion 1 is the one with teeth: against the old chrome the same three
- *   labels are found twice each.
+ *   Assertions 1 and 6 are the ones with teeth: against the old chrome the
+ *   shelf shows three labels twice each and the editor's ⋯ repeats five.
  *
  * IT NEVER TOUCHES REAL REPORTS. The fixture is generated from scratch into the
  * OS temporary directory and the server is booted against THAT with an explicit
@@ -62,6 +67,7 @@ const PROJECT_ID = '1108';
 const MODULES = ['CLKDIV_5G', 'SERDES_2G'];
 
 /* The labels this file is about. */
+const REPORT_DIR = PROJECT_ID + '/' + MODULES[0] + '/CDR';
 const APPLY = 'Apply an external update';
 const NEW_REPORT = 'New report';
 const IMPORT_WORD = 'Import Word report';
@@ -360,6 +366,74 @@ async function browserChecks() {
     check('the create dialog opened', chosen.dialogOpen);
     check('Start from is already set to the entry that was chosen',
       chosen.found && chosen.pressed === 'true', JSON.stringify(chosen));
+
+    /* ---- the editor: a menu may not repeat what is already on screen ---- */
+    section('in the editor, no menu repeats the bar');
+    await page.goto(base + '/#/r/' + REPORT_DIR, { waitUntil: 'load' });
+    await page.waitForSelector('.rw-topbar', { timeout: 10000 });
+    await settle(page, 1200);
+    await page.screenshot({ path: path.join(shots, '4-editor.png') });
+
+    const onScreen = new Set((await buttons(page)).map((b) => b.name));
+    const menus = await page.locator('.rw-topbar button[title]').evaluateAll(
+      (els) => els.map((el) => el.getAttribute('title')));
+    console.log('  top bar controls: ' + JSON.stringify(Array.from(onScreen)));
+
+    check('the editor no longer carries a ⋯ that copies the bar',
+      menus.indexOf('More') < 0, 'top bar still offers: ' + JSON.stringify(menus));
+
+    // Whatever menus the bar does open, none of their entries may name a
+    // control that is already on screen beside them.
+    const openers = await page.locator('.rw-topbar button').evaluateAll(
+      (els) => els.map((el, i) => ({ i: i, name: (el.getAttribute('title') || el.textContent || '').trim() })));
+    const repeated = [];
+    for (const opener of openers) {
+      if (!/Export|More|⋯/.test(opener.name)) continue;
+      await page.locator('.rw-topbar button').nth(opener.i).click();
+      await settle(page, 350);
+      const entries = await page.evaluate(() => Array.from(document.querySelectorAll('.rw-menu button'))
+        .map((b) => (b.textContent || '').replace(/\s+/g, ' ').trim()));
+      for (const entry of entries) {
+        for (const name of onScreen) {
+          if (name && entry.indexOf(name) >= 0 && name.length > 3) {
+            repeated.push(opener.name + ' > ' + entry + '  repeats  ' + name);
+          }
+        }
+      }
+      await page.keyboard.press('Escape');
+      await settle(page, 250);
+    }
+    check('no menu entry repeats a control already on screen',
+      repeated.length === 0, repeated.join(' | '));
+
+    // Every card head shows move / duplicate / delete as four buttons. The ⋮
+    // beside them used to repeat all four.
+    const cards = page.locator('.rw-card');
+    const cardCount = await cards.count();
+    check('the editor drew some cards', cardCount > 0, 'cards: ' + cardCount);
+    let checkedCard = false;
+    for (let i = 0; i < cardCount && !checkedCard; i += 1) {
+      const card = cards.nth(i);
+      const dots = card.locator('.rw-card__tools button[title="More"]');
+      if (!(await dots.count())) continue;
+      const headTitles = await card.locator('.rw-card__tools button').evaluateAll(
+        (els) => els.map((el) => (el.getAttribute('title') || '').trim()).filter(Boolean));
+      await dots.first().click();
+      await settle(page, 350);
+      const entries = await page.evaluate(() => Array.from(document.querySelectorAll('.rw-menu button'))
+        .map((b) => (b.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean));
+      await page.screenshot({ path: path.join(shots, '5-card-menu.png') });
+      const both = entries.filter((e) => headTitles.indexOf(e) >= 0);
+      check('a card menu carries only what its head cannot show',
+        both.length === 0,
+        'head: ' + JSON.stringify(headTitles) + '  menu: ' + JSON.stringify(entries));
+      check('and it still carries the entries only this card kind has', entries.length > 0,
+        JSON.stringify(entries));
+      await page.keyboard.press('Escape');
+      await settle(page, 250);
+      checkedCard = true;
+    }
+    check('a card with a ⋮ was found to check', checkedCard);
 
     section('console');
     if (consoleErrors.length) {

@@ -760,6 +760,13 @@ function CardHead(props) {
       ${meta ? html`<span class="rw-card__meta">${meta}</span>` : null}
       ${extra}
       <span class="rw-card__tools">
+        ${/* Move, duplicate and delete are RIGHT HERE, four buttons wide. The
+              ⋮ beside them used to repeat all four, so every card offered the
+              same four acts twice, an inch apart -- and on a prose card the
+              menu was nothing but the copy. It now carries only what this kind
+              of card can do that the head cannot show, and a card with nothing
+              of its own does not draw one. (What went with the four: the
+              menu's `Delete` key hint. The ✕ does the same thing.) */ ''}
         <${IconButton} glyph="↑" title=${T.moveUp} className="rw-iconbtn--sm"
                        disabled=${first} onClick=${() => acts.move(index, -1)} />
         <${IconButton} glyph="↓" title=${T.moveDown} className="rw-iconbtn--sm"
@@ -768,20 +775,16 @@ function CardHead(props) {
                        onClick=${() => acts.duplicate(index)} />
         <${IconButton} glyph="✕" title=${T.deleteBlock} className="rw-iconbtn--sm" danger=${true}
                        onClick=${() => acts.remove(index)} />
-        <${IconButton} glyph="⋮" title=${T.more} className="rw-iconbtn--sm"
-                       onClick=${(event) => {
-                         const box = event.currentTarget.getBoundingClientRect();
-                         setMenu({ x: box.left, y: box.bottom + 4 });
-                       }} />
+        ${(menuItems || []).length ? html`
+          <${IconButton} glyph="⋮" title=${T.more} className="rw-iconbtn--sm"
+                         onClick=${(event) => {
+                           const box = event.currentTarget.getBoundingClientRect();
+                           setMenu({ x: box.left, y: box.bottom + 4 });
+                         }} />` : null}
       </span>
-      ${menu ? html`
+      ${menu && (menuItems || []).length ? html`
         <${PopMenu} x=${menu.x} y=${menu.y} onClose=${() => setMenu(null)}
-                    items=${(menuItems || []).concat([
-                      { label: T.moveUp, disabled: first, onClick: () => acts.move(index, -1), separatorBefore: (menuItems || []).length > 0 },
-                      { label: T.moveDown, disabled: last, onClick: () => acts.move(index, 1) },
-                      { label: T.duplicate, onClick: () => acts.duplicate(index) },
-                      { label: T.deleteBlock, danger: true, key: 'Delete', onClick: () => acts.remove(index) },
-                    ])} />` : null}
+                    items=${menuItems} />` : null}
     </div>`;
 }
 
