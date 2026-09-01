@@ -113,6 +113,17 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-topbar__sub  { font-size: var(--fs-meta); color: var(--fg-dim); }
 .rw-topbar__rule { width: 1px; height: 20px; background: var(--line); }
 .rw-topbar__actions { display: flex; align-items: center; gap: var(--sp-6); }
+/* A split control: one press does the ordinary thing, the caret asks which
+ * kind. The two halves read as one button, so the seam is a single shared
+ * edge and only the outer corners are round. */
+.rw-split { display: inline-flex; align-items: stretch; }
+.rw-split__main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.rw-split__more {
+  margin-left: -1px; border-top-left-radius: 0; border-bottom-left-radius: 0;
+  background: var(--accent); border: 1px solid var(--accent-edge); color: var(--fg-on-accent);
+}
+.rw-split__more:hover:not([disabled]) { background: var(--accent-edge); color: var(--fg-on-accent); }
+.rw-split__more[disabled] { opacity: .55; }
 .rw-shell { flex: 1 1 auto; display: flex; min-height: 0; }
 
 /* Save indicator: a dot plus a short state line. There is no Save button. */

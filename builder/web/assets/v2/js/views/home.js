@@ -903,6 +903,31 @@ export function Home() {
     });
   };
 
+  // WHERE AN ACT BELONGS IS WHERE IT ACTS.
+  //
+  // `Apply an external update` and `Settings` are addressed to the whole
+  // machine -- a package names its own destinations and can create reports
+  // under any project -- so they live on the top bar and nowhere else.
+  // `New report` is addressed to whatever the breadcrumb has selected, so it
+  // lives beside the breadcrumb, once.
+  //
+  // The caret is a shortcut into the create dialog's own `Start from` choice,
+  // not a second set of rules: each entry opens the same dialog with that
+  // choice already made. `Import Word report` used to be a top-level button
+  // for one of these three, listed twice, in two different orders.
+  const openNewMenu = (ev) => {
+    const at = anchor(ev);
+    setMenu({
+      x: at.x,
+      y: at.y,
+      items: [
+        { label: T.blank, onClick: () => openCreate({ from: 'template' }) },
+        { label: T.importFile, onClick: () => pickAndImport() },
+        { label: T.inherit, onClick: () => openCreate({ from: 'inherit' }) },
+      ],
+    });
+  };
+
   const openModuleMenu = (ev, project, module) => {
     const at = anchor(ev);
     const dir = moduleDir(project, module);
@@ -1045,8 +1070,8 @@ export function Home() {
             ? html`<${Pill} tone="accent">${T.update(version.fixes == null ? 0 : version.fixes)}<//>`
             : null}
           <${Button} onClick=${pickPackage} disabled=${busy}>${T.applyUpdate}<//>
-          <${Button} onClick=${pickAndImport} disabled=${busy}>${T.importWord}<//>
-          <${Button} level="primary" onClick=${() => openCreate({})}>${T.newReport}<//>
+          <${IconButton} glyph="⚙" title=${T.settings}
+                         onClick=${() => setDialog({ kind: 'stub', label: T.settings })} />
         </div>
       </div>
 
@@ -1079,14 +1104,12 @@ export function Home() {
                   ${i ? html`<span aria-hidden="true">›</span>` : null}<span>${part}</span>
                 <//>`)}
               <span class="rw-spacer"></span>
-              <div class="rw-btnrow">
-                <${Button} onClick=${() => openCreate({})}>${T.newReport}<//>
-                <${Button} onClick=${pickAndImport} disabled=${busy}>${T.importWord}<//>
-                <${Button} onClick=${pickPackage} disabled=${busy}>${T.applyUpdate}<//>
-                <${Button}
-                  level="tertiary"
-                  onClick=${() => setDialog({ kind: 'stub', label: T.settings })}
-                >${T.settings}<//>
+              <div class="rw-split">
+                <${Button} level="primary" className="rw-split__main"
+                           onClick=${() => openCreate({})}>${T.newReport}<//>
+                <${IconButton} glyph="▾" title=${T.startFrom}
+                               className="rw-split__more" disabled=${busy}
+                               onClick=${openNewMenu} />
               </div>
             </div>
             <div class="rw-home__titleline">
