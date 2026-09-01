@@ -45,7 +45,23 @@ body {
   line-height: var(--lh-base);
   -webkit-font-smoothing: antialiased;
 }
-#app { height: 100%; }
+/* The window's height has to reach the view, not stop at the mount point.
+ *
+ * boot.js renders `<div class="rw-view">` inside #app and every screen inside
+ * that, and each screen asks for the whole window with `.rw-app { height:100% }`.
+ * A percentage height resolves against a parent with a definite height and
+ * against nothing else, so while .rw-view was an ordinary auto-height block the
+ * 100% below it meant `auto` and every screen sized itself to its CONTENT: the
+ * shelf's rail ended wherever the report table ended, carrying Templates /
+ * Trash / Design system up into the middle of the screen, and a long list grew
+ * the page instead of scrolling inside its own pane.
+ *
+ * #app is a column so a boot banner takes its own height off the top and the
+ * view keeps the rest. min-height:0 lets the panes inside scroll instead of
+ * stretching their parent. */
+#app { height: 100%; display: flex; flex-direction: column; }
+.rw-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.rw-view > * { flex: 1 1 auto; min-height: 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -250,6 +266,12 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 
 /* == 9 - banners ============================================================
  * Three levels: a left-edge bar plus a tinted body. */
+/* The app-level stack boot.js renders above every screen. It takes its own
+ * height off the top of the window and the view keeps the rest. */
+.rw-banners {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: var(--sp-6);
+  padding: var(--sp-9) var(--sp-12) 0;
+}
 .rw-banner {
   display: flex; align-items: flex-start; gap: var(--sp-9); padding: var(--banner-pad);
   border: 1px solid var(--line); border-left-width: var(--banner-bar); border-radius: var(--r-ctl);
