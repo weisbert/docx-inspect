@@ -78,6 +78,7 @@ const T = {
   duplicate: 'Duplicate',
   deleteBlock: 'Delete block',
   dropHint: 'Paste a screenshot with Ctrl+V, or drop a file',
+  clearPicture: 'Remove the picture',
   storedIn: 'Stored in images/',
   crossReference: 'Cross-reference',
   pickTarget: 'Pick a figure or table to point at',
@@ -945,6 +946,7 @@ export function FigureCard(props) {
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(null);
   const fileRef = useRef(null);
+  const refocus = useRef(false);      // the empty frame takes focus after a clear
   const entry = numbers && numbers.get ? numbers.get(block.id) : null;
   const label = entry ? entry.label : '';
 
@@ -1004,6 +1006,7 @@ export function FigureCard(props) {
                onChange=${(event) => { take(event.currentTarget.files); event.currentTarget.value = ''; }} />
         ${block.file ? html`
           <div class=${cx('rw-figure', over && 'rw-drop rw-drop--over')}
+               tabIndex="0"
                onDragOver=${(event) => { if (acceptAssetDrag(event) && !over) setOver(true); }}
                onDragLeave=${() => setOver(false)}
                onDrop=${(event) => {
@@ -1015,13 +1018,43 @@ export function FigureCard(props) {
                  event.preventDefault();
                  setOver(false);
                  takeAsset(event);
+               }}
+               onPaste=${(event) => {
+                 // A FILLED figure takes a paste as well, and the paste
+                 // replaces what is there. Re-taking a screenshot is the
+                 // commonest edit this document gets, and it used to mean
+                 // deleting the whole block -- caption, number and all -- or
+                 // going out to the file picker. Claimed the same way the empty
+                 // frame claims it, so the asset tray's document-level listener
+                 // stands aside and one keystroke writes images/ once.
+                 const files = imageFilesFrom(event.clipboardData);
+                 if (!files.length) return;
+                 event.preventDefault();
+                 take(files);
                }}>
-            <img class="rw-figure__img" src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
-                 style=${{ width: (block.width_cm || 15.5) * 26 + 'px' }}
-                 onLoad=${(event) => {
-                   const node = event.currentTarget;
-                   setSize({ w: node.naturalWidth, h: node.naturalHeight });
-                 }} />
+            <div class="rw-figure__frame">
+              <img class="rw-figure__img" src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
+                   style=${{ width: (block.width_cm || 15.5) * 26 + 'px' }}
+                   onLoad=${(event) => {
+                     const node = event.currentTarget;
+                     setSize({ w: node.naturalWidth, h: node.naturalHeight });
+                   }} />
+              <${IconButton} className="rw-figure__clear" small glyph="✕"
+                             title=${T.clearPicture}
+                             onClick=${(event) => {
+                               event.stopPropagation();
+                               // The PICTURE goes, the figure stays: caption,
+                               // width, block id and therefore the figure
+                               // number all survive, so nothing downstream
+                               // renumbers and no cross-reference breaks. The
+                               // file under images/ is left alone -- another
+                               // block may point at it, and the asset tray is
+                               // where files are deleted.
+                               block.file = '';
+                               refocus.current = true;
+                               acts.changed();
+                             }} />
+            </div>
             <div style=${{ width: '100%' }}>
               <${CaptionRow} numberLabel=${label} value=${block.caption}
                              onChange=${(value) => { block.caption = value; acts.changed(); }} />
@@ -1029,6 +1062,16 @@ export function FigureCard(props) {
             </div>
           </div>` : html`
           <div class=${cx('rw-empty', over && 'rw-empty--over')} tabIndex="0"
+               ref=${(node) => {
+                 // Removing the picture and pasting the new one is ONE gesture.
+                 // The button that was clicked no longer exists once the frame
+                 // is empty, so without this the focus is on the document body
+                 // and the Ctrl+V that was the whole point goes nowhere.
+                 if (node && refocus.current) {
+                   refocus.current = false;
+                   node.focus();
+                 }
+               }}
                onDragOver=${(event) => { event.preventDefault(); if (!over) setOver(true); }}
                onDragLeave=${() => setOver(false)}
                onDrop=${(event) => {
@@ -1148,8 +1191,25 @@ export function FigureGridCard(props) {
                      tabIndex="0"
                      onClick=${() => { slotRef.current = slot; if (fileRef.current) fileRef.current.click(); }}>
                   ${item.file
-                    ? html`<img class="rw-figure__img" src=${api.imgUrl(dir, item.file)} alt=${item.sub || ''}
-                                style=${{ maxHeight: '150px' }} />`
+                    ? html`
+                      <div class="rw-figure__frame">
+                        <img class="rw-figure__img" src=${api.imgUrl(dir, item.file)} alt=${item.sub || ''}
+                             style=${{ maxHeight: '150px' }} />
+                        <${IconButton} className="rw-figure__clear" small glyph="✕"
+                                       title=${T.clearPicture}
+                                       onClick=${(event) => {
+                                         // The cell keeps its place and its
+                                         // sub-caption; only the picture goes.
+                                         // The press must not reach the cell,
+                                         // whose click opens the file picker --
+                                         // clearing would immediately be asked
+                                         // to fill again.
+                                         event.stopPropagation();
+                                         while (items.length <= slot) items.push({ file: '', sub: '' });
+                                         items[slot] = Object.assign({}, items[slot], { file: '' });
+                                         acts.changed();
+                                       }} />
+                      </div>`
                     : html`<span class="rw-micro">${T.dropHint}</span>`}
                 </div>
                 ${block.sub_captions ? html`
