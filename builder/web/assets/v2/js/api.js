@@ -20,6 +20,8 @@
 // bug. Those three get their own ApiError subclasses so a view can branch on
 // the type instead of matching on message text.
 
+import * as diag from './diag.js';
+
 const DEFAULT_TIMEOUT_MS = 15000;
 
 export class ApiError extends Error {
@@ -126,6 +128,22 @@ function errorMessage(payload, response, url) {
 //   rawBody  -- sent verbatim (used by paste-import / copy-diff, whose bodies
 //               are a bare document rather than a wrapper object)
 export async function request(method, path, options) {
+  // Every call is traced for diag.js: what left, what came back, what never
+  // came back. The trace holds the METHOD and the PATH -- never the query, the
+  // body or the answer -- so a pasted diagnostic carries no report content.
+  const trace = diag.started(method + ' ' + path);
+  try {
+    const value = await requestOnce(method, path, options);
+    diag.finished(trace, null);
+    return value;
+  } catch (err) {
+    const status = err && err.status ? ' (HTTP ' + err.status + ')' : '';
+    diag.finished(trace, String((err && err.message) || err) + status);
+    throw err;
+  }
+}
+
+async function requestOnce(method, path, options) {
   const opt = options || {};
   const url = buildUrl(path, opt.query);
   const guard = withTimeout(opt.signal, opt.timeout || DEFAULT_TIMEOUT_MS);

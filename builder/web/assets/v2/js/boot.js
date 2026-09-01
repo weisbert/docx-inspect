@@ -17,6 +17,7 @@
 
 import { store, useStore } from './store.js';
 import * as api from './api.js';
+import * as diag from './diag.js';
 
 /* ------------------------------------------------------------------ *
  * environment
@@ -175,6 +176,7 @@ async function applyHash() {
   }
 
   store.set({ route: next });
+  diag.setRoute(next.view + (next.dir ? ' ' + next.dir : '') + (next.node ? '  node=' + next.node : ''));
   if (next.view === 'editor' && next.dir) {
     if (next.node) store.rememberNode(next.dir, next.node);
     loadReport(next.dir); // a no-op when this report is already loaded
@@ -213,6 +215,7 @@ function trap(err, source) {
   // said so on screen. A caller that lets that rejection escape (Ctrl+S is one)
   // must not raise a second banner for the same failure.
   if (err && err.alreadyReported) return;
+  diag.note(source, describe(err));
   if (trapped >= TRAP_LIMIT) return;
   trapped += 1;
   try {
@@ -229,6 +232,34 @@ function installErrorTrap() {
   });
   window.addEventListener('unhandledrejection', (event) => {
     trap(event && event.reason, 'promise');
+  });
+}
+
+// Not every fault raises a banner -- something that came out wrong, something
+// that took a minute, something that only looks odd -- and those are exactly
+// the ones that cost the most to describe in words. Ctrl+Alt+D copies the same
+// diagnostics the banner offers, at any moment, from any screen.
+function installDiagnosticsKey() {
+  window.addEventListener('keydown', (event) => {
+    if (!event.ctrlKey || !event.altKey || event.shiftKey) return;
+    if (String(event.key || '').toLowerCase() !== 'd') return;
+    event.preventDefault();
+    diag.copyReport({ asked: 'Ctrl+Alt+D' }).then((ok) => {
+      store.pushBanner({
+        level: ok ? 'done' : 'error',
+        code: 'diagnostics',
+        title: ok ? 'Diagnostics copied' : 'Could not reach the clipboard',
+        message: ok
+          ? 'Paste it wherever you are reporting this. It carries the version, '
+            + 'the screen you are on and the last requests -- no report content.'
+          : 'The browser refused the clipboard. Open the console (F12) and copy '
+            + 'the text logged there instead.',
+      });
+      if (!ok) {
+        // eslint-disable-next-line no-console
+        console.log(diag.report({ asked: 'Ctrl+Alt+D' }));
+      }
+    });
   });
 }
 
@@ -336,18 +367,42 @@ async function loadView(name) {
 // css/app.css can style it.
 function BootBanners() {
   const banners = useStore((s) => s.banners);
+  const [copied, setCopied] = useState(0);
   if (!banners || !banners.length) return null;
+
+  // WHY THERE IS A COPY BUTTON HERE
+  //   The only way a fault gets from this machine to whoever can fix it is a
+  //   human retyping it, and what survives that trip is "it broke". One click
+  //   puts the whole picture -- version, address, the requests that failed and
+  //   the ones that never came back -- on the clipboard as plain text.
+  const copy = (banner) => {
+    diag.copyReport({ banner: (banner.code || 'error') + ': ' + banner.message })
+      .then((ok) => setCopied(ok ? Date.now() : -1));
+  };
+
+  const tone = (level) =>
+    (level === 'attention' ? 'attention' : level === 'done' ? 'done' : 'blocking');
+  const glyph = (level) => (level === 'attention' ? '!' : level === 'done' ? '✓' : '✕');
+
   return html`
     <div class="rw-banners">
       ${banners.map(
         (b) => html`
-          <div class="rw-banner rw-banner-${b.level || 'error'}" key=${b.id} role="alert">
-            <span class="rw-banner-glyph">${b.level === 'attention' ? '!' : b.level === 'done' ? '✓' : '✕'}</span>
-            <div class="rw-banner-body">
-              <div class="rw-banner-title">Something went wrong</div>
-              <div class="rw-banner-message">${b.message}</div>
+          <div class=${'rw-banner rw-banner--' + tone(b.level)} key=${b.id} role="alert">
+            <span class="rw-banner__glyph" aria-hidden="true">${glyph(b.level)}</span>
+            <div class="rw-banner__body">
+              <div class="rw-banner__title">
+                ${b.title || (b.level === 'done' ? 'Done' : 'Something went wrong')}
+              </div>
+              <div class="rw-banner__message">${b.message}</div>
             </div>
-            <button class="rw-banner-close" type="button" onClick=${() => store.dismissBanner(b.id)}>Close</button>
+            <div class="rw-banner__actions">
+              <button class="rw-btn rw-btn--tertiary" type="button" onClick=${() => copy(b)}>
+                ${copied > 0 ? 'Copied' : copied < 0 ? 'Copy failed' : 'Copy details'}
+              </button>
+              <button class="rw-btn rw-btn--tertiary" type="button"
+                      onClick=${() => store.dismissBanner(b.id)}>Close</button>
+            </div>
           </div>
         `
       )}
@@ -464,7 +519,9 @@ export async function refreshTree() {
 
 async function loadVersion() {
   try {
-    store.set({ version: await api.getVersion() });
+    const version = await api.getVersion();
+    store.set({ version: version });
+    diag.setVersion(version);
   } catch (err) {
     // A server without /api/version is simply a server with no update to report.
     store.set({ version: null });
@@ -548,6 +605,7 @@ function mountPoint() {
 
 async function start() {
   installErrorTrap();
+  installDiagnosticsKey();
   installUnloadGuard();
   store.restoreUi();
 
