@@ -432,6 +432,13 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-tree__label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rw-tree__count { flex: 0 0 auto; color: var(--fg-dim); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
 .rw-tree__group { margin-top: var(--sp-9); }
+/* A row's kind, two letters wide: template text, a table inside, added here.
+   Muted on purpose - it is an aside to the title, never competition for it. */
+.rw-tree__badge {
+  flex: 0 0 auto; padding: 0 var(--sp-4); border: 1px solid var(--line);
+  border-radius: var(--r-ctl); background: var(--bg-subtle);
+  color: var(--fg-dim); font-size: var(--fs-micro); line-height: 15px;
+}
 
 .rw-home__detail { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .rw-home__header { flex: 0 0 auto; padding: 14px 20px; background: var(--bg-panel); border-bottom: 1px solid var(--line); }
@@ -490,6 +497,7 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
   background: var(--bg-sunken); border-right: 1px solid var(--line);
 }
 .rw-editor__railtop { flex: 0 0 auto; display: flex; flex-direction: column; gap: var(--sp-6); padding: var(--sp-9); }
+.rw-editor__railhead { display: flex; align-items: center; gap: var(--sp-2); }
 .rw-editor__legend { display: flex; align-items: center; gap: var(--sp-9); font-size: var(--fs-micro); color: var(--fg-dim); }
 .rw-editor__railbody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 var(--sp-6) var(--sp-16); }
 .rw-editor__centre { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-app); }
@@ -595,6 +603,9 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-prose { font-size: var(--fs-body); color: var(--fg); outline: none; }
 .rw-prose p { margin: 0 0 var(--sp-6); }
 .rw-prose--marks p::after { content: "\00B6"; margin-left: var(--sp-2); color: var(--accent-line); }
+/* The template's own words, shown but not editable: dimmed so the difference
+   between reading and typing is visible before the caret is tried. */
+.rw-prose--fixed { color: var(--fg-muted); margin-bottom: var(--sp-6); }
 .rw-ref { display: inline-flex; align-items: center; padding: 0 var(--sp-4); border-radius: var(--r-grid); background: var(--accent-wash); color: var(--accent); cursor: pointer; }
 /* A reference whose target is gone. It reads as broken because it IS broken:
  * the export prints a red marker where this sits. */

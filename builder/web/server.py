@@ -105,6 +105,12 @@ def config_slice(template_query=None):
         "ui_strings": tc.get("ui_strings", {}),
         "cover": tc.get("cover", {}),
         "compliance": _compliance_defaults(tc.get("compliance", {})),
+        # fixed_bodies: the standard paragraphs a section can be pinned to
+        # (`node.fixed_body` is a key into this map). The GUI needs them to show
+        # what such a section holds and to turn it into ordinary editable blocks
+        # when the user overrides it; the engine reads the same map, so the two
+        # sides agree on what the section says.
+        "fixed_bodies": tc.get("fixed_bodies", {}),
         # table_presets: company-defined starter tables (with condition rows
         # baked in). Content lives in the local template config; the engine/app
         # stay neutral -- this just forwards the list to the block picker (WS4).

@@ -98,11 +98,37 @@ const S = {
   insertSectionAbove: 'Insert section above',
   insertSectionBelow: 'Insert section below',
   insertSubsection: 'Insert subsection',
+  makeSubsection: 'Make a subsection',
+  raiseALevel: 'Raise a level',
+  keyDemote: 'Alt+→',
+  keyPromote: 'Alt+←',
+  pasteSectionBelow: 'Paste section below',
+  pasteSectionInside: 'Paste section as subsection',
+  pasteSectionTitle: 'Paste section',
+  pasteSectionHint: 'Paste a copied section here.',
+  pasteNothing: 'Nothing to paste',
+  pasteNotASection: 'This text is not a section',
+  pasteTooMany: 'This text holds a whole report, not one section',
+  pasteIsAnUpdate: 'This is an update for a whole report — open the text exchange',
+  sectionPasted: 'Section pasted',
+  figuresCopied: 'figures copied in',
   duplicate: 'Duplicate',
   deleteLabel: 'Delete',
   untitledSection: 'Untitled section',
   sectionDeleted: 'Section deleted',
   fixedTemplateText: 'Fixed template text',
+  fixedFromTemplate: 'This text comes from the template and is the same in every report.',
+  editThisText: 'Edit this text',
+  textNowEditable: 'The template text is now yours to edit',
+  textNowEditableFonts: 'The template text is now yours to edit — its fonts now come from the paragraph style',
+  badgeFixed: 'Fx',
+  badgeTable: 'Tb',
+  badgeUser: 'New',
+  badgeFixedTitle: 'Fixed template text',
+  badgeTableTitle: 'Holds a table',
+  badgeUserTitle: 'Added to this report',
+  expandAll: 'Expand all',
+  collapseAll: 'Collapse all',
   // section bar
   copyWholeSection: 'Copy whole section',
   previousSection: 'Previous section',
@@ -383,6 +409,53 @@ function findRow(rows, id) {
   return null;
 }
 
+/* ---- changing a section's level ---- */
+
+// Both movers take a row from flattenOutline and mutate the outline in place, so
+// the caller wraps them in edit(). They are the same two operations drag already
+// performs by hand -- a section only ever travels between its own siblings and
+// the level directly above or below -- written once, as functions, so the menu
+// and the keyboard cannot drift apart.
+//
+// A section's OWN blocks travel with it, and so does everything under it. The
+// numbers on screen and the figure/table numbers inside it are both derived from
+// the outline (flattenOutline and util.computeCaptionNumbers), so moving a
+// section between chapters renumbers its figures with no extra step here.
+
+// One level deeper: the section becomes the last child of the sibling above it.
+// Returns that sibling's id (the row that must now be expanded for the moved
+// section to stay on screen), or null when there is nothing above it to go into.
+export function demoteInto(row) {
+  if (!row || !row.siblings) return null;
+  const list = row.siblings;
+  const at = list.indexOf(row.node);
+  if (at <= 0) return null;
+  const host = list[at - 1];
+  if (!host || typeof host !== 'object') return null;
+  list.splice(at, 1);
+  if (!Array.isArray(host.children)) host.children = [];
+  host.children.push(row.node);
+  return host.id || null;
+}
+
+// One level up: the section leaves its parent and becomes the parent's next
+// sibling, so it lands directly below the section it came out of. Returns
+// whether anything moved -- a top-level chapter has nowhere to go.
+export function promoteOut(row, rows) {
+  if (!row || !row.parent) return false;
+  const parentRow = findRow(rows || [], row.parent.id);
+  if (!parentRow) return false;
+  const list = row.siblings;
+  const at = list.indexOf(row.node);
+  if (at === -1) return false;
+  const up = parentRow.siblings;
+  const host = up.indexOf(parentRow.node);
+  if (host === -1) return false;
+  list.splice(at, 1);
+  up.splice(host + 1, 0, row.node);
+  return true;
+}
+
 /* ---- block factories (used unless views/blocks.js publishes its own) ---- */
 
 export function newBlock(type, cfg) {
@@ -478,6 +551,67 @@ export function tableFromPreset(cfg, preset) {
   };
 }
 
+/* ---- a fixed template body, turned into ordinary blocks ---- */
+
+// A section can be pinned to a paragraph run the template owns: `fixed_body`
+// names an entry in the template config's `fixed_bodies`, and core/engine.py
+// renders THAT and ignores the section's own blocks ("fixed body wins over
+// blocks"). Overriding such a section therefore means two things at once --
+// dropping the key AND putting the same words in as blocks -- because dropping
+// the key alone silently deletes a page of standard text from the exported file.
+//
+// The two renderers are the same shape, so the translation is exact for what the
+// block model can carry:
+//
+//   engine._render_fixed_body   style = para.style or fixed_body.style, then one
+//                               run per {t,b,i,color}, then _apply_list(list,level)
+//   engine._render_para         style = block.style, then one run per
+//                               {t,b,i,color}, then _apply_list(list,level)
+//
+// so every paragraph becomes a `para` block carrying its RESOLVED style (the
+// block model has no group-level default to inherit from), its runs verbatim and
+// its list kind and level. The result renders byte for byte like the fixed body
+// it replaced -- see builder/tests/test_fixed_body_unlock.py, which renders a
+// section both ways and compares the paragraphs.
+//
+// One gap, and it is the engine's rather than this file's: a fixed-body run may
+// name a font (`ascii` / `eastAsia`, honoured by run_fmt); a block run has no
+// field for one and _render_para never passes it, so a converted run falls back
+// to its paragraph style's font. The keys are carried across anyway so the
+// information is not destroyed by the conversion itself.
+// True when the conversion above would lose a font: the ONE thing a fixed-body
+// run can say that a block run cannot. The user is told rather than left to find
+// out in Word, because a report's standard text can name a font its paragraph
+// style does not use.
+export function fixedBodyNamesFonts(fb) {
+  const paragraphs = (fb && Array.isArray(fb.paragraphs)) ? fb.paragraphs : [];
+  return paragraphs.some((para) => ((para && para.runs) || [])
+    .some((run) => run && (run.ascii || run.eastAsia)));
+}
+
+export function blocksFromFixedBody(fb) {
+  if (!fb || typeof fb !== 'object') return null;
+  const paragraphs = Array.isArray(fb.paragraphs) ? fb.paragraphs : null;
+  if (!paragraphs || !paragraphs.length) return null;
+  return paragraphs.map((para, i) => {
+    const source = para && typeof para === 'object' ? para : {};
+    const block = {
+      type: 'para',
+      list: source.list || null,
+      runs: (Array.isArray(source.runs) ? source.runs : [])
+        .map((run) => (run && typeof run === 'object' ? Object.assign({}, run) : { t: text(run) })),
+    };
+    const style = source.style || fb.style;
+    if (style) block.style = style;
+    const level = Number(source.level);
+    if (level) block.level = level;
+    // The whole body arrives as ONE text card: it was one block of prose in the
+    // template and it reads as one here, so only the first paragraph opens a card.
+    if (i === 0) block.cardStart = true;
+    return block;
+  });
+}
+
 function newSection() {
   return { id: uid(), title: '', blocks: [], children: [] };
 }
@@ -491,6 +625,14 @@ function cloneSection(node) {
   };
   fresh(copy);
   return copy;
+}
+
+// A section that arrived by paste belongs to this report rather than to the
+// template it was drawn from, and the outline says so with the 'New' mark.
+function markUserOrigin(node) {
+  if (!node || typeof node !== 'object') return;
+  node.origin = 'user';
+  (node.children || []).forEach(markUserOrigin);
 }
 
 /* ------------------------------------------------------------------ *
@@ -831,11 +973,28 @@ export function visibleRows(rows, query, expanded) {
   });
 }
 
+// What a row says about itself beyond its title, in the smallest form that still
+// answers a question the reader has before they click: is this section's text the
+// template's rather than mine, does it hold a table, and did I add it to this
+// report? Two muted letters each, named in full by the tooltip. The status dot
+// says how full the section is; these say what KIND of section it is, which is
+// why they are a separate mark and not another colour on the dot.
+function rowBadges(node) {
+  const marks = [];
+  if (node.fixed_body) marks.push({ text: S.badgeFixed, title: S.badgeFixedTitle });
+  if ((node.blocks || []).some((b) => b && (b.type === 'datatable' || b.type === 'table'))) {
+    marks.push({ text: S.badgeTable, title: S.badgeTableTitle });
+  }
+  if (node.origin === 'user') marks.push({ text: S.badgeUser, title: S.badgeUserTitle });
+  return marks;
+}
+
 function OutlineRow(props) {
   const { row, selected, renaming } = props;
   const status = props.status;
   const hasChildren = (row.node.children || []).length > 0;
   const canTwisty = hasChildren && row.depth >= 1;
+  const badges = rowBadges(row.node);
 
   if (renaming) {
     return html`
@@ -892,13 +1051,20 @@ function OutlineRow(props) {
       <${StatusDot} status=${status} />
       <span class="rw-tree__count">${row.number}</span>
       <span class="rw-tree__label">${text(row.node.title) || S.untitledSection}</span>
+      ${badges.map((badge) => html`
+        <span class="rw-tree__badge" key=${badge.text}
+              title=${badge.title} aria-label=${badge.title}>${badge.text}</span>`)}
     </div>`;
 }
 
 function OutlineRail(props) {
   const { project, dir, selectedId } = props;
   const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState({});
+  // Which rows are open. The state lives in the screen, not here, because a
+  // section that changes level has to be revealed by the same gesture that moved
+  // it -- and that gesture also arrives from the keyboard, which the screen owns.
+  const expanded = props.expanded || {};
+  const setExpanded = props.onExpanded;
   const [dragId, setDragId] = useState(null);
   const [overSeam, setOverSeam] = useState(-1);
   const [renaming, setRenaming] = useState(null);   // {id, draft}
@@ -983,6 +1149,9 @@ function OutlineRail(props) {
 
   const contextItems = (row) => ([
     { label: S.rename, glyph: '✎', onClick: () => setRenaming({ id: row.node.id, draft: text(row.node.title) }) },
+    ...(row.node.fixed_body
+      ? [{ label: S.editThisText, glyph: '✐', onClick: () => props.onUnlockSection(row) }]
+      : []),
     { label: S.insertSectionAbove, glyph: '↑', separatorBefore: true, onClick: () => insertSibling(row, 0) },
     { label: S.insertSectionBelow, glyph: '↓', onClick: () => insertSibling(row, 1) },
     {
@@ -994,10 +1163,35 @@ function OutlineRail(props) {
           if (!Array.isArray(row.node.children)) row.node.children = [];
           row.node.children.push(created);
         });
-        setExpanded(Object.assign({}, expanded, { [row.node.id]: true }));
+        setExpanded((prev) => Object.assign({}, prev, { [row.node.id]: true }));
         props.onSelect(created.id);
         setRenaming({ id: created.id, draft: '' });
       },
+    },
+    {
+      label: S.pasteSectionBelow,
+      glyph: '⇩',
+      onClick: () => props.onPasteSection(row, 'after'),
+    },
+    {
+      label: S.pasteSectionInside,
+      glyph: '⇨',
+      onClick: () => props.onPasteSection(row, 'child'),
+    },
+    {
+      label: S.makeSubsection,
+      glyph: '⇥',
+      key: S.keyDemote,
+      separatorBefore: true,
+      disabled: row.index === 0,
+      onClick: () => props.onDemoteSection(row),
+    },
+    {
+      label: S.raiseALevel,
+      glyph: '⇤',
+      key: S.keyPromote,
+      disabled: !row.parent,
+      onClick: () => props.onPromoteSection(row),
     },
     {
       label: S.duplicate,
@@ -1017,6 +1211,18 @@ function OutlineRail(props) {
     },
   ]);
 
+  // Open or close the whole tree at once. Only a row that DRAWS a twisty can be
+  // opened -- the rail's two top levels are always on screen and hold no state of
+  // their own -- so nothing else is written, and "expand all" cannot leave a flag
+  // behind on a row with no control to clear it.
+  const expandAll = () => {
+    const next = {};
+    rows.forEach((row) => {
+      if (row.depth >= 1 && (row.node.children || []).length) next[row.node.id] = true;
+    });
+    setExpanded(next);
+  };
+
   const seam = (index) => html`
     <div key=${'seam' + index}
          class=${cx('rw-outline__seam', overSeam === index && 'rw-outline__seam--over')}
@@ -1032,7 +1238,13 @@ function OutlineRail(props) {
   return html`
     <aside class="rw-editor__rail">
       <div class="rw-editor__railtop">
-        <div class="rw-item-title">${S.sections}</div>
+        <div class="rw-editor__railhead">
+          <div class="rw-item-title">${S.sections}</div>
+          <span class="rw-spacer"></span>
+          <${IconButton} glyph="⊞" small title=${S.expandAll} onClick=${expandAll} />
+          <${IconButton} glyph="⊟" small title=${S.collapseAll}
+                         onClick=${() => setExpanded({})} />
+        </div>
         <div class="rw-search">
           <span class="rw-search__glyph" aria-hidden="true">⌕</span>
           <input class="rw-input rw-input--bar" type="text" ref=${props.searchRef}
@@ -1084,8 +1296,8 @@ function OutlineRail(props) {
                 }}
                 onCancel=${() => setRenaming(null)}
                 onRename=${(target) => setRenaming({ id: target.node.id, draft: text(target.node.title) })}
-                onToggle=${(target) => setExpanded(Object.assign({}, expanded,
-                  { [target.node.id]: !expanded[target.node.id] }))}
+                onToggle=${(target) => setExpanded((prev) => Object.assign({}, prev,
+                  { [target.node.id]: !prev[target.node.id] }))}
                 onSelect=${(target) => props.onSelect(target.node.id)}
                 onContext=${(ev, target) => {
                   // Deliberately no selection here: selecting a section moves the
@@ -1490,6 +1702,11 @@ function Canvas(props) {
   if (!node) return html`<div class="rw-canvas"></div>`;
 
   if (node.fixed_body) {
+    // Read-only, and it says why -- plus the one way out. The words themselves
+    // come from the template config, so a section pinned to a body the current
+    // template does not define shows the placeholder alone.
+    const fixed = ((cfg && cfg.fixed_bodies) || {})[node.fixed_body];
+    const paragraphs = (fixed && Array.isArray(fixed.paragraphs)) ? fixed.paragraphs : [];
     return html`
       <div class="rw-canvas">
         <div class="rw-canvas__inner">
@@ -1497,6 +1714,16 @@ function Canvas(props) {
             <div class="rw-card__head">
               <span class="rw-card__marker" aria-hidden="true"></span>
               <span class="rw-card__type">${S.fixedTemplateText}</span>
+              <span class="rw-card__meta">${S.fixedFromTemplate}</span>
+              <div class="rw-card__tools">
+                <${Button} level="tertiary" onClick=${props.onUnlock}>${S.editThisText}<//>
+              </div>
+            </div>
+            <div class="rw-card__body">
+              ${paragraphs.map((para, i) => html`
+                <div class="rw-prose rw-prose--fixed" key=${i}>
+                  ${((para && para.runs) || []).map((run) => text(run && run.t)).join('')}
+                </div>`)}
             </div>
           </div>
         </div>
@@ -2112,6 +2339,126 @@ function sectionAsText(node, number) {
   return lines.join('\n');
 }
 
+/* ------------------------------------------------------------------ *
+ * Bringing a section back in
+ * ------------------------------------------------------------------ */
+
+// A section copied here stays available in localStorage, so it survives a switch
+// to another report and a reload of the tool. It is deliberately NOT the system
+// clipboard: that one carries the reading copy above, which is the thing the
+// user pastes into the conversation.
+const SECTION_CLIP_KEY = 'rw.sectionClip';
+
+export function setSectionClip(dir, node) {
+  const payload = { v: 1, dir: dir || '', node: JSON.parse(JSON.stringify(node)) };
+  try {
+    window.localStorage.setItem(SECTION_CLIP_KEY, JSON.stringify(payload));
+  } catch (err) { /* storage is a convenience, never a requirement */ }
+  return payload;
+}
+
+export function getSectionClip() {
+  try {
+    const raw = window.localStorage.getItem(SECTION_CLIP_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' && parsed.node ? parsed : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Anything that looks like ONE section, from whatever the user had to hand.
+// Three shapes are accepted, and they are the three shapes this product already
+// writes: the clipboard record above, a bare section node, and the report
+// payload the exchange speaks (views/sync.js reads the same `{outline:[...]}`
+// object, so a report pasted in here and a report pasted into the exchange
+// drawer are the same text). A whole report with several chapters is refused
+// rather than guessed at -- inserting a document into a section is not a paste.
+//
+// An update delta (`_reportdiff`) is refused on purpose too: it describes edits
+// to a report that already exists, which the exchange drawer applies as a whole.
+// Returns {node} or {error}.
+export function sectionFromPayload(value) {
+  let data = value;
+  if (typeof data === 'string') {
+    const trimmed = data.trim();
+    if (!trimmed) return { error: S.pasteNothing };
+    try {
+      data = JSON.parse(trimmed);
+    } catch (err) {
+      return { error: S.pasteNotASection };
+    }
+  }
+  if (!data || typeof data !== 'object') return { error: S.pasteNotASection };
+  if (data._reportdiff) return { error: S.pasteIsAnUpdate };
+  if (data.node && typeof data.node === 'object') {
+    const inner = sectionFromPayload(data.node);
+    // The wrapper names the report the section came from, which is what decides
+    // whether its figures have to be carried across.
+    if (inner.node && data.dir) inner.dir = String(data.dir);
+    return inner;
+  }
+  if (Array.isArray(data.outline)) {
+    const roots = data.outline.filter((n) => n && typeof n === 'object');
+    if (roots.length === 1) return sectionFromPayload(roots[0]);
+    return { error: roots.length ? S.pasteTooMany : S.pasteNotASection };
+  }
+  const looksLikeSection = Object.prototype.hasOwnProperty.call(data, 'title')
+    && (Array.isArray(data.blocks) || Array.isArray(data.children));
+  if (!looksLikeSection) return { error: S.pasteNotASection };
+  return { node: data };
+}
+
+// Every figure the section carries, at any depth -- the blocks whose files have
+// to travel with it when it lands in a different report.
+function sectionImages(node, out) {
+  const list = out || [];
+  (node.blocks || []).forEach((block) => {
+    if (!block) return;
+    if (block.type === 'image') list.push(block);
+    if (block.type === 'imagegrid') (block.items || []).forEach((item) => {
+      if (item && typeof item === 'object') list.push(item);
+    });
+  });
+  (node.children || []).forEach((child) => sectionImages(child, list));
+  return list;
+}
+
+// A pasted section points at files in the report it came from, and every image
+// must live in THIS report's images/ subdirectory. Each one is fetched from the
+// source report and stored here, and the block is repointed at the new name. A
+// file that cannot be fetched or stored keeps its old reference: a broken figure
+// the user can see and replace is better than a figure silently emptied.
+async function carrySectionImages(node, fromDir, toDir) {
+  const blocks = sectionImages(node, []).filter((b) => text(b.file).trim() !== '');
+  let moved = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    try {
+      const response = await fetch(api.imgUrl(fromDir, block.file));
+      if (!response.ok) continue;
+      const bytes = await response.blob();
+      const name = text(block.file).split('/').pop() || 'image.png';
+      const stored = await api.putImage(toDir, node.id || '', name, bytes);
+      const file = stored && stored.file;
+      if (file) {
+        block.file = String(file).replace(/\\/g, '/');
+        moved += 1;
+      }
+    } catch (err) { /* the reference stays as it was */ }
+  }
+  return moved;
+}
+
+async function readClipboardText() {
+  try {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      return await navigator.clipboard.readText();
+    }
+  } catch (err) { /* the browser refused; the dialog asks instead */ }
+  return '';
+}
+
 async function copyText(value) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -2154,6 +2501,12 @@ export function Editor(props) {
   const [toast, setToast] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [newReport, setNewReport] = useState(false);
+  // Which outline rows are open, held here rather than in the rail: the rail
+  // draws the twisties, but promoting and demoting a section arrive from the
+  // keyboard as well, and a move has to be able to open the row it moved into.
+  const [expanded, setExpanded] = useState({});
+  // {row, where, draft, error} while the paste dialog is asking for the text.
+  const [pasteInto, setPasteInto] = useState(null);
   // Editing marks live on store.ui.marks -- the key views/blocks.js reads when it
   // draws the pilcrows -- so the toolbar's toggle, the overflow menu's entry and
   // a card's own toggle are all one switch.
@@ -2255,6 +2608,59 @@ export function Editor(props) {
     edit(() => { node.blocks.splice(start + count, 0, ...copies); });
   };
 
+  /* ---- overriding a fixed template body ---- */
+
+  // The section stops being pinned to the template's words and starts holding
+  // them itself, so the user can edit them. It is one gesture with an undo
+  // rather than a confirmation: the section reads exactly the same afterwards
+  // (see blocksFromFixedBody), so there is nothing to be warned about -- only
+  // something to be able to take back.
+  const unlockSection = (row) => {
+    const node = row && row.node;
+    if (!node || !node.fixed_body) return;
+    const key = node.fixed_body;
+    const hadBlocks = Array.isArray(node.blocks) ? node.blocks.slice() : [];
+    const fixed = ((cfg && cfg.fixed_bodies) || {})[key];
+    const converted = blocksFromFixedBody(fixed);
+    edit(() => {
+      delete node.fixed_body;
+      // The converted paragraphs REPLACE whatever the node was carrying: while
+      // the key was there the engine rendered none of it, so keeping both would
+      // print text the report never showed.
+      node.blocks = converted && converted.length
+        ? converted
+        : (hadBlocks.length ? hadBlocks : [newBlock('para', cfg)]);
+    });
+    select(node.id);
+    setToast({
+      text: (converted && fixedBodyNamesFonts(fixed))
+        ? S.textNowEditableFonts : S.textNowEditable,
+      action: S.undo,
+      onAction: () => {
+        edit(() => { node.fixed_body = key; node.blocks = hadBlocks; });
+        setToast(null);
+      },
+    });
+  };
+
+  /* ---- changing a section's level ---- */
+
+  // One level deeper. The section it moves into is opened in the same breath:
+  // a move whose result is hidden reads as a section that vanished.
+  const demoteSection = (row) => {
+    if (!row || row.index === 0) return;
+    let host = null;
+    edit(() => { host = demoteInto(row); });
+    if (host) setExpanded((prev) => Object.assign({}, prev, { [host]: true }));
+    select(row.node.id);
+  };
+
+  const promoteSection = (row) => {
+    if (!row || !row.parent) return;
+    edit(() => { promoteOut(row, rows); });
+    select(row.node.id);
+  };
+
   const deleteSection = (row) => {
     const list = row.siblings;
     const at = list.indexOf(row.node);
@@ -2306,6 +2712,19 @@ export function Editor(props) {
           ? (step > 0 ? 0 : rows.length - 1)
           : Math.max(0, Math.min(rows.length - 1, rowIndex + step));
         select(rows[next].node.id);
+        return;
+      }
+      // Alt+← / Alt+→ change the current section's LEVEL, completing the Alt+arrow
+      // scheme Alt+↑/↓ started: the vertical pair walks the outline, the
+      // horizontal pair reshapes it. Unlike walking, reshaping is an edit, so it
+      // steps aside while anything inside a card holds the keyboard -- Alt+arrow
+      // moves by word in a text field, and a keystroke aimed at a sentence must
+      // never restructure the document instead.
+      if (ev.altKey && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
+        if (!currentRow || keyboardIsClaimed()) return;
+        ev.preventDefault();
+        if (ev.key === 'ArrowRight') demoteSection(currentRow);
+        else promoteSection(currentRow);
         return;
       }
       if (ev.key === 'Escape') {
@@ -2365,8 +2784,71 @@ export function Editor(props) {
 
   const copySection = async () => {
     if (!currentRow) return;
+    // Two copies, because they answer two different needs and neither can serve
+    // the other: the system clipboard takes the READING copy that goes into the
+    // conversation, and the app's own clipboard takes the section itself, which
+    // is what a paste back into this report (or another one) needs.
+    setSectionClip(dir, currentRow.node);
     const ok = await copyText(sectionAsText(currentRow.node, currentRow.number));
     if (ok) setToast({ text: S.copied });
+  };
+
+  /* ---- pasting a section back in ---- */
+
+  const insertPastedNode = async (row, where, node, fromDir) => {
+    if (!row || !node) return;
+    const fresh = cloneSection(node);
+    markUserOrigin(fresh);
+    edit(() => {
+      if (where === 'child') {
+        if (!Array.isArray(row.node.children)) row.node.children = [];
+        row.node.children.push(fresh);
+      } else {
+        row.siblings.splice(row.index + 1, 0, fresh);
+      }
+    });
+    if (where === 'child' && row.node.id) {
+      setExpanded((prev) => Object.assign({}, prev, { [row.node.id]: true }));
+    }
+    select(fresh.id);
+    setToast({ text: S.sectionPasted });
+    // A section from another report points at that report's files. Every image
+    // must live in THIS report's images/, so they are fetched and stored here
+    // before the user finds out at export time that the figures are missing.
+    if (fromDir && dir && fromDir !== dir) {
+      const moved = await carrySectionImages(fresh, fromDir, dir);
+      if (moved) {
+        edit(() => {});
+        setToast({ text: S.sectionPasted + ' · ' + moved + ' ' + S.figuresCopied });
+      }
+    }
+  };
+
+  // What the user has to paste, asked for in the order they are likely to mean
+  // it: the system clipboard first (a section someone sent them as text), then
+  // this tool's own section clipboard (the last Copy whole section, which put
+  // the READING copy on the system clipboard and the section itself here). With
+  // neither, the dialog asks for the text rather than failing silently.
+  const pasteSection = async (row, where) => {
+    const pasted = sectionFromPayload(await readClipboardText());
+    if (pasted.node) return insertPastedNode(row, where, pasted.node, pasted.dir);
+    const clip = getSectionClip();
+    const held = clip ? sectionFromPayload(clip) : { error: S.pasteNothing };
+    if (held.node) return insertPastedNode(row, where, held.node, held.dir);
+    setPasteInto({ row: row, where: where, draft: '', error: null });
+    return undefined;
+  };
+
+  const confirmPaste = () => {
+    if (!pasteInto) return;
+    const parsed = sectionFromPayload(pasteInto.draft);
+    if (!parsed.node) {
+      setPasteInto(Object.assign({}, pasteInto, { error: parsed.error }));
+      return;
+    }
+    const target = pasteInto;
+    setPasteInto(null);
+    insertPastedNode(target.row, target.where, parsed.node, parsed.dir);
   };
 
   if (!dir) return html`<div class="rw-app"></div>`;
@@ -2395,7 +2877,12 @@ export function Editor(props) {
             project=${project} dir=${dir} selectedId=${nodeId}
             coverMissing=${missing.length}
             searchRef=${searchRef}
+            expanded=${expanded} onExpanded=${setExpanded}
             onSelect=${select}
+            onPromoteSection=${promoteSection}
+            onDemoteSection=${demoteSection}
+            onPasteSection=${pasteSection}
+            onUnlockSection=${unlockSection}
             onDeleteSection=${deleteSection} />
 
           <div class="rw-editor__centre">
@@ -2428,6 +2915,7 @@ export function Editor(props) {
                     <${Canvas}
                       node=${currentRow.node} dir=${dir} cfg=${cfg} project=${project}
                       canvasRef=${canvasRef}
+                      onUnlock=${() => unlockSection(currentRow)}
                       editingMarks=${editingMarks}
                       selectedBlock=${selectedBlock}
                       selectedStart=${selectedStart}
@@ -2467,6 +2955,26 @@ export function Editor(props) {
         : null}
       ${newReport
         ? html`<${NewReportDialog} here=${here} dir=${dir} onClose=${() => setNewReport(false)} />`
+        : null}
+      ${pasteInto
+        ? html`
+          <${Dialog} title=${S.pasteSectionTitle} width=${520}
+                     onClose=${() => setPasteInto(null)} scrimCloses=${false}
+            footer=${html`
+              <${Button} level="tertiary" onClick=${() => setPasteInto(null)}>${S.cancel}<//>
+              <${Button} level="primary" onClick=${confirmPaste}>${S.pasteSectionTitle}<//>`}>
+            <div class="rw-field">
+              <label class="rw-field__label">${S.pasteSectionHint}</label>
+              <textarea class="rw-textarea" autoFocus aria-label=${S.pasteSectionTitle}
+                        value=${pasteInto.draft}
+                        onInput=${(ev) => setPasteInto(Object.assign({}, pasteInto, {
+                          draft: ev.currentTarget.value, error: null,
+                        }))}></textarea>
+              ${pasteInto.error
+                ? html`<div class="rw-field__hint rw-field__hint--bad">${pasteInto.error}</div>`
+                : null}
+            </div>
+          <//>`
         : null}
       ${ExportDialog ? html`<${ExportDialog} />` : null}
       ${toast
