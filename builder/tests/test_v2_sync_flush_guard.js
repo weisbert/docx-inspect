@@ -277,10 +277,11 @@ const BLOCK_SAVES = `(() => {
 
 // Find a button by its exact label, or by its first words for the labels that
 // carry a count ("Apply · 0 decided").
-function buttonScript(label) {
+function buttonScript(label, scope) {
   return `(() => {
     const want = ${JSON.stringify(label)};
-    const all = Array.from(document.querySelectorAll('button'));
+    const root = document.querySelector(${JSON.stringify(scope || 'body')}) || document.body;
+    const all = Array.from(root.querySelectorAll('button'));
     const hit = all.filter((b) => {
       const t = b.textContent.trim();
       return t === want || t.indexOf(want) === 0;
@@ -290,9 +291,9 @@ function buttonScript(label) {
   })()`;
 }
 
-function clickScript(label) {
+function clickScript(label, scope) {
   return `(() => {
-    const found = ${buttonScript(label)};
+    const found = ${buttonScript(label, scope)};
     if (!found.found) return 'no button: ' + JSON.stringify(found.seen);
     if (found.disabled) return 'disabled: ' + ${JSON.stringify(label)};
     found.el.click();
@@ -302,13 +303,31 @@ function clickScript(label) {
 
 // Edit the document and press the button in ONE synchronous step, so the
 // autosave debounce cannot land the edit by luck.
-function editAndClickScript(text, label) {
+function editAndClickScript(text, label, scope) {
   return `(async () => {
     const { store } = await import('/assets/v2/js/store.js');
     const project = store.get().project;
     project.outline[0].blocks[0].runs[0].t = ${JSON.stringify(text)};
     store.markDirty();
-    return ${clickScript(label)};
+    return ${clickScript(label, scope)};
+  })()`;
+}
+
+// A restore asks before it drops the work done since the state it puts back
+// (see test_v2_exchange.js), so pressing the entry's button opens the question
+// and the answer is the second press. Still one step for the purposes of this
+// file: the save is blocked throughout, so nothing can reach the disk between
+// the two.
+function editAndRestoreScript(text) {
+  return `(async () => {
+    const { store } = await import('/assets/v2/js/store.js');
+    const project = store.get().project;
+    project.outline[0].blocks[0].runs[0].t = ${JSON.stringify(text)};
+    store.markDirty();
+    const opened = ${clickScript('Restore this state')};
+    if (opened !== 'clicked') return opened;
+    await new Promise((r) => setTimeout(r, 120));
+    return ${clickScript('Restore this state', '.rw-dialog__foot')};
   })()`;
 }
 
@@ -430,7 +449,7 @@ const MEMORY = `(async () => {
     await open(KEPT_DIR);
     await page.evaluate(BLOCK_SAVES);
     await openDrawer('History');
-    const r1 = await page.evaluate(editAndClickScript(EDIT, 'Restore this state'));
+    const r1 = await page.evaluate(editAndRestoreScript(EDIT));
     check('the restore was pressed while a save was owed', r1 === 'clicked', String(r1));
     await wait(7000);
     check('project.json was not replaced by the snapshot',
@@ -468,7 +487,7 @@ const MEMORY = `(async () => {
     check('the comparison ran and Continue was pressed', c1 === 'clicked', String(c1));
     await wait(900);
     await page.evaluate(BLOCK_SAVES);
-    const r3 = await page.evaluate(editAndClickScript(EDIT, 'Apply ·'));
+    const r3 = await page.evaluate(editAndClickScript(EDIT, 'Apply', '.rw-dialog__foot'));
     check('the merge apply was pressed while a save was owed', r3 === 'clicked', String(r3));
     await wait(7000);
     check('project.json was not replaced by the merge',
@@ -524,7 +543,7 @@ const MEMORY = `(async () => {
     await open(KEPT_DIR);
     await page.evaluate(BLOCK_SAVES);
     await openDrawer('History');
-    const r6 = await page.evaluate(editAndClickScript(EDIT, 'Restore this state'));
+    const r6 = await page.evaluate(editAndRestoreScript(EDIT));
     check('the restore was pressed once more', r6 === 'clicked', String(r6));
     await wait(7000);
     check('nothing happened on its own',
@@ -547,7 +566,7 @@ const MEMORY = `(async () => {
     resetFixture(root);
     await open(KEPT_DIR);
     await openDrawer('History');
-    const b1 = await page.evaluate(editAndClickScript(EDIT_OK, 'Restore this state'));
+    const b1 = await page.evaluate(editAndRestoreScript(EDIT_OK));
     check('the restore was pressed', b1 === 'clicked', String(b1));
     await wait(4000);
     check('the snapshot was installed',
@@ -571,7 +590,7 @@ const MEMORY = `(async () => {
     const c2 = await page.evaluate(clickScript('Continue'));
     check('the comparison ran again', c2 === 'clicked', String(c2));
     await wait(900);
-    const b3 = await page.evaluate(clickScript('Apply ·'));
+    const b3 = await page.evaluate(clickScript('Apply', '.rw-dialog__foot'));
     check('the merge apply was pressed', b3 === 'clicked', String(b3));
     await wait(5000);
     check('the merged report was written',

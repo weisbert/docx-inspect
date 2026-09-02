@@ -17,6 +17,7 @@ import base64
 import contextlib
 import copy
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -313,7 +314,115 @@ def autosave_all(reports_root, reason="preapply"):
     return made
 
 
+# How far down the timeline a content hint is computed. A hint costs one file
+# read per entry (memoised below), the drawer shows a scrolling list, and 300
+# rolling snapshots of a real report are megabytes -- so the newest stretch gets
+# the detail and the tail keeps the shape it always had.
+AUTOSAVE_HINT_DEPTH = 40
+AUTOSAVE_HINT_TITLES = 3        # named on the entry; the rest are counted
+
+# A snapshot file never changes once written, so its digest is memoised on
+# (path, mtime, size). Bounded, because a long-running server sees every
+# snapshot of every report it serves.
+_SNAPSHOT_DIGESTS = {}
+_SNAPSHOT_DIGESTS_MAX = 4000
+
+
+def _section_digest(project):
+    """{section key -> (title, location, fingerprint)} for one report state.
+
+    The fingerprint covers a section's OWN fields -- children are sections in
+    their own right and are keyed separately -- so a change is reported against
+    the section it happened in rather than against every ancestor it sits under.
+    """
+    out = {}
+
+    def walk(nodes, prefix):
+        pos = 0
+        for node in (nodes or []):
+            if not isinstance(node, dict):
+                continue
+            pos += 1
+            loc = "%s%d" % (prefix, pos)
+            key = str(node.get("id") or "") or ("@" + loc)
+            own = {k: v for k, v in node.items() if k != "children"}
+            try:
+                blob = json.dumps(own, sort_keys=True, ensure_ascii=False,
+                                  default=str)
+            except Exception:
+                blob = repr(sorted(own.keys()))
+            out[key] = (str(node.get("title") or ""), loc,
+                        hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16])
+            walk(node.get("children"), loc + ".")
+
+    walk((project or {}).get("outline"), "")
+    return out
+
+
+def _snapshot_state(path):
+    """(section digest, cover fingerprint) for a snapshot file, or None."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_mtime, st.st_size)
+    hit = _SNAPSHOT_DIGESTS.get(key)
+    if hit is not None:
+        return hit
+    project = _read_json_quiet(path)
+    if project is None:
+        return None
+    try:
+        meta = json.dumps((project or {}).get("meta"), sort_keys=True,
+                          ensure_ascii=False, default=str)
+    except Exception:
+        meta = ""
+    value = (_section_digest(project), meta)
+    if len(_SNAPSHOT_DIGESTS) > _SNAPSHOT_DIGESTS_MAX:
+        _SNAPSHOT_DIGESTS.clear()
+    _SNAPSHOT_DIGESTS[key] = value
+    return value
+
+
+def _snapshot_change(newer, older):
+    """What one step of the timeline changed: (titles, count, cover changed).
+
+    Titles are the sections that differ between two states, in document order,
+    capped at AUTOSAVE_HINT_TITLES; the count is the whole number. Returns None
+    when either state could not be read -- "not known" and "nothing changed"
+    are two different answers and only one of them is safe to act on.
+    """
+    if not newer or not older:
+        return None
+    a, meta_a = newer
+    b, meta_b = older
+    changed = []
+    for key in set(list(a.keys()) + list(b.keys())):
+        one, two = a.get(key), b.get(key)
+        if one and two and one[2] == two[2]:
+            continue
+        title, loc = (one or two)[0], (one or two)[1]
+        changed.append((loc, title or loc))
+    changed.sort(key=lambda item: [int(n) for n in item[0].split(".")
+                                   if n.isdigit()])
+    titles = [title for _loc, title in changed[:AUTOSAVE_HINT_TITLES]]
+    return titles, len(changed), meta_a != meta_b
+
+
 def list_autosaves(project_dir):
+    """Every snapshot of one report, newest first.
+
+    Each entry carries what it always did -- name, mtime, size and the reason
+    tag -- plus, for the newest AUTOSAVE_HINT_DEPTH of them, what changed
+    between it and the state before it: ``changed`` (up to three section
+    titles), ``changed_count`` and ``changed_meta``. A timestamp and a byte
+    count cannot tell two states apart, so finding the one from before a
+    mistake meant restoring by trial and error -- and every wrong guess costs
+    the work done since.
+
+    The detail keys are absent where they are not known (too far down the list,
+    an unreadable snapshot, or the oldest entry, which has nothing before it).
+    """
     out = []
     for p in _autosave_paths(project_dir):
         name = os.path.basename(p)
@@ -324,8 +433,24 @@ def list_autosaves(project_dir):
         stem = name[:-5]
         reason = stem.split("__", 1)[1].split("-")[0] if "__" in stem else ""
         out.append({"name": name, "mtime": st.st_mtime,
-                    "size": st.st_size, "reason": reason})
+                    "size": st.st_size, "reason": reason, "_path": p})
     out.reverse()  # newest first
+
+    for i, entry in enumerate(out[:AUTOSAVE_HINT_DEPTH]):
+        older = out[i + 1] if i + 1 < len(out) else None
+        if not older:
+            break
+        step = _snapshot_change(_snapshot_state(entry["_path"]),
+                                _snapshot_state(older["_path"]))
+        if step is None:
+            continue
+        titles, count, meta_changed = step
+        entry["changed"] = titles
+        entry["changed_count"] = count
+        entry["changed_meta"] = meta_changed
+
+    for entry in out:
+        entry.pop("_path", None)
     return out
 
 

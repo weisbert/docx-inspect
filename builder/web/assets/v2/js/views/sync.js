@@ -121,7 +121,21 @@ const TEXT = {
   evPasted: 'Replaced from pasted text',
   evMerged: 'Merged a returned package',
   evRestored: 'Restored a snapshot',
+  evRenamed: 'Renamed the report',
   evSnapshot: 'Automatic snapshot',
+
+  /* -- what a timeline entry IS. A snapshot is taken immediately BEFORE the
+   * thing that happens to the report, so the state it holds is the one from
+   * just before it -- which is the state the entry's own button restores, and
+   * therefore what the entry has to be called. The event names above stay for
+   * the exchange list, where the subject is the exchange rather than the file
+   * it preserved. -- */
+  causeApply: 'Before applying an update',
+  causePaste: 'Before replacing from pasted text',
+  causeMerge: 'Before merging a returned package',
+  causeRestore: 'Before restoring a snapshot',
+  causeRename: 'Before renaming the report',
+  causeSave: 'Automatic snapshot',
 
   /* -- import dialog -- */
   importTitle: 'Apply an external update',
@@ -173,6 +187,16 @@ const TEXT = {
   rowBlocks: 'Blocks',
   continueCompare: (n) => 'Continue · compare ' + n + ' passages',
   continueBlocked: 'Continue · disabled, baseline does not match',
+  /* A comparison that has not run yet has no count, and printing zero for one
+   * is the difference between "this package touches nothing of yours" and "we
+   * have not looked". The first is a fact about the package; the second is a
+   * spinner wearing a number. */
+  continueWaiting: 'Continue · waiting for this report to save',
+  continueRunning: 'Continue · comparing…',
+  waitingSaveBody:
+    'The comparison reads this report from the disk, so it waits for the save on screen '
+    + 'to land there first — otherwise your version would be the older file. It runs by '
+    + 'itself the moment the save reports Saved.',
   applyPackage: 'Apply the package',
   cutTitle: 'This package looks cut off',
   cutBody: (missing, total) =>
@@ -198,6 +222,13 @@ const TEXT = {
   scope: 'Only the sections this package touched change; everything else is left alone',
   undoMerge: 'Undo the whole merge',
   applyN: (n) => 'Apply · ' + n + ' decided',
+  applyChanges: (n) => 'Apply ' + n + (n === 1 ? ' change' : ' changes'),
+  applyNothing: 'Apply — nothing would change',
+  writesN: (n) => 'Applying writes ' + n + (n === 1 ? ' section' : ' sections'),
+  chAdded: 'Added by the package',
+  chChanged: 'Rewritten by the package',
+  chRemoved: 'Removed by the package',
+  noIncoming: 'This package changes nothing in this report',
   removedBy: (n) => 'Removed by the package · ' + n,
   removedBody:
     'Deleted on the other side and not changed here, so the merge removes them without asking. '
@@ -227,6 +258,37 @@ const TEXT = {
   tagExchange: 'Exchange',
   tagRestore: 'Restore',
   tagSnapshot: 'Snapshot',
+  sameContent: 'Same content as the state before it',
+  firstState: 'The oldest state kept',
+  changedN: (n) => n + (n === 1 ? ' section changed' : ' sections changed'),
+  andMore: (n) => ' and ' + n + ' more',
+
+  /* -- the confirmation in front of a restore --
+   * A restore replaces the whole report, so everything done after the state it
+   * puts back is dropped. That is a legitimate thing to want and an impossible
+   * thing to guess, so it is named before it happens rather than reported
+   * afterwards -- in the same voice as the import dialog's caveat. */
+  restoreAsk: 'Restore this state?',
+  restoreAskSub: 'What the report goes back to, and what that drops',
+  restoreTo: (when, cause) => 'The report goes back to how it was ' + when + ' · ' + cause,
+  restoreDrops: (n) =>
+    'Everything saved since then is dropped — ' + n
+    + (n === 1 ? ' later state' : ' later states') + ':',
+  restoreDropsUnknown:
+    'Everything saved since then is dropped. The sections it touched are not '
+    + 'listed here, so read the states above this one before going ahead.',
+  restoreNothingNewer: 'Nothing has been saved since, so nothing is dropped.',
+  restoreUndoable:
+    'The report as it stands now is snapshotted first and appears at the top of this '
+    + 'timeline, so this restore can itself be undone.',
+
+  /* -- rolling back -- */
+  rollbackNoRead:
+    'The roll back was written, but the report could not be read back afterwards, so '
+    + 'nothing is on screen. Reload the page to see it.',
+  rollbackOther: (dir) =>
+    'The newest backup belongs to ' + dir + ', so that report was rolled back and this '
+    + 'one is unchanged.',
 
   /* -- an operation held back because the document is not on disk --
    * The frozen counterpart of the restart trio above: the same fact, the same
@@ -271,6 +333,12 @@ const TEXT = {
 /* ================================================================== *
  * Pure helpers
  * ================================================================== */
+
+// What a returned package may be, as the file chooser states it. ONE rule,
+// exported, because the shelf offers the same door onto the same dialog and a
+// second copy of this list is how the two came to disagree: the shelf's chooser
+// would not show the .md the drawer's copy invites.
+export const PACKAGE_ACCEPT = '.zip,.md,.json,.txt';
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const nodesOf = (v) => (Array.isArray(v) ? v.filter(isObj) : []);
@@ -386,6 +454,115 @@ function conflictSide(entry, side) {
   if (value === undefined || value === null) return '';
   if (isObj(value) || Array.isArray(value)) return describeOwn(value);
   return String(value);
+}
+
+// A section's own content, without its children (they are their own rows) and
+// without the merge's private markers, which are bookkeeping rather than
+// anything the report says.
+function ownFields(node) {
+  const out = {};
+  for (const key of Object.keys(node || {})) {
+    if (key === 'children' || key.charAt(0) === '_') continue;
+    out[key] = node[key];
+  }
+  return out;
+}
+
+// Key order is not content: the merge rebuilds the objects it takes from either
+// side, so a plain JSON.stringify would report a section as rewritten because
+// its keys came back in a different order.
+function stableText(value) {
+  const sorted = (v) => {
+    if (Array.isArray(v)) return v.map(sorted);
+    if (isObj(v)) {
+      const out = {};
+      for (const key of Object.keys(v).sort()) out[key] = sorted(v[key]);
+      return out;
+    }
+    return v;
+  };
+  try {
+    return JSON.stringify(sorted(value));
+  } catch (err) {
+    return '';
+  }
+}
+
+/* -- what an update writes ------------------------------------------
+ * `merged` is the report as it would be on disk after Apply, so comparing it
+ * with the report as it is now names every section the package adds, rewrites
+ * or removes -- conflict or no conflict.
+ *
+ * The screen needed this because the common case is the one it did not cover:
+ * an update that overlaps nothing produces no conflicts at all, and the merge
+ * screen then showed an empty list, three empty panes and a button reading
+ * "Apply · 0 decided" that wrote four sections. Nothing anywhere named what was
+ * about to be written.
+ */
+function incomingChanges(mine, merged) {
+  const rows = [];
+  if (!isObj(merged)) return rows;
+  const index = sectionIndex(mine);
+  const mineLoc = locationIndex(mine);
+  const theirLoc = locationIndex(merged);
+  const paired = [];
+  const walk = (list) => {
+    for (const node of nodesOf(list)) {
+      const id = node.id == null ? '' : String(node.id);
+      const title = String(node.title == null ? '' : node.title).trim();
+      const counterpart = index.byId.get(id) || index.byTitle.get(title);
+      if (counterpart) paired.push(counterpart);
+      if (!counterpart) {
+        rows.push({
+          key: 'add:' + (id || title || rows.length),
+          loc: theirLoc.get(id) || '',
+          title: title || id, detail: TEXT.chAdded,
+          mine: '', theirs: describeOwn(node),
+        });
+      } else if (stableText(ownFields(counterpart)) !== stableText(ownFields(node))) {
+        rows.push({
+          key: 'chg:' + (id || title || rows.length),
+          loc: mineLoc.get(String(counterpart.id || '')) || theirLoc.get(id) || '',
+          title: title || id, detail: TEXT.chChanged,
+          mine: describeOwn(counterpart), theirs: describeOwn(node),
+        });
+      }
+      walk(node.children);
+    }
+  };
+  walk(merged.outline);
+  const dropped = (list) => {
+    for (const node of nodesOf(list)) {
+      if (paired.indexOf(node) < 0) {
+        const id = node.id == null ? '' : String(node.id);
+        rows.push({
+          key: 'del:' + (id || rows.length),
+          loc: mineLoc.get(id) || '',
+          title: String(node.title || id), detail: TEXT.chRemoved,
+          mine: describeOwn(node), theirs: '',
+        });
+      }
+      dropped(node.children);
+    }
+  };
+  dropped(mine && mine.outline);
+  if (stableText((mine || {}).meta) !== stableText(merged.meta)) {
+    rows.unshift({
+      key: 'meta', loc: '', title: TEXT.cover, detail: TEXT.chChanged,
+      mine: metaText((mine || {}).meta), theirs: metaText(merged.meta),
+    });
+  }
+  return rows;
+}
+
+// The cover's fields, one per line. describeOwn would print a section's prose;
+// the cover has none, only named values, and a diff of it is only readable if
+// every field is on screen rather than the title alone.
+function metaText(meta) {
+  if (!isObj(meta)) return '';
+  return Object.keys(meta).sort()
+    .map((key) => key + ': ' + String(meta[key] == null ? '' : meta[key]))
+    .join('\n');
 }
 
 // What changed about one conflict, in the vocabulary the rest of the interface
@@ -602,6 +779,40 @@ async function refreshReport(dir) {
   }
 }
 
+/* -- rolling back ---------------------------------------------------
+ * A roll back installs the newest backup and the editor then re-reads the
+ * report, because what is on disk has moved out from under it. Both halves are
+ * checked rather than assumed:
+ *
+ *   the write   a server that scopes the roll back to one report names the
+ *               report it restored. An older one does not say and rolls back
+ *               whatever the newest backup holds, so a missing field is read as
+ *               the old behaviour rather than as a refusal, and a name that is
+ *               NOT this report is said out loud -- the screen would otherwise
+ *               look identical to a roll back that had worked.
+ *   the re-read boot.js traps a failed load and clears the document, which is
+ *               how a roll back ended with the editor showing nothing at all.
+ *               A read that comes back empty is tried once more before it is
+ *               reported, and it is reported rather than left blank.
+ *
+ * -> '' when the report on screen is the rolled-back one, otherwise the
+ *    sentence to put in front of the user.
+ */
+function hasProject() {
+  const state = (store && typeof store.get === 'function') ? store.get() : null;
+  return !!(state && state.project);
+}
+
+async function rollBackAndReread(dir) {
+  const answer = await api.rollback(dir);
+  const named = String((answer && (answer.dir || answer.report)) || '');
+  await refreshReport(dir);
+  if (!hasProject()) await refreshReport(dir);
+  if (!hasProject()) return TEXT.rollbackNoRead;
+  if (named && dir && named !== dir) return TEXT.rollbackOther(named);
+  return '';
+}
+
 /* ================================================================== *
  * Reading an inbound package
  * ================================================================== */
@@ -762,7 +973,10 @@ async function readPackage(file, dir, project) {
   return packageFromText(name, text, created);
 }
 
-function packageFromText(name, text, created) {
+// Exported because the shelf takes the same kinds of package this drawer does,
+// through the same dialog: one rule for what a returned package may be, in one
+// place, rather than a second reader that happens to accept less.
+export function packageFromText(name, text, created) {
   const parsed = parseLooseJson(text);
   const size = new Blob([String(text == null ? '' : text)]).size;
   if (!parsed) throw new Error('no report or update found in this text');
@@ -795,11 +1009,15 @@ function declaredBaseOf(manifest, dir) {
 // every section the fixed-body guard put back.
 function buildManifest(pkg, dir, rejected) {
   const rows = [];
+  // The shelf opens this dialog with no report of its own, and a text package
+  // names the report it belongs to. Then that name is the address on screen,
+  // because "/project.json" is not one.
+  const target = dir || String((pkg.diff && pkg.diff.dir) || '');
   if (Array.isArray(pkg.entries) && pkg.entries.length) {
     // An archive lists every member. A package that goes through the merge
     // writes ONE file -- this report -- so nothing else in it can be called
     // accepted; the images and any second report need their own decision.
-    const report = dir + '/project.json';
+    const report = target + '/project.json';
     for (const entry of pkg.entries) {
       if (entry.name === 'update.json') continue;
       const accepted = pkg.kind === 'report'
@@ -835,22 +1053,78 @@ function buildManifest(pkg, dir, rejected) {
  * The exchange drawer
  * ================================================================== */
 
-const EXCHANGE_REASONS = {
-  preapply: TEXT.evApplied,
-  prebaseline: TEXT.evApplied,
-  prepaste: TEXT.evPasted,
-  premerge: TEXT.evMerged,
+/* -- what a snapshot's reason tag means -------------------------------
+ * Two names per event, because the two lists are about two different things.
+ * `title` names what HAPPENED and belongs to the exchange list ("Applied an
+ * update package"); `cause` names the STATE the snapshot holds, which is what
+ * the timeline's own button puts back, and a snapshot is always taken just
+ * BEFORE its event ("Before applying an update"). Calling the state by the name
+ * of the event that came after it is how a timeline of identical rows reading
+ * "Automatic snapshot" happened in the first place. */
+const REASONS = {
+  preapply: { kind: 'exchange', title: TEXT.evApplied, cause: TEXT.causeApply },
+  prebaseline: { kind: 'exchange', title: TEXT.evApplied, cause: TEXT.causeApply },
+  prepaste: { kind: 'exchange', title: TEXT.evPasted, cause: TEXT.causePaste },
+  premerge: { kind: 'exchange', title: TEXT.evMerged, cause: TEXT.causeMerge },
+  prerestore: { kind: 'restore', title: TEXT.evRestored, cause: TEXT.causeRestore },
+  prerename: { kind: 'snapshot', title: TEXT.evRenamed, cause: TEXT.causeRename },
+};
+
+const TAGS = {
+  exchange: TEXT.tagExchange,
+  restore: TEXT.tagRestore,
+  snapshot: TEXT.tagSnapshot,
 };
 
 function eventOf(snapshot) {
   const reason = String((snapshot && snapshot.reason) || '');
-  if (EXCHANGE_REASONS[reason]) {
-    return { kind: 'exchange', tag: TEXT.tagExchange, title: EXCHANGE_REASONS[reason] };
+  const known = REASONS[reason];
+  if (!known) {
+    return {
+      kind: 'snapshot', tag: TEXT.tagSnapshot,
+      title: TEXT.evSnapshot, cause: TEXT.causeSave,
+    };
   }
-  if (reason === 'prerestore') {
-    return { kind: 'restore', tag: TEXT.tagRestore, title: TEXT.evRestored };
+  return {
+    kind: known.kind, tag: TAGS[known.kind],
+    title: known.title, cause: known.cause,
+  };
+}
+
+/* -- what one timeline entry changed ---------------------------------
+ * The server hands each snapshot the titles of the sections that differ from
+ * the state before it (see /api/autosaves). An older server sends none, and a
+ * snapshot too far down the list to be compared cheaply sends none either, so
+ * a missing count is "not known", never "nothing changed" -- the two read the
+ * same on screen and only one of them is safe to act on. */
+function changeDetail(item) {
+  if (item.changedCount == null) return '';
+  if (!item.changedCount) return TEXT.sameContent;
+  const names = (item.changed || []).slice();
+  if (item.meta) names.unshift(TEXT.cover);
+  if (!names.length) return TEXT.changedN(item.changedCount);
+  const extra = item.changedCount + (item.meta ? 1 : 0) - names.length;
+  return names.join(' · ') + (extra > 0 ? TEXT.andMore(extra) : '');
+}
+
+// Everything the report has been through since the state at `index`, which is
+// exactly what restoring that state drops. Each entry above it describes one
+// step, so their sections, unioned, name the work at stake. `known` is false
+// when any of those entries could not say -- the dialog then refuses to
+// pretend it has the list.
+function lostSince(rows, index) {
+  const names = [];
+  const seen = {};
+  let known = true;
+  for (let i = 0; i < index; i++) {
+    const row = rows[i] || {};
+    if (row.changedCount == null) { known = false; continue; }
+    if (row.meta && !seen[TEXT.cover]) { seen[TEXT.cover] = true; names.push(TEXT.cover); }
+    for (const name of (row.changed || [])) {
+      if (!seen[name]) { seen[name] = true; names.push(name); }
+    }
   }
-  return { kind: 'snapshot', tag: TEXT.tagSnapshot, title: TEXT.evSnapshot };
+  return { states: index, names: names, known: known };
 }
 
 // The changed-section list, read out of the op-diff the server just computed.
@@ -899,6 +1173,19 @@ function changedSections(diffText, project) {
   return rows;
 }
 
+/* -- the one input that cannot be retyped ---------------------------
+ * Returned text arrives by hand: it is pasted out of a conversation into the
+ * box in this drawer. The drawer sits over a scrim, so ANY click in the editor
+ * behind it closes the drawer -- and the box went with it, empty on re-open.
+ *
+ * Two answers, because they are two different moments. A click outside while
+ * the box holds text does not close the drawer at all: nobody dismisses a
+ * half-finished paste on purpose by clicking a paragraph. And a close that IS
+ * on purpose -- Escape, the ✕ -- keeps the text here, outside the component
+ * that is about to be unmounted, so re-opening the drawer finds it again.
+ * Keyed by report: a draft belongs to the report it was pasted into. */
+const PASTE_DRAFTS = new Map();
+
 function findReportRow(tree, dir) {
   for (const project of ((tree && tree.projects) || [])) {
     for (const mod of (project.modules || [])) {
@@ -921,8 +1208,8 @@ export function SyncDrawer(props) {
   const [failure, setFailure] = useState('');
   const [copied, setCopied] = useState(false);
   const [snapshots, setSnapshots] = useState([]);
-  const [pasteOpen, setPasteOpen] = useState(false);
-  const [pasteText, setPasteText] = useState('');
+  const [pasteOpen, setPasteOpen] = useState(() => !!PASTE_DRAFTS.get(dir));
+  const [pasteText, setPasteText] = useState(() => PASTE_DRAFTS.get(dir) || '');
   const [pkg, setPkg] = useState(null);
   const [pkgError, setPkgError] = useState('');
   const [showChanges, setShowChanges] = useState(false);
@@ -957,8 +1244,17 @@ export function SyncDrawer(props) {
   useEffect(() => {
     setPkg(null);
     setPkgError('');
-    setPasteOpen(false);
-    setPasteText('');
+    const draft = PASTE_DRAFTS.get(dir) || '';
+    setPasteText(draft);
+    setPasteOpen(!!draft);
+  }, [dir]);
+
+  // Every keystroke in the paste box, kept where the drawer's own state cannot
+  // take it with it when it closes.
+  const editPaste = useCallback((value) => {
+    setPasteText(value);
+    if (value) PASTE_DRAFTS.set(dir, value);
+    else PASTE_DRAFTS.delete(dir);
   }, [dir]);
 
   const row = useMemo(() => findReportRow(tree, dir), [tree, dir]);
@@ -969,8 +1265,26 @@ export function SyncDrawer(props) {
   const noBaseline = !!(diff && diff.no_baseline);
   const empty = !!(diff && diff.empty);
   const smaller = !!(diff && diff.smaller);
-  const fullBytes = (diff && diff.full_chars)
-    || (project ? JSON.stringify(project).length : 0);
+
+  /* The whole report AS IT IS COPIED, built once. The size beside the button,
+   * the report the percentage is measured against, and the text that lands on
+   * the clipboard are all this one string.
+   *
+   * They used to be three different things: the label read the server's
+   * `full_chars`, which is a COMPACT serialisation, while the button copied an
+   * indented one. The button said 2.5 KB and put 5.9 KB on the clipboard, and
+   * "19% smaller" compared the diff against a report nobody was ever offered --
+   * on a channel that carries only what a person pastes, that number is the
+   * whole basis for choosing between the two buttons. */
+  const wholeText = useMemo(() => {
+    try {
+      return JSON.stringify(project || {}, null, 2);
+    } catch (err) {
+      return '';
+    }
+  }, [project, diff]);
+
+  const fullBytes = wholeText.length;
   const diffBytes = (diff && diff.diff_chars) || 0;
   const pct = fullBytes && diffBytes ? Math.max(0, Math.round((1 - diffBytes / fullBytes) * 100)) : 0;
 
@@ -995,7 +1309,7 @@ export function SyncDrawer(props) {
   };
 
   const onCopyWhole = async () => {
-    if (await copyWholeReport()) flash();
+    if (await copyToClipboard(wholeText)) flash();
   };
 
   // Restarting throws the page away, and with it every edit that has not
@@ -1024,8 +1338,7 @@ export function SyncDrawer(props) {
   // not run at all.
   const rollBackNow = async () => {
     try {
-      await api.rollback(dir);
-      await refreshReport(dir);
+      setFailure(await rollBackAndReread(dir));
       reload();
     } catch (err) {
       setFailure(errText(err));
@@ -1047,6 +1360,9 @@ export function SyncDrawer(props) {
     try {
       setPkg(packageFromText('', pasteText, Date.now() / 1000));
       setPasteOpen(false);
+      // It has been read into a package; keeping the draft as well would put it
+      // back in front of the user next time as unfinished work.
+      editPaste('');
     } catch (err) {
       setPkgError(errText(err));
     }
@@ -1074,7 +1390,13 @@ export function SyncDrawer(props) {
 
   return html`
     <${Drawer} title=${TEXT.exchange} subtitle=${TEXT.channel}
-               closeLabel=${TEXT.close} onClose=${props.onClose}>
+               closeLabel=${TEXT.close}
+               onClose=${(why) => {
+                 // A stray click in the document behind is not a decision to
+                 // throw away text that was pasted in by hand.
+                 if (why === 'scrim' && pasteText.trim()) return;
+                 if (props.onClose) props.onClose(why);
+               }}>
       <div class="rw-sync">
 
         <div class="rw-sync__kv">
@@ -1131,7 +1453,7 @@ export function SyncDrawer(props) {
               ref=${fileRef}
               type="file"
               class="rw-hidden"
-              accept=".zip,.md,.json,.txt"
+              accept=${PACKAGE_ACCEPT}
               onChange=${(ev) => {
                 const file = ev.target.files && ev.target.files[0];
                 ev.target.value = '';
@@ -1146,7 +1468,7 @@ export function SyncDrawer(props) {
                 class="rw-textarea rw-sync__paste"
                 placeholder=${TEXT.pastePlaceholder}
                 value=${pasteText}
-                onInput=${(ev) => setPasteText(ev.target.value)}
+                onInput=${(ev) => editPaste(ev.target.value)}
               ></textarea>
               <div class="rw-sync__actions">
                 <${Button} level="primary" disabled=${!pasteText.trim()} onClick=${takeText}>
@@ -1264,6 +1586,15 @@ export function ImportDialog(props) {
   const pkg = props.pkg || {};
   const baseline = props.baseline || {};
   const project = useStore((s) => s.project);
+  const dirty = useStore((s) => s.dirty);
+  const saveState = useStore((s) => s.saveState);
+
+  // The comparison reads the file on disk, so it is worth nothing until the
+  // save on screen has reached it. That wait is a state of its own and is
+  // named as one -- it used to be rendered as "compare 0 passages" with a
+  // greyed button and no reason, which reads as a broken screen and then
+  // silently corrects itself a second later.
+  const waitingForSave = !!dirty || saveState === 'saving' || saveState === 'retrying';
 
   const [merge, setMerge] = useState(null);
   const [truncated, setTruncated] = useState(null);
@@ -1357,9 +1688,13 @@ export function ImportDialog(props) {
   // An unchecked ancestor is not a reason to refuse the comparison -- merge3
   // writes nothing and every passage both sides changed still stops to ask.
   // It is a reason not to call the result safe, which the banner below does.
+  // ... and it is not started while a save is still on the wire: the flush
+  // inside the barrier would wait for it anyway, and this way the screen says
+  // which of the two it is doing. It re-runs by itself when the save lands.
   useEffect(() => {
+    if (waitingForSave) return;
     if ((verdict === 'ok' || verdict === 'unknown') && pkg.kind === 'report') compare(false);
-  }, [verdict, pkg, compare]);
+  }, [verdict, pkg, compare, waitingForSave]);
 
   const before = useMemo(() => countProject(project), [project]);
   const after = useMemo(
@@ -1444,10 +1779,13 @@ export function ImportDialog(props) {
         <//>`;
     }
     if (pkg.kind === 'report') {
+      const label = merge
+        ? TEXT.continueCompare(merge.conflicts.length)
+        : (waitingForSave ? TEXT.continueWaiting : TEXT.continueRunning);
       return html`
         <${Button} level="primary" disabled=${busy || !merge}
                    onClick=${() => setMerging(true)}>
-          ${TEXT.continueCompare(merge ? merge.conflicts.length : 0)}
+          ${label}
         <//>`;
     }
     return html`
@@ -1499,6 +1837,9 @@ export function ImportDialog(props) {
           <//>` : null}
 
         ${holdBanner(barrier, busy)}
+
+        ${!merge && waitingForSave && pkg.kind === 'report' ? html`
+          <div class="rw-meta">${TEXT.waitingSaveBody}</div>` : null}
 
         ${failure ? html`<${Banner} level="error" title=${TEXT.wrong}>${failure}<//>` : null}
 
@@ -1580,13 +1921,25 @@ export function MergeModal(props) {
   const [busy, setBusy] = useState(false);
   const barrier = useSaveBarrier();
   const tree = useStore((s) => s.tree);
+  const project = useStore((s) => s.project);
 
   const conflicts = (result && result.conflicts) || [];
   const deletions = (result && result.deletions) || [];
 
+  // What this package writes, whether or not anything conflicts. With no
+  // conflicts it is the ONLY account of the update on this screen.
+  const changes = useMemo(
+    () => incomingChanges(project, result && result.merged), [project, result]);
+
   useEffect(() => {
     if (!selected && conflicts.length) setSelected(String(conflicts[0].id));
   }, [conflicts, selected]);
+
+  // The same selection, over the change list, when there is no conflict list.
+  useEffect(() => {
+    if (conflicts.length || !changes.length) return;
+    if (!changes.some((row) => row.key === selected)) setSelected(changes[0].key);
+  }, [conflicts, changes, selected]);
 
   const decided = conflicts.filter((c) => choices[String(c.id)]).length;
   const allDecided = decided === conflicts.length;
@@ -1683,6 +2036,17 @@ export function MergeModal(props) {
     setChoices(Object.assign({}, choices, { [String(entry.id)]: choice }));
   };
   const current = entry ? choices[String(entry.id)] : '';
+  const shownChange = conflicts.length
+    ? null
+    : (changes.find((row) => row.key === selected) || changes[0] || null);
+
+  // The button says what pressing it does. With conflicts that is how many of
+  // them are settled; with none it is the number of sections that get written,
+  // because "Apply · 0 decided" on a screen that writes four of them describes
+  // the one thing nobody needs to know.
+  const applyLabel = conflicts.length
+    ? TEXT.applyN(decided)
+    : (changes.length ? TEXT.applyChanges(changes.length) : TEXT.applyNothing);
 
   return html`
     <${Dialog} title=${TEXT.importTitle} subtitle=${TEXT.mergeSub} width=${1180}
@@ -1694,13 +2058,15 @@ export function MergeModal(props) {
                  </div>`}
                footer=${html`
                  <${Button} level="primary" disabled=${busy || blocked || !allDecided}
-                            onClick=${apply}>${TEXT.applyN(decided)}<//>`}>
+                            onClick=${apply}>${applyLabel}<//>`}>
       <div class="rw-sync rw-sync__merge">
 
         <div class="rw-sync__pills">
           <${Pill} tone="good">${TEXT.autoPill((result && result.auto) || 0)}<//>
           <${Pill} tone="warn">${TEXT.pendingPill(conflicts.length - decided)}<//>
-          <span class="rw-meta">${TEXT.touches(conflicts.length)}</span>
+          <span class="rw-meta">
+            ${conflicts.length ? TEXT.touches(conflicts.length) : TEXT.writesN(changes.length)}
+          </span>
         </div>
 
         ${truncationBanner(cut, overrode ? null : html`
@@ -1742,9 +2108,56 @@ export function MergeModal(props) {
               </div>`)}
           </div>` : null}
 
+        ${conflicts.length ? null : html`
+          <div class="rw-merge">
+            <div class="rw-merge__list">
+              ${changes.length ? changes.map((item) => html`
+                <button
+                  type="button"
+                  key=${item.key}
+                  class=${classNames('rw-merge__item', item.key === selected && 'rw-merge__item--on',
+                                     'rw-merge__item--auto')}
+                  onClick=${() => setSelected(item.key)}
+                >
+                  <span class="rw-dot rw-dot--filled">✓</span>
+                  <span class="rw-sync__itemmain">
+                    <span class="rw-strong rw-truncate">
+                      ${item.loc ? item.loc + ' ' : ''}${item.title}
+                    </span>
+                    <span class="rw-meta">${item.detail}</span>
+                  </span>
+                </button>`)
+                : html`<div class="rw-meta">${TEXT.noIncoming}</div>`}
+            </div>
+
+            <div class="rw-sync__panes">
+              <div class="rw-sync__cols">
+                <div class="rw-merge__pane">
+                  <div class="rw-sync__colhead">
+                    <span class="rw-sync__mark rw-sync__mark--mine"></span>
+                    <span class="rw-merge__panehead">${TEXT.mineCol}</span>
+                  </div>
+                  <div class="rw-merge__text rw-merge__text--mine rw-sync__body">
+                    ${shownChange ? shownChange.mine : ''}
+                  </div>
+                </div>
+                <div class="rw-merge__pane">
+                  <div class="rw-sync__colhead">
+                    <span class="rw-sync__mark rw-sync__mark--theirs"></span>
+                    <span class="rw-merge__panehead">${TEXT.theirsCol}</span>
+                  </div>
+                  <div class="rw-merge__text rw-merge__text--theirs rw-sync__body">
+                    ${shownChange ? shownChange.theirs : ''}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>`}
+
+        ${conflicts.length ? html`
         <div class="rw-merge">
           <div class="rw-merge__list">
-            ${conflicts.length ? conflicts.map((item) => {
+            ${conflicts.map((item) => {
               const id = String(item.id);
               const done = !!choices[id];
               return html`
@@ -1765,7 +2178,7 @@ export function MergeModal(props) {
                     <span class="rw-meta">${conflictDetail(item)}</span>
                   </span>
                 </button>`;
-            }) : html`<div class="rw-meta">${TEXT.nothingHere}</div>`}
+            })}
           </div>
 
           <div class="rw-sync__panes">
@@ -1810,7 +2223,7 @@ export function MergeModal(props) {
               ${TEXT.keepBoth}
             <//>
           </div>
-        </div>
+        </div>` : null}
       </div>
     <//>`;
 }
@@ -1862,7 +2275,10 @@ export function HistoryDrawer(props) {
       size: snapshot.size,
       kind: event.kind,
       tag: event.tag,
-      title: event.title,
+      title: event.cause,
+      changed: Array.isArray(snapshot.changed) ? snapshot.changed : [],
+      changedCount: snapshot.changed_count == null ? null : snapshot.changed_count,
+      meta: !!snapshot.changed_meta,
     };
   }), [items]);
 
@@ -1886,10 +2302,24 @@ export function HistoryDrawer(props) {
 
   const restore = (name) => barrier.guard('restore', () => runRestore(name));
 
+  // A restore is the one button here that DROPS work: it replaces the whole
+  // report, so everything saved after the state it puts back goes. That was
+  // happening on a single click, with no dialog and nothing said afterwards.
+  // The timeline knows what those later states touched -- see lostSince -- so
+  // the question is asked with the answer already in it.
+  const [asking, setAsking] = useState(null);
+  const askRestore = (index) => setAsking(index);
+  const confirmRestore = () => {
+    const item = rows[asking];
+    setAsking(null);
+    if (item) restore(item.name);
+  };
+  const pending = asking == null ? null : rows[asking];
+  const lost = asking == null ? null : lostSince(rows, asking);
+
   const runRollBack = async () => {
     try {
-      await api.rollback(dir);
-      await refreshReport(dir);
+      setFailure(await rollBackAndReread(dir));
       reload();
     } catch (err) {
       setFailure(errText(err));
@@ -1918,23 +2348,57 @@ export function HistoryDrawer(props) {
         ${busy ? html`<div class="rw-sync__busy"><${Spinner} /> ${TEXT.loading}</div>` : null}
 
         <div class="rw-timeline">
-          ${shown.length ? shown.map((item) => html`
+          ${shown.length ? shown.map((item) => {
+            const detail = changeDetail(item);
+            return html`
             <div class="rw-timeline__item" key=${item.name}>
               <div class="rw-timeline__when">${relativeTime(item.mtime)}</div>
               <div class="rw-timeline__body">
                 <div class="rw-timeline__title">${item.title}</div>
-                <div class="rw-meta">${formatBytes(item.size)}</div>
+                <div class="rw-meta">
+                  ${detail ? detail + ' · ' : ''}${formatBytes(item.size)}
+                </div>
               </div>
               <${Pill} tone=${item.kind === 'exchange' ? 'note' : 'neutral'}>${item.tag}<//>
               ${newestExchange && item.name === newestExchange.name
                 ? html`<${Button} level="tertiary" onClick=${rollBack}>${TEXT.rollBack}<//>`
-                : html`<${Button} level="tertiary" onClick=${() => restore(item.name)}>
+                : html`<${Button} level="tertiary"
+                                  onClick=${() => askRestore(rows.indexOf(item))}>
                          ${TEXT.restoreState}
                        <//>`}
-            </div>`)
+            </div>`;
+          })
             : (busy ? null : html`<${EmptyState} title=${TEXT.nothingHere} />`)}
         </div>
       </div>
+
+      ${pending ? html`
+        <${Dialog} title=${TEXT.restoreAsk} subtitle=${TEXT.restoreAskSub} width=${560}
+                   closeLabel=${TEXT.close} onClose=${() => setAsking(null)}
+                   footerLeft=${html`
+                     <${Button} level="tertiary" onClick=${() => setAsking(null)}>
+                       ${TEXT.cancel}
+                     <//>`}
+                   footer=${html`
+                     <${Button} level="primary" onClick=${confirmRestore}>
+                       ${TEXT.restoreState}
+                     <//>`}>
+          <div class="rw-sync">
+            <div class="rw-strong">
+              ${TEXT.restoreTo(relativeTime(pending.mtime), pending.title)}
+            </div>
+            ${lost.states === 0 ? html`
+              <div class="rw-meta">${TEXT.restoreNothingNewer}</div>` : html`
+              <div class="rw-sync__group">
+                <div>${TEXT.restoreDrops(lost.states)}</div>
+                ${lost.names.length ? html`
+                  <div class="rw-sync__body">${lost.names.join(' · ')}</div>` : null}
+                ${lost.known ? null : html`
+                  <div class="rw-meta">${TEXT.restoreDropsUnknown}</div>`}
+              </div>`}
+            <div class="rw-meta">${TEXT.restoreUndoable}</div>
+          </div>
+        <//>` : null}
     <//>`;
 }
 

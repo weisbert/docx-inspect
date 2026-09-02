@@ -37,7 +37,7 @@
 import { store, useStore } from '../store.js';
 import * as api from '../api.js';
 import { relativeTime, classNames } from '../util.js';
-import { ImportDialog } from './sync.js';
+import { ImportDialog, packageFromText, PACKAGE_ACCEPT } from './sync.js';
 import {
   Button, IconButton, Field, Chips, Dialog, Menu, EmptyState, Pill, Toast,
   html, Fragment, useState, useEffect, useMemo, useRef, useCallback,
@@ -369,6 +369,16 @@ function isZip(file) {
   return !!file && /\.zip$/i.test(file.name || '');
 }
 
+// The other shape a returned package comes in: the assistant hands back a whole
+// report or an op-diff as text, and the exchange drawer inside a report has
+// always taken those. The shelf's own door used to accept .zip alone, so a user
+// handed a .md by the assistant found the file chooser would not even show it.
+// One rule for what a returned package may be -- sync.js's PACKAGE_ACCEPT is
+// that rule, and the chooser below is filtered by it.
+function isTextPackage(file) {
+  return !!file && /\.(md|json|txt)$/i.test(file.name || '');
+}
+
 // Whether a drag is carrying a FILE. The shelf claims those and leaves every
 // other drag alone -- text dragged into the search box still lands there.
 function dragHasFile(ev) {
@@ -680,10 +690,13 @@ export function Home() {
   // The package is read here only far enough to describe it; nothing is written
   // until the dialog's own button is pressed, and the dialog says so.
   const takePackage = async (file) => {
-    if (!isZip(file)) return;
+    if (!isZip(file) && !isTextPackage(file)) return;
     setBusy(true);
     try {
-      setPkg(await readRootPackage(file));
+      setPkg(isZip(file)
+        ? await readRootPackage(file)
+        : packageFromText(baseName(file.name), await file.text(),
+                          file.lastModified ? file.lastModified / 1000 : Date.now() / 1000));
     } catch (err) {
       store.pushBanner({ level: 'error', code: 'apply-update', message: errorText(err) });
     } finally {
@@ -704,7 +717,7 @@ export function Home() {
   const takeDropped = (ev) => {
     const files = ev && ev.dataTransfer ? ev.dataTransfer.files : null;
     const file = files && files[0];
-    if (isZip(file)) {
+    if (isZip(file) || isTextPackage(file)) {
       takePackage(file);
       return;
     }
@@ -1226,7 +1239,7 @@ export function Home() {
         ref=${packageInputRef}
         type="file"
         class="rw-hidden"
-        accept=".zip"
+        accept=${PACKAGE_ACCEPT}
         onChange=${(ev) => {
           const file = ev.target.files && ev.target.files[0];
           ev.target.value = '';
