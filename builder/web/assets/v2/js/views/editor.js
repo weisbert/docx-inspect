@@ -1050,7 +1050,9 @@ function OutlineRow(props) {
       </span>
       <${StatusDot} status=${status} />
       <span class="rw-tree__count">${row.number}</span>
-      <span class="rw-tree__label">${text(row.node.title) || S.untitledSection}</span>
+      <span class="rw-tree__label"
+            title=${text(row.node.title) || S.untitledSection}
+      >${text(row.node.title) || S.untitledSection}</span>
       ${badges.map((badge) => html`
         <span class="rw-tree__badge" key=${badge.text}
               title=${badge.title} aria-label=${badge.title}>${badge.text}</span>`)}
@@ -1357,7 +1359,8 @@ function SectionBar(props) {
     <${Fragment}>
       <div class="rw-sectionbar">
         ${trail.length
-          ? html`<span class="rw-sectionbar__crumb">${trail.join(' › ') + ' ›'}</span>`
+          ? html`<span class="rw-sectionbar__crumb" title=${trail.join(' › ')}
+                 >${trail.join(' › ') + ' ›'}</span>`
           : null}
         ${editing
           ? html`
@@ -1371,9 +1374,9 @@ function SectionBar(props) {
                    }} />`
           : html`
             <span class="rw-sectionbar__title"
-                  onDblClick=${() => { setDraft(text(node.title)); setEditing(true); }}>
-              ${row.number + '  ' + (text(node.title) || S.untitledSection)}
-            </span>`}
+                  title=${text(node.title) || S.untitledSection}
+                  onDblClick=${() => { setDraft(text(node.title)); setEditing(true); }}
+            >${row.number + '  ' + (text(node.title) || S.untitledSection)}</span>`}
         ${hasNote || noteOpen
           ? html`<${Pill} tone="note" onClick=${() => setNoteOpen(!noteOpen)}>${S.sectionNote}<//>`
           : null}
@@ -1472,6 +1475,19 @@ function cmd(name, value) {
 export function keyboardIsClaimed() {
   const lib = typeof window !== 'undefined' ? window.jspreadsheet : null;
   if (lib && lib.current) return true;
+  return caretIsOpen();
+}
+
+// Is there a TEXT CARET on screen right now -- the second of the two questions
+// above, asked on its own?
+//
+// The two are not the same, and one shortcut needs the narrower one. F8
+// collapses the right panel so a wide table has the window to itself, which
+// means the hand is ON the grid when it is pressed: `keyboardIsClaimed` says yes
+// there (the grid publishes itself as soon as it is pressed in), and guarding F8
+// with it would disable the key in the one situation it exists for. What F8 must
+// not do is fire while somebody is TYPING, and that is this question.
+export function caretIsOpen() {
   const el = typeof document !== 'undefined' ? document.activeElement : null;
   if (!el || el === document.body || el === document.documentElement) return false;
   if (el.isContentEditable) return true;
@@ -2702,6 +2718,17 @@ export function Editor(props) {
         if (keyboardIsClaimed()) return;
         ev.preventDefault();
         if (searchRef.current) searchRef.current.focus();
+        return;
+      }
+      // F8 collapses the right panel to its strip, and opens it again. It is the
+      // gesture for editing a wide table, so it deliberately guards on
+      // caretIsOpen rather than keyboardIsClaimed: the grid claims the keyboard
+      // the moment it is pressed in, and that is exactly when this key is
+      // wanted. It stands aside only while text is being typed.
+      if (ev.key === 'F8' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        if (caretIsOpen()) return;
+        ev.preventDefault();
+        store.setUi({ rightOpen: !(ui && ui.rightOpen !== false) });
         return;
       }
       if (ev.altKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {

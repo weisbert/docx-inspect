@@ -94,6 +94,18 @@ const PROJECT_ID = '1108';
 const MODULE_ID = 'CLKDIV_5G';
 const REPORT_DIR = PROJECT_ID + '/' + MODULE_ID + '/CDR';
 
+// A title with nothing to break at: a long unbroken ASCII run, two emoji and a
+// right-to-left phrase. It is what a pasted identifier or a title typed in
+// another script looks like to a layout engine, and it is the input that pushed
+// the whole editor off the right of the window.
+const LONG_TITLE = 'Wideband'
+  + 'AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEEEEEEEEEFFFFFFFFFFGGGGGGGGGG'
+  + 'HHHHHHHHHHIIIIIIIIIIJJJJJJJJJJKKKKKKKKKKLLLLLLLLLLMMMMMMMMMMNNNNNNNNNN'
+  + 'OOOOOOOOOOPPPPPPPPPPQQQQQQQQQQRRRRRRRRRRSSSSSSSSSSTTTTTTTTTTUUUUUUUUUU'
+  + '\u{1F600}\u{1F680}'
+  + '\u0627\u0644\u0639\u0631\u0628\u064A\u0629'   // a right-to-left phrase
+  + 'VVVVVVVVVVWWWWWWWWWWXXXXXXXXXXYYYYYYYYYY';
+
 const CH_ONE = 'Objective';
 const CH_TWO = 'Measurement methods';
 const BENCH = 'Test bench';
@@ -145,6 +157,7 @@ function sampleOutline() {
       ],
     },
     { id: 'n-preface', title: PREFACE, fixed_body: FIXED_KEY, blocks: [], children: [] },
+    { id: 'n-long', title: LONG_TITLE, blocks: [para('A section with a very long name.')], children: [] },
   ];
 }
 
@@ -439,8 +452,19 @@ function railRows(page) {
 }
 
 function rowLine(rows) {
-  return rows.map((r) => r.number + ' ' + r.title
+  return rows.map((r) => r.number + ' ' + r.title.slice(0, 28)
     + (r.badges.length ? ' [' + r.badges.join(',') + ']' : '')).join(' | ');
+}
+
+// What the window has to scroll sideways to show. The product's standing rule is
+// that at 1440 it is nothing.
+function pageWidth(page) {
+  return page.evaluate(() => ({
+    scroll: document.documentElement.scrollWidth,
+    client: document.documentElement.clientWidth,
+    rail: Math.round((document.querySelector('.rw-editor__rail') || { getBoundingClientRect: () => ({ width: 0 }) })
+      .getBoundingClientRect().width),
+  }));
 }
 
 function rowFor(rows, title) {
@@ -629,6 +653,79 @@ async function browserChecks() {
     check('a plain section carries none',
       !!objective && objective.badges.length === 0,
       objective ? objective.badges.join(',') : 'no row');
+
+    /* ---- 6b. a section whose name has nothing to break at ---- */
+
+    section('a very long section title');
+    let width = await pageWidth(page);
+    check('the window still has nothing to scroll sideways',
+      width.scroll === width.client, JSON.stringify(width));
+    check('the rail keeps its own width', width.rail > 0 && width.rail <= 300,
+      JSON.stringify(width));
+    const clipped = await page.evaluate((wanted) => {
+      const labels = Array.from(document.querySelectorAll('.rw-tree__label'));
+      const el = labels.find((l) => (l.getAttribute('title') || '').indexOf(wanted) === 0);
+      if (!el) return null;
+      return {
+        clipped: el.scrollWidth > el.clientWidth,
+        box: Math.round(el.getBoundingClientRect().width),
+        title: (el.getAttribute('title') || '').length,
+      };
+    }, 'Wideband');
+    check('the row clips the title instead of growing',
+      !!clipped && clipped.clipped && clipped.box <= 300, JSON.stringify(clipped));
+    check('and the whole title is still readable, on the tooltip',
+      !!clipped && clipped.title === LONG_TITLE.length,
+      clipped ? String(clipped.title) : 'no label');
+
+    await selectRow(page, LONG_TITLE);
+    width = await pageWidth(page);
+    check('selecting it does not push the canvas off the window',
+      width.scroll === width.client, JSON.stringify(width));
+    const barBox = await page.evaluate(() => {
+      const el = document.querySelector('.rw-sectionbar__title');
+      if (!el) return null;
+      return {
+        box: Math.round(el.getBoundingClientRect().width),
+        clipped: el.scrollWidth > el.clientWidth,
+        titled: !!(el.getAttribute('title') || '').length,
+      };
+    });
+    check('the section bar clips its title too, and keeps it on the tooltip',
+      !!barBox && barBox.clipped && barBox.titled && barBox.box <= 1000,
+      JSON.stringify(barBox));
+    const canvasBox = await page.evaluate(() => {
+      const el = document.querySelector('.rw-canvas');
+      const r = el ? el.getBoundingClientRect() : null;
+      return r ? { x: Math.round(r.x), width: Math.round(r.width) } : null;
+    });
+    check('the section\'s blocks are on the glass, not past the right edge',
+      !!canvasBox && canvasBox.x < 1440 && canvasBox.width > 0,
+      JSON.stringify(canvasBox));
+
+    /* ---- 6c. F8 gives the wide table the window ---- */
+
+    section('F8 and the right panel');
+    await selectRow(page, BENCH);
+    const collapsedState = () => page.evaluate(() =>
+      !!document.querySelector('.rw-editor__right--collapsed'));
+    check('the panel starts open', (await collapsedState()) === false, '');
+    await page.keyboard.press('F8');
+    await settle(page, 350);
+    check('F8 collapses it', (await collapsedState()) === true,
+      'the shortcut the table documentation names does nothing');
+    await page.keyboard.press('F8');
+    await settle(page, 350);
+    check('F8 again opens it', (await collapsedState()) === false, '');
+    // It must stand aside while text is being typed, and NOT while the grid
+    // merely holds the keyboard -- collapsing the panel is what a wide table
+    // wants.
+    await page.$eval('.rw-search input', (el) => el.focus());
+    await page.keyboard.press('F8');
+    await settle(page, 300);
+    check('but not while a caret is in a field', (await collapsedState()) === false,
+      'F8 fired from inside a text field');
+    await page.$eval('.rw-search input', (el) => el.blur());
 
     /* ---- 7. opening and closing the whole tree ---- */
 
