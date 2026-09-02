@@ -296,6 +296,74 @@ def test_missing_image_needs_a_folder():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_duplicate_ids():
+    """Two blocks (or two sections) sharing an id collide in the engine's
+    id -> caption-number / cross-reference map (_collect_ref_targets): the
+    second one silently overwrites the first, so a Figure/Table number or a
+    REF field can point at the wrong block. content_lint must catch this as
+    an ERROR before it ever reaches the renderer, project-wide (not just
+    within one section) -- the engine's map is a single project-wide dict."""
+    dup_blocks = {"outline": [
+        {"id": "n1", "title": "S1", "blocks": [
+            {"type": "para", "id": "dup", "runs": [{"t": "first"}]},
+            {"type": "para", "id": "dup", "runs": [{"t": "second"}]},
+        ], "children": []},
+    ]}
+    findings = [f for f in cl.lint_project(dup_blocks, {}).flat
+                if f["code"] == "duplicate_id"]
+    check(len(findings) == 1, "one duplicate-block-id finding, not two",
+          "%r" % findings)
+    if findings:
+        check(findings[0]["level"] == "error", "a duplicate block id is an ERROR",
+              findings[0])
+        check(findings[0]["blockId"] == "dup", "it names the duplicated block")
+        check("dup" in findings[0]["message"] and "block 0" in findings[0]["message"],
+              "the message names the id and points back at the first block",
+              findings[0]["message"])
+
+    dup_across_sections = {"outline": [
+        {"id": "n1", "title": "S1", "blocks": [
+            {"type": "para", "id": "x", "runs": [{"t": "a"}]}], "children": []},
+        {"id": "n2", "title": "S2", "blocks": [
+            {"type": "para", "id": "x", "runs": [{"t": "b"}]}], "children": []},
+    ]}
+    findings = [f for f in cl.lint_project(dup_across_sections, {}).flat
+                if f["code"] == "duplicate_id"]
+    check(len(findings) == 1,
+          "a block id shared ACROSS sections is still caught (project-wide, not "
+          "reset per section)", "%r" % findings)
+
+    dup_sections = {"outline": [
+        {"id": "same", "title": "S1", "blocks": [
+            {"type": "para", "runs": [{"t": "a"}]}], "children": []},
+        {"id": "same", "title": "S2", "blocks": [
+            {"type": "para", "runs": [{"t": "b"}]}], "children": []},
+    ]}
+    findings = [f for f in cl.lint_project(dup_sections, {}).flat
+                if f["code"] == "duplicate_id"]
+    check(len(findings) == 1, "two sections sharing an id are flagged too",
+          "%r" % findings)
+    if findings:
+        check(findings[0]["nodeId"] == "same", "it names the duplicated section id")
+
+    clean = {"outline": [
+        {"id": "n1", "title": "S1", "blocks": [
+            {"type": "para", "id": "a", "runs": [{"t": "a"}]},
+            {"type": "para", "id": "b", "runs": [{"t": "b"}]},
+            {"type": "para", "runs": [{"t": "no id at all"}]},
+            {"type": "para", "runs": [{"t": "neither does this one"}]},
+        ], "children": []},
+        {"id": "n2", "title": "S2", "blocks": [
+            {"type": "para", "id": "c", "runs": [{"t": "c"}]},
+        ], "children": []},
+    ]}
+    findings = [f for f in cl.lint_project(clean, {}).flat
+                if f["code"] == "duplicate_id"]
+    check(findings == [],
+          "unique ids -- and blocks/sections with no id at all -- raise nothing",
+          "%r" % findings)
+
+
 def test_helpers_and_edge_cases():
     check(cl.classify("block_error") == "error", "classify block_error -> error")
     check(cl.classify("totally_new_code") == "warn", "classify unknown -> warn")
@@ -1052,6 +1120,7 @@ def main():
     test_dangling_reference_is_an_error()
     test_reference_column_is_not_this_stage_work()
     test_missing_image_needs_a_folder()
+    test_duplicate_ids()
     test_cli_exit_codes()
     test_bom_project_loads()
     test_helpers_and_edge_cases()

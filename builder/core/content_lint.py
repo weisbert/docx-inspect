@@ -92,6 +92,7 @@ LEVELS = {
     "empty_sim_result": "warn",
     "empty_section": "warn",
     "unknown_sim_key": "warn",
+    "duplicate_id": "error",
     "image_placeholder": "info",
     "unit_empty": "info",
 }
@@ -162,6 +163,11 @@ MESSAGES = {
     "dangling_ref.missing":
         "A cross-reference in this paragraph points at a figure or table that no "
         "longer exists - the export prints a red marker there",
+    "duplicate_id.block":
+        'Block id "%(id)s" is also used by another block at %(other)s - captions '
+        'and cross-references cannot tell them apart',
+    "duplicate_id.section":
+        'Section id "%(id)s" is also used by another section at %(other)s',
 }
 
 _REQUIRED_ROW_KEYS = ("cat", "item", "kind", "unit")
@@ -529,6 +535,16 @@ def lint_project(project, cfg=None, project_dir=None):
             "nodeId": node_id, "blockId": block_id,
         })
 
+    # Block ids and section (node) ids are each other's own namespace, shared
+    # across the WHOLE project (not reset per section): the engine numbers
+    # captions and resolves cross-references off a single project-wide
+    # id -> target map (_collect_ref_targets), so two blocks (or two sections)
+    # that happen to share an id collide there too -- the second one silently
+    # overwrites the first, and a caption number / REF field can point at the
+    # wrong one. First-seen location wins; every later occurrence is flagged.
+    seen_block_ids = {}
+    seen_node_ids = {}
+
     def walk(node, path):
         if not isinstance(node, dict):
             return
@@ -540,11 +556,24 @@ def lint_project(project, cfg=None, project_dir=None):
         has_fixed = bool(node.get("fixed_body"))
         if not blocks and not children and not has_fixed:
             emit("empty_section", "empty_section.none", loc0, path, node_id, None, {})
+        if node_id:
+            if node_id in seen_node_ids:
+                emit("duplicate_id", "duplicate_id.section", loc0, path, node_id, None,
+                     {"id": node_id, "other": seen_node_ids[node_id]})
+            else:
+                seen_node_ids[node_id] = loc0
         for idx, block in enumerate(blocks):
             if not isinstance(block, dict):
                 continue
             location = '%s / block %d (%s)' % (loc0, idx, block.get("type", "?"))
             block_id = block.get("id")
+            if block_id:
+                if block_id in seen_block_ids:
+                    emit("duplicate_id", "duplicate_id.block", location, path,
+                         node_id, block_id,
+                         {"id": block_id, "other": seen_block_ids[block_id]})
+                else:
+                    seen_block_ids[block_id] = location
 
             def add(code, mid, _location=location, _bid=block_id, **kw):
                 emit(code, mid, _location, path, node_id, _bid, kw)
