@@ -86,6 +86,8 @@ const S = {
   approxNote: 'Approximate layout' + MID + 'pagination and fonts differ from the exported file',
   proofTitle: 'This section, rendered by Word',
   proofRendering: 'Rendering this section' + DOTS,
+  staleProof: 'These pages are the last saved version' + MID
+    + 'the edits that are only in this page are not in them',
   pageOf: 'Page {n} of {m}',
   following: 'Following the cursor',
   wholeReport: 'Whole report',
@@ -840,6 +842,20 @@ function ComplianceTable(props) {
     </div>`;
 }
 
+// The label an unlabelled panel of an image grid gets: (a)..(z),(aa),(ab)...
+// The mirror of engine.py::_grid_sub_label, so a grid of more than 26 panels
+// reads the same on the paper as it does in the exported document.
+function gridSubLabel(index) {
+  let n = Number(index) + 1;
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(97 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return '(' + s + ')';
+}
+
 // One block of the document, plus the hover affordance that takes the user to it
 // in the centre canvas.
 function PaperBlock(props) {
@@ -858,14 +874,22 @@ function PaperBlock(props) {
   } else if (block.type === 'imagegrid') {
     const items = Array.isArray(block.items) ? block.items : [];
     const cols = Math.max(1, Number(block.cols || 2));
-    const subs = Array.isArray(block.sub_captions) ? block.sub_captions : [];
+    // `sub_captions` is the boolean "label every panel", not a list of labels:
+    // the label of a panel is that panel's own `sub`, and a panel with none
+    // falls back to (a)(b)(c). This is engine.py::_render_image_grid's contract,
+    // and reading the flag as an array meant the preview showed no sub-caption
+    // at all while the exported document showed every one of them.
+    const showSubs = !!block.sub_captions;
+    const subOf = (item, i) => (showSubs
+      ? (String((item && item.sub) || '') || gridSubLabel(i))
+      : '');
     body = html`
       <figure class="rw-preview__figure">
         <div class="rw-preview__figgrid" style=${{ gridTemplateColumns: 'repeat(' + cols + ', 1fr)' }}>
           ${items.map((item, i) => html`
             <div key=${i} class="rw-preview__figcell">
-              <${PaperImage} dir=${dir} file=${item && item.file} alt=${subs[i] || ''} />
-              ${subs[i] ? html`<div class="rw-preview__subcap">${subs[i]}</div>` : null}
+              <${PaperImage} dir=${dir} file=${item && item.file} alt=${subOf(item, i)} />
+              ${showSubs ? html`<div class="rw-preview__subcap">${subOf(item, i)}</div>` : null}
             </div>`)}
         </div>
         <${Caption} label=${number ? number.label : null} text=${block.caption || ''} />
@@ -946,7 +970,7 @@ function estimateHeight(section) {
  * not of the section.
  * ================================================================== */
 
-const proofCache = new Map();     // 'dir|node' -> {pages, ms, docxMs, wordMs, at}
+const proofCache = new Map();     // 'dir|node' -> {pages, ms, docxMs, wordMs, at, stale}
 let lastExportSeconds = null;     // measured whole-report time, once one export has run
 let proofBlocked = null;          // {reason} once the server says this machine cannot
 
@@ -1248,11 +1272,21 @@ export function PreviewTab(props) {
 
   /* ---- proof ---- */
 
+  // The proof renders the project.json ON DISK - the same file the export
+  // reads - so the disk is made current first, exactly as the export does.
+  //
+  // A refusal is answered differently here, though. The export DELIVERS a file
+  // somebody will send on, so it stops and asks. A proof only shows pages, and
+  // the pages of the last saved version are still worth looking at, so the
+  // render goes ahead - the panel never blanks - and the result CARRIES the
+  // fact that it is older than the screen, which is the part that was missing:
+  // the images used to be presented as if they were the document on screen.
   const runProof = useCallback(async () => {
     if (!dir || !cursorNode || proofBlocked) return;
     setProofBusy(true);
     setProofError(null);
     try {
+      const landed = await flushEdits();
       const answer = await api.previewSection(dir, cursorNode);
       if (answer && answer.stub) {
         proofBlocked = { reason: String(answer.detail || '') };
@@ -1265,6 +1299,7 @@ export function PreviewTab(props) {
         docxMs: (answer && answer.docx_ms) || 0,
         wordMs: (answer && answer.word_ms) || 0,
         at: Date.now(),
+        stale: !landed,
       });
       setPage(1);
       bump((n) => n + 1);
@@ -1368,6 +1403,13 @@ export function PreviewTab(props) {
       ${proofBusy ? html`
         <div class="rw-preview__strip">
           <${Banner} level="warn">${S.proofRendering}<//>
+        </div>` : null}
+      ${!proofBusy && proofNode && proof && proof.stale ? html`
+        <div class="rw-preview__strip">
+          <${Banner} level="warn"
+                     action=${html`<${Button} level="tertiary" onClick=${runProof}>${S.retry}<//>`}>
+            ${S.staleProof}
+          <//>
         </div>` : null}
       ${proofError ? html`
         <div class="rw-preview__strip">
