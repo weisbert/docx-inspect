@@ -991,9 +991,15 @@ async function saveProject(isAuto){
     App._saveRetry = 0; clearTimeout(App._saveRetryT);     // clear any backoff
     setStatus("saved", (App.ui["status.autosaved"]||"Autosaved") + (r.saved_at?(" · "+fmtTime(r.saved_at)):""));
   }catch(e){
-    if (e.status === 409){
-      // A4: project.json changed on disk (another tab, or an applied update).
-      // Do NOT clobber -- let the user reload the latest or overwrite explicitly.
+    if (e.status === 409 || e.status === 410){
+      // A4: project.json changed on disk (another tab, or an applied update) --
+      // 409. 410 is the same dead end by a different door: the report folder
+      // (or its project.json) is gone, so retrying the same saved_at can only
+      // ever 410 again -- an endless "Unsaved — save failed, retrying…" loop
+      // that never leaves the tab. Route it through the SAME terminal dialog:
+      // "Overwrite with mine" clears the token and re-PUTs with none, which the
+      // server treats as a fresh create, and "Reload latest" surfaces that the
+      // report is gone instead of retrying forever.
       setStatus("err", T("status.conflict","Save conflict — file changed on disk"));
       onSaveConflict(e.payload && e.payload.saved_at);
       return;   // finally still clears App.saving

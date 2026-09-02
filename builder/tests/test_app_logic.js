@@ -218,5 +218,44 @@ try { vm.runInContext("renderNodeEditor(el('div'), App.project.outline[0]);", sa
   ok(true, "renderNodeEditor runs (multi-sim compliance datatable editor)"); }
 catch (e) { ok(false, "renderNodeEditor runs (multi-sim compliance datatable editor)", e && e.message); }
 
-console.log(fails ? ("\nFAILURES: " + fails) : "\nALL APP-LOGIC TESTS PASSED");
-process.exit(fails ? 1 : 0);
+// saveProject's 409/410 handling (P1-5): a 410 (the report is no longer on
+// disk -- deleted, or an "Undo last apply" that removed a just-created report)
+// used to fall through to the exponential-backoff retry branch, which resends
+// the same stale saved_at forever: an endless "Unsaved -- save failed,
+// retrying..." loop that never leaves the tab. It must be terminal exactly
+// like a 409 conflict instead. api() is stubbed to fail synchronously with a
+// chosen status so this never touches the network.
+async function saveProjectSees(status, payload) {
+  vm.runInContext(
+    "App.project = {outline:[]}; App.dir = 'proj'; App.saving = false; " +
+    "App._savedAt = 5; App._saveRetry = 0; App._conflictOpen = false; " +
+    "if (App._saveRetryT) clearTimeout(App._saveRetryT); App._saveRetryT = null;",
+    sandbox);
+  sandbox.api = async () => {
+    const e = new Error("stubbed failure");
+    e.status = status;
+    e.payload = payload;
+    throw e;
+  };
+  await sandbox.saveProject(false);
+  // App is declared `const App = {...}` at the script's top level, so (like any
+  // top-level let/const under vm) it is a lexical binding, NOT a property of the
+  // sandbox object -- it must be read back through vm.runInContext, the same way
+  // every other test in this file reads it.
+  return vm.runInContext(
+    "({conflictOpen: App._conflictOpen === true, retryScheduled: App._saveRetryT != null})",
+    sandbox);
+}
+(async () => {
+  const c409 = await saveProjectSees(409, { saved_at: 123 });
+  ok(c409.conflictOpen, "409 opens the conflict dialog (unchanged)");
+  ok(!c409.retryScheduled, "409 does not schedule a retry (unchanged)");
+
+  const c410 = await saveProjectSees(410, { error: "gone", gone: true, dir: "proj" });
+  ok(c410.conflictOpen, "410 opens the SAME conflict dialog, not a retry loop");
+  ok(!c410.retryScheduled, "410 does not schedule an endless retry");
+  vm.runInContext("if (App._saveRetryT) clearTimeout(App._saveRetryT);", sandbox);
+
+  console.log(fails ? ("\nFAILURES: " + fails) : "\nALL APP-LOGIC TESTS PASSED");
+  process.exit(fails ? 1 : 0);
+})();
