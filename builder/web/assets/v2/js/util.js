@@ -67,7 +67,13 @@ export function computeCaptionNumbers(outline) {
             });
           }
         } else if (type === 'table' || type === 'datatable') {
-          const caption = String(block.caption == null ? '' : block.caption).trim();
+          // Mirrors engine.py's `cap = block.get("caption", "")` / `if cap:`
+          // EXACTLY: the engine never strips the caption before this truthiness
+          // check, so a whitespace-only caption is still non-empty and DOES
+          // consume a number there. Trimming here (as this used to) shifted
+          // every later table number between the editor and the exported Word
+          // file. Do not add a .trim() back without changing engine.py first.
+          const caption = block.caption == null ? '' : block.caption;
           if (caption) {
             state.tbl[chapter] += 1;
             if (id) {

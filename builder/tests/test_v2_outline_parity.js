@@ -36,6 +36,9 @@
  *     4. sectionFromPayload accepts the three shapes this product writes and
  *        refuses a whole report and an update delta, by name;
  *     5. the home header's service line is built from the address bar.
+ *     6. computeCaptionNumbers agrees with engine.py: a whitespace-only table
+ *        caption still consumes a number (no .trim() before the truthiness
+ *        check, matching _collect_ref_targets exactly).
  *   in a real browser, against a generated report on disk:
  *     6. the rail marks the template section, the table section and the added
  *        section, and marks nothing else;
@@ -269,6 +272,7 @@ async function staticChecks() {
   installBrowserStubs();
   const editor = await import(pathToFileURL(path.join(V2_JS, 'views', 'editor.js')).href);
   const home = await import(pathToFileURL(path.join(V2_JS, 'views', 'home.js')).href);
+  const util = await import(pathToFileURL(path.join(V2_JS, 'util.js')).href);
 
   const need = ['flattenOutline', 'demoteInto', 'promoteOut',
     'blocksFromFixedBody', 'sectionFromPayload'];
@@ -386,6 +390,32 @@ async function staticChecks() {
       home.serviceHost({ host: '127.0.0.1:8931' }));
     check('with no address at all it names no port',
       home.serviceHost({ host: '' }) === '127.0.0.1', home.serviceHost({ host: '' }));
+  }
+
+  /* ---- 6. caption numbering matches engine.py's untrimmed rule ---- */
+
+  section('a whitespace-only caption still consumes a table number');
+  if (typeof util.computeCaptionNumbers === 'function') {
+    // engine.py's _collect_ref_targets does `cap = block.get("caption", "")` /
+    // `if cap:` with NO strip() -- a whitespace-only string is still non-empty,
+    // so Word numbers this table. util.js used to .trim() first, which skipped
+    // it and shifted every later table number relative to the exported file.
+    const withBlankCaption = [{
+      id: 'ch1', title: 'Chapter 1', children: [],
+      blocks: [
+        { type: 'table', id: 't-blank', caption: '   ', rows: [] },
+        { type: 'datatable', id: 't-real', caption: 'Real caption', data: {} },
+      ],
+    }];
+    const nums = util.computeCaptionNumbers(withBlankCaption);
+    check('a whitespace-only caption still takes a number (matches engine.py)',
+      nums.has('t-blank') && nums.get('t-blank').label === 'Table 1-1',
+      nums.has('t-blank') ? JSON.stringify(nums.get('t-blank')) : 'no entry');
+    check('the next real caption follows it, not restarts at 1',
+      nums.has('t-real') && nums.get('t-real').label === 'Table 1-2',
+      nums.has('t-real') ? JSON.stringify(nums.get('t-real')) : 'no entry');
+  } else {
+    check('util.js exports computeCaptionNumbers', false, '');
   }
 }
 
