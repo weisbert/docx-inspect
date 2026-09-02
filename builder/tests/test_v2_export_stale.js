@@ -43,6 +43,9 @@
  *      names that file and calls it older than the document, and the file is
  *      still there -- reporting it is the answer, deleting the user's copy is
  *      not. (before the fix: the panel listed only the .docx and said nothing)
+ *   7. That same panel, as the design spells it: every artefact carries its
+ *      size, and a run that produced no PDF reports no PDF timing.
+ *      (before the fix: no sizes, and a flat "PDF 0.0s")
  *
  * IT NEVER TOUCHES REAL REPORTS. The fixture is generated from scratch into the
  * OS temporary directory and the server is booted against THAT with an explicit
@@ -600,6 +603,17 @@ async function pressExport(page, item) {
       text.slice(0, 900).replace(/\s+/g, ' '));
     check('and it is still on disk -- nothing of the user\'s was deleted',
       fs.existsSync(path.join(outDir, 'CDR.pdf')), JSON.stringify(exported()));
+
+    // The finished panel, as the design spells it: file name, folder and size
+    // per artefact, and no PDF timing on a run that produced no PDF.
+    const names = await page.evaluate(() => Array.from(
+      document.querySelectorAll('.rw-export__filename')).map((el) => el.textContent.trim()));
+    check('each artefact is listed with its size',
+      names.length === 2 && names.every((n) => /\d+(\.\d+)?\s(B|KB|MB|GB)$/.test(n)),
+      JSON.stringify(names));
+    check('a Word-only export reports no PDF timing',
+      /Word \d/.test(text) && !/PDF \d/.test(text),
+      text.slice(0, 900).replace(/\s+/g, ' '));
 
     await clickText(page, 'Back to editing');
     await wait(500);

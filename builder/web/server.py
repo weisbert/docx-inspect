@@ -880,6 +880,42 @@ def _level_blank_figures(warnings):
     return warnings
 
 
+def _pdf_page_count(path):
+    """How many pages that PDF has, or None when this machine cannot tell.
+
+    PyMuPDF is already an optional dependency here -- the page-image preview
+    needs it -- so where it is installed the finished export can say how long
+    the document came out, which is the number that shows at a glance that a
+    render went wrong. Where it is not, the answer is simply absent and the
+    interface keeps its general wording. Nothing is installed for this, and no
+    failure of it is allowed to cost the user the export they just waited for.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return None
+    doc = None
+    try:
+        doc = fitz.open(path)
+        return int(doc.page_count)
+    except Exception:
+        return None
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+def _file_size(path):
+    """Size of a file in bytes, or None when it cannot be read."""
+    try:
+        return int(os.path.getsize(path))
+    except OSError:
+        return None
+
+
 def _stale_siblings(fresh_abs, project_dir):
     """Artefacts of an EARLIER export that this one did not rewrite.
 
@@ -987,15 +1023,30 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
     stats["warns"] = sum(1 for w in warnings if w.get("level") == "warn")
     stats["infos"] = sum(1 for w in warnings if w.get("level") == "info")
 
+    # Every artefact the finished panel can name, with its size. Keyed by the
+    # same report-relative path the panel lists, so the panel looks a row up
+    # rather than being handed a second, parallel list of files.
+    sizes = {}
+
+    def note_size(rel_path, abs_path):
+        size = _file_size(abs_path)
+        if size is not None:
+            sizes[rel_path] = size
+
     if fmt == "docx":
         rel = os.path.relpath(docx_abs, project_dir).replace("\\", "/")
         answer = {"out": rel, "abs": docx_abs.replace("\\", "/"), "fmt": "docx",
                   "warnings": warnings, "stats": stats}
+        note_size(rel, docx_abs)
         # Only a Word-only export can leave an artefact behind: the PDF export
         # below rewrites both files.
         older = _stale_siblings(docx_abs, project_dir)
         if older:
             answer["stale_siblings"] = older
+            for item in older:
+                note_size(item["out"], item["abs"])
+        if sizes:
+            answer["sizes"] = sizes
         return answer
 
     if fmt == "pdf":
@@ -1003,8 +1054,18 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
         phase("converting")
         _word_export_pdf(docx_abs, pdf_abs)
         rel = os.path.relpath(pdf_abs, project_dir).replace("\\", "/")
-        return {"out": rel, "abs": pdf_abs.replace("\\", "/"), "fmt": "pdf",
-                "warnings": warnings, "stats": stats}
+        answer = {"out": rel, "abs": pdf_abs.replace("\\", "/"), "fmt": "pdf",
+                  "warnings": warnings, "stats": stats}
+        note_size(rel, pdf_abs)
+        # The .docx this PDF was made from is listed beside it, so its size is
+        # wanted too.
+        note_size(os.path.relpath(docx_abs, project_dir).replace("\\", "/"), docx_abs)
+        pages = _pdf_page_count(pdf_abs)
+        if pages:
+            answer["pages"] = pages
+        if sizes:
+            answer["sizes"] = sizes
+        return answer
 
     raise ValueError("unknown fmt: %s" % fmt)
 

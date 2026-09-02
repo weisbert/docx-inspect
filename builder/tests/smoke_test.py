@@ -784,10 +784,29 @@ def check_word_only_leaves_pdf(port):
     s1, b1 = post_at(port, "/api/export?dir=figs&fmt=pdf")
     if s1 != 200:
         record("a Word-only export names the older PDF beside it", "SKIP (no PDF export here)")
+        record("a PDF export reports its page count and both sizes", "SKIP (no PDF export here)")
         return 0
     f = expect(not b1.get("stale_siblings"),
                "a Word and PDF export leaves nothing behind it",
                "stale_siblings=%r" % (b1.get("stale_siblings"),))
+
+    # The finished panel says "Export finished - {n} pages" and gives each
+    # artefact its size. Both come from here; the page count only where this
+    # machine can count pages at all, which is where PyMuPDF is installed.
+    can_count = True
+    try:
+        import fitz     # noqa: F401
+    except ImportError:
+        can_count = False
+    docx_rel = str(b1.get("out", "")).replace(".pdf", ".docx")
+    sizes = b1.get("sizes") or {}
+    ok_meta = (
+        (not can_count or (isinstance(b1.get("pages"), int) and b1["pages"] >= 1))
+        and sizes.get(b1.get("out"), 0) > 0        # the PDF
+        and sizes.get(docx_rel, 0) > 0             # and the document beside it
+    )
+    f += expect(ok_meta, "a PDF export reports its page count and both sizes",
+                "pages=%r sizes=%r" % (b1.get("pages"), sizes))
     s2, b2 = post_at(port, "/api/export?dir=figs&fmt=docx")
     older = b2.get("stale_siblings") or []
     ok = (
@@ -800,6 +819,8 @@ def check_word_only_leaves_pdf(port):
     )
     f += expect(ok, "a Word-only export names the older PDF beside it",
                 "status=%s stale_siblings=%r" % (s2, older))
+    f += expect("pages" not in b2, "a Word-only export claims no page count",
+                "pages=%r" % (b2.get("pages"),))
     return f
 
 

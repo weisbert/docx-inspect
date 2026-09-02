@@ -119,6 +119,7 @@ const S = {
   finishedPages: 'Export finished' + SEP + '{n} pages',
   finished: 'Export finished',
   timings: 'Word {a}s' + SEP + 'PDF {b}s' + SEP + '{c}s total',
+  timingsWord: 'Word {a}s' + SEP + '{c}s total',
   openFile: 'Open file',
   openFolder: 'Open folder',
   olderThanDoc: 'Older than the document' + MID + 'left by an earlier export',
@@ -1810,6 +1811,9 @@ function cancelExport() {
 function artefactsOf(result) {
   if (!result || !result.out) return [];
   const rows = [];
+  // The server measures the files it wrote; a row it has no size for simply
+  // does not show one.
+  const sizes = (result.sizes && typeof result.sizes === 'object') ? result.sizes : {};
   const add = (rel, abs, stale) => {
     const parts = String(rel).split('/');
     const name = parts[parts.length - 1];
@@ -1820,6 +1824,7 @@ function artefactsOf(result) {
       abs: absolute,
       name: name,
       folder: cut > 0 ? absolute.slice(0, cut) : '',
+      size: Number(sizes[rel]) || 0,
       stale: !!stale,
     });
   };
@@ -1923,11 +1928,11 @@ function ArtefactRow(props) {
   const [, bump] = useState(0);
   return html`
     <div class="rw-export__file">
-      <div class="rw-export__filename">${row.name}</div>
-      ${row.stale ? html`<${Pill} tone="warn">${S.olderThanDoc}<//>` : null}
-      <div class="rw-export__filemeta">
-        ${row.folder}${row.size ? ' ' + formatBytes(row.size) : ''}
+      <div class="rw-export__filename">
+        ${row.name}${row.size ? SEP + formatBytes(row.size) : ''}
       </div>
+      ${row.stale ? html`<${Pill} tone="warn">${S.olderThanDoc}<//>` : null}
+      <div class="rw-export__filemeta">${row.folder}</div>
       <div class="rw-btnrow">
         ${openPathAvailable ? html`
           <${Fragment}>
@@ -2080,7 +2085,9 @@ export function ExportDialog() {
       </div>
       ${state.stale ? html`<${Banner} level="warn">${S.staleExport}<//>` : null}
       <div class="rw-export__timing rw-export__times">
-        ${T('timings', { a: seconds(wordMs), b: seconds(pdfMs), c: seconds(totalMs) })}
+        ${state.convertStart
+          ? T('timings', { a: seconds(wordMs), b: seconds(pdfMs), c: seconds(totalMs) })
+          : T('timingsWord', { a: seconds(wordMs), c: seconds(totalMs) })}
       </div>
       <div class="rw-export__files">
         ${artefactsOf(result).map((row) => html`
