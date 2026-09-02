@@ -158,7 +158,23 @@ function sampleReport() {
       {
         id: 'n-notes',
         title: SECOND_SECTION,
-        blocks: [{ type: 'para', id: 'b-para-1', cardStart: true, runs: [{ t: 'Nothing yet.' }] }],
+        blocks: [
+          { type: 'para', id: 'b-para-1', cardStart: true, runs: [{ t: 'Nothing yet.' }] },
+          // Exactly one result row, which is what makes '1 result rows' visible.
+          {
+            type: 'datatable', id: 'b-table-2', kind: 'compliance', caption: 'Summary',
+            data: {
+              spec_name: 'Spec',
+              sims: [{ key: 'sim', title: 'Schematic', stage: 'CDR', axes: ['MIN', 'TYP', 'MAX'] }],
+              rows: [
+                row('Conditions', 'Supply', 'V', 'common_setting', null,
+                  [null, '1.80', null], [null, '1.80', null], null),
+                row('Performance', 'Divided frequency', 'GHz', 'result', 'le',
+                  ['4.8', '5.0', '5.2'], ['4.85', '5.01', '5.14'], null),
+              ],
+            },
+          },
+        ],
         children: [],
       },
     ],
@@ -680,8 +696,16 @@ async function browserChecks() {
 
     section('counts read like a person wrote them');
     const foot = await footText(page);
-    check('the footer pluralises its row count',
+    check('a table with several result rows says rows',
       foot.indexOf('3 result rows') >= 0, 'the footer read ' + JSON.stringify(foot));
+    await clickText(page, SECOND_SECTION);
+    await settle(page, 900);
+    const oneFoot = await footText(page);
+    check('a table with one result row says row, not rows',
+      oneFoot.indexOf('1 result row') >= 0 && oneFoot.indexOf('1 result rows') < 0,
+      'the footer read ' + JSON.stringify(oneFoot));
+    await clickText(page, SECTION);
+    await settle(page, 900);
 
     /* ---- 6. the reference-column dialog ---- */
 
