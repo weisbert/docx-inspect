@@ -58,6 +58,11 @@
  *      fold, and nothing was marked -- the jump ran before the new section's
  *      cards existed, and the mark is keyed on the card's start index, which
  *      nothing set)
+ *   6. A cross-reference pointing at a block that no longer exists shows the
+ *      red [ref: id] marker the exported file will carry, and the Check tab
+ *      reports it as an error in the lint's own sentence. (before the fix: the
+ *      paper printed nothing at all where the reference was, and the checklist
+ *      had no rule for it)
  *
  * The section render itself is answered by the test, not by Word: this file is
  * about which bytes the render is asked to work from, and a machine without
@@ -106,6 +111,7 @@ const BS = String.fromCharCode(92);
 
 const GRID_FILES = ['corner_tt.png', 'corner_ff.png', 'corner_ss.png'];
 const GRID_BLOCK = 'b-grid';
+const GONE_BLOCK = 'b-deleted-figure';
 const FILLER_IDS = ['b-f1', 'b-f2', 'b-f3', 'b-f4', 'b-f5', 'b-f6'];
 const FILLER = ('The divider is characterised across supply and temperature, and the '
   + 'measured figures are collected here. ').repeat(6);
@@ -137,7 +143,25 @@ function sampleReport() {
       {
         id: 'n-1',
         title: 'Overview',
-        blocks: [{ id: 'b-1', type: 'para', runs: [{ t: START_TEXT }], cardStart: true }],
+        blocks: [
+          { id: 'b-1', type: 'para', runs: [{ t: START_TEXT }], cardStart: true },
+          {
+            id: 'b-refs',
+            type: 'para',
+            cardStart: true,
+            // One reference to a figure that is really there, and one to a
+            // block id nothing carries any more -- what is left behind when a
+            // figure is deleted after somebody referred to it. The stale run
+            // text is the number the reference used to print.
+            runs: [
+              { t: 'Compare ' },
+              { t: '2-1', ref: GRID_BLOCK },
+              { t: ' with ' },
+              { t: '2-2', ref: GONE_BLOCK },
+              { t: '.' },
+            ],
+          },
+        ],
         children: [],
       },
       {
@@ -606,6 +630,31 @@ const subCaptions = (page) => page.evaluate(() => Array.from(
       landing.onScreen === true, JSON.stringify(landing));
     check('and the card it lands on is marked',
       landing.marked === true, JSON.stringify(landing));
+
+    /* ============================================================ *
+     * 6 - a cross-reference with nothing at the other end
+     * ============================================================ */
+
+    console.log('\ndangling cross-reference  (PIN: fails before the fix)');
+
+    await openEditor();
+    const refs = await page.evaluate(() => Array.from(
+      document.querySelectorAll('.rw-preview__ref')).map((el) => el.textContent.trim()));
+    check('the live reference prints the figure number',
+      refs.some((t) => /\b2-1$/.test(t)), JSON.stringify(refs));
+    check('the broken one prints the marker the export prints, not nothing',
+      refs.indexOf('[ref: ' + GONE_BLOCK + ']') >= 0, JSON.stringify(refs));
+
+    await page.evaluate(async () => {
+      const { store } = await import('/assets/v2/js/store.js');
+      store.setUi({ rightOpen: true, rightTab: 'check' });
+    });
+    await wait(700);
+    const errors = await page.evaluate(() => Array.from(
+      document.querySelectorAll('.rw-check__item--error')).map((el) => el.textContent.trim()));
+    check('the Check tab reports it, at error level, in the lint sentence',
+      errors.some((t) => /points at a figure or table that no longer exists/.test(t)),
+      JSON.stringify(errors));
   } catch (err) {
     check('the test ran to the end', false, err && err.stack ? err.stack : String(err));
   } finally {

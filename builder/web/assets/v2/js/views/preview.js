@@ -212,7 +212,10 @@ const LINT_LEVELS = {
   missing_logo: 'warn',
   no_caption: 'warn',
   row_clip_risk: 'warn',
-  dangling_ref: 'warn',
+  // A cross-reference whose target is gone does not merely look odd: the
+  // renderer writes a red "[ref: <id>]" marker into the sentence, so the
+  // exported document says something the author never wrote.
+  dangling_ref: 'error',
   table_warning: 'warn',
   sim_span_unmergeable: 'error',
   // structural codes
@@ -283,6 +286,9 @@ const LINT_MESSAGES = {
     + 'fewer than two columns - there is nothing to merge',
   'empty_section.none':
     'Section is empty - no text, no figures, no tables',
+  'dangling_ref.missing':
+    'A cross-reference in this paragraph points at a figure or table that no '
+    + 'longer exists - the export prints a red marker there',
 };
 
 const REQUIRED_ROW_KEYS = ['cat', 'item', 'kind', 'unit'];
@@ -455,9 +461,50 @@ function lintDatatable(data, add, defaultAxes, settingKinds) {
   }
 }
 
-function lintBlock(block, add, defaultAxes, settingKinds) {
+// The block ids a cross-reference can resolve to. Mirrors content_lint's
+// _ref_targets, which mirrors engine._collect_ref_targets: an image or image
+// grid is a target whether or not it carries a caption (the render bookmarks it
+// either way), a table only once it has one, a block with no id never is, and a
+// section with a fixed_body contributes none of its own blocks.
+function refTargets(outline) {
+  const ids = {};
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (!node.fixed_body) {
+      const blocks = node.blocks || [];
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        if (!block || typeof block !== 'object' || !block.id) continue;
+        if (block.type === 'image' || block.type === 'imagegrid') ids[block.id] = true;
+        else if ((block.type === 'table' || block.type === 'datatable') && block.caption) {
+          ids[block.id] = true;
+        }
+      }
+    }
+    const kids = node.children || [];
+    for (let i = 0; i < kids.length; i++) walk(kids[i]);
+  };
+  const roots = outline || [];
+  for (let i = 0; i < roots.length; i++) walk(roots[i]);
+  return ids;
+}
+
+// A run carrying `ref` must point at a live target -- see refTargets.
+function lintRefs(block, add, targets) {
+  if (!targets) return;
+  const runs = block.runs || [];
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    if (!run || typeof run !== 'object') continue;
+    if (run.ref && !targets[run.ref]) add('dangling_ref', 'dangling_ref.missing');
+  }
+}
+
+function lintBlock(block, add, defaultAxes, settingKinds, targets) {
   const bt = block.type;
-  if (bt === 'image') {
+  if (bt === 'para') {
+    lintRefs(block, add, targets);
+  } else if (bt === 'image') {
     lintImageFile(block.file, add);
     if (!String(block.caption || '').trim()) add('no_caption', 'no_caption.image');
   } else if (bt === 'imagegrid') {
@@ -504,6 +551,9 @@ export function lintProject(project, cfg) {
   const comp = conf.compliance && typeof conf.compliance === 'object' ? conf.compliance : {};
   const defaultAxes = Array.isArray(comp.axis_labels) ? comp.axis_labels : DEFAULT_AXES;
   const settingKinds = Array.isArray(comp.setting_kinds) ? comp.setting_kinds : DEFAULT_SETTING_KINDS;
+  // Whole-document, so a reference pointing FORWARD (or into another section)
+  // is not reported as broken -- collected once, before the walk.
+  const targets = refTargets((project && project.outline) || []);
 
   const sections = flattenOutline((project && project.outline) || []);
   for (let si = 0; si < sections.length; si++) {
@@ -522,7 +572,7 @@ export function lintProject(project, cfg) {
       const add = (code, mid, kw) => {
         findings.push(makeFinding(code, lintMessage(mid, kw), location, sec.loc, sec.id, blockId));
       };
-      lintBlock(block, add, defaultAxes, settingKinds);
+      lintBlock(block, add, defaultAxes, settingKinds, targets);
     }
   }
   return findings;
@@ -686,7 +736,16 @@ function Prose(props) {
     if (!run || typeof run !== 'object') return null;
     if (run.ref) {
       const target = captions.get(run.ref);
-      return html`<span key=${i} class="rw-preview__ref">${target ? target.label : (run.t || '')}</span>`;
+      // A reference whose target is gone is not blank on paper: the renderer
+      // writes a red "[ref: <id>]" into the sentence, and the reader has to be
+      // able to see the thing they will have to fix. The run's own text is not
+      // a fallback -- it is the number the reference used to print, which would
+      // read as a live reference to a figure that no longer exists.
+      if (!target) {
+        return html`<span key=${i} class="rw-preview__ref rw-preview__ref--broken"
+                          >${'[ref: ' + (run.ref || '?') + ']'}</span>`;
+      }
+      return html`<span key=${i} class="rw-preview__ref">${target.label}</span>`;
     }
     return html`<span key=${i} style=${runStyle(run)}>${run.t || ''}</span>`;
   });

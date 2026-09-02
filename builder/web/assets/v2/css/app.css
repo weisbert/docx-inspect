@@ -1233,6 +1233,9 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-preview__p--list { padding-left: var(--sp-12); text-indent: calc(-1 * var(--sp-12)); }
 .rw-preview__bullet { margin-right: var(--sp-4); color: var(--fg-muted); }
 .rw-preview__ref { color: var(--accent); }
+/* A reference with no target prints as a red [ref: id] in the exported file;
+   the paper shows the same thing rather than an empty space. */
+.rw-preview__ref--broken { color: var(--paper-flag); font-weight: var(--fw-strong); }
 .rw-preview__figure { margin: 0 0 var(--sp-9); text-align: center; }
 .rw-preview__img { max-width: 100%; }
 .rw-preview__frame {
