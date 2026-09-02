@@ -617,6 +617,41 @@ async function browserChecks() {
       }
     }
 
+    /* ---- 1c. a jump from the preview marks a card; it does not arm it ---- */
+
+    section('a jump from the preview does not arm the card shortcut');
+    const jumped = await page.evaluate((id) => {
+      const paper = document.querySelector('.rw-paper [data-block="' + id + '"]');
+      const arrow = paper && paper.querySelector('.rw-paper__jump button');
+      if (!arrow) return false;
+      arrow.click();
+      return true;
+    }, TABLE_ID);
+    if (!jumped) {
+      check('the paper preview offers a jump for the table', false,
+        'no .rw-paper__jump for ' + TABLE_ID);
+    } else {
+      await settle(page, 700);
+      const marked = await page.evaluate((id) => {
+        const slot = document.querySelector('[data-block-id="' + id + '"]');
+        const card = slot && slot.querySelector('.rw-card');
+        return !!(card && card.classList.contains('rw-card--selected'));
+      }, TABLE_ID);
+      check('the jump marks the card it landed on', marked,
+        'nothing on the canvas draws as selected, so the jump landed nowhere');
+
+      // The card is highlighted, which is the whole point of the jump -- and
+      // the reason a bare Delete must NOT take it: the user came here to look.
+      await page.keyboard.press('Delete');
+      await settle(page, 600);
+      await flushSave(page);
+      const survived = await waitForBlocks(reportsRoot, (b) => b.length === 2, 1500);
+      check('and Delete does not take the card the jump landed on',
+        survived.length === 2 && survived.some((b) => b && b.id === TABLE_ID),
+        'the section now reads: ' + blockShape(survived));
+      await page.screenshot({ path: path.join(shots, '3-jumped-not-armed.png') });
+    }
+
     /* ---- 2. Delete with a card genuinely selected ---- */
 
     section('Delete with a card genuinely selected');

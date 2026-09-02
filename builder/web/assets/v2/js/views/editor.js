@@ -2595,6 +2595,20 @@ export function Editor(props) {
   const dir = (props.route && props.route.dir) || (route && route.dir) || null;
   const [selectedBlock, setSelectedBlock] = useState(null);
   const [selectedStart, setSelectedStart] = useState(-1);
+  // MARKING a card and ARMING its Delete are two different things, and only one
+  // gesture does both: a press on the card's own head. The canvas marks the
+  // selected card by the block index it starts at, so anything that wants a
+  // card highlighted has to write that index -- and a jump from the preview or
+  // from a warning wants exactly that and nothing more. Writing the index alone
+  // armed the whole-card Delete as a side effect: a jump, then a stray press on
+  // Delete, and the card the user had come to LOOK at was gone. Recoverable
+  // through the undo toast, which is not the same as never having happened.
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const markCard = useCallback((start, armed) => {
+    const at = (start === undefined || start === null || isNaN(start)) ? -1 : start;
+    setSelectedStart(at);
+    setDeleteArmed(at >= 0 && !!armed);
+  }, []);
   const [caret, setCaret] = useState(null);
   const [caretTick, setCaretTick] = useState(0);
   const [toast, setToast] = useState(null);
@@ -2643,8 +2657,8 @@ export function Editor(props) {
     store.navigate({ view: 'editor', dir: dir, node: id });
     store.setUi({ cursorNode: id, cursorBlock: null });
     setSelectedBlock(null);
-    setSelectedStart(-1);
-  }, [dir]);
+    markCard(-1, false);
+  }, [dir, markCard]);
 
   /* ---- land on a section when the address names none ---- */
   useEffect(() => {
@@ -2695,8 +2709,10 @@ export function Editor(props) {
       const el = document.querySelector('[data-block-id="' + target + '"]');
       if (el) {
         if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        // Marked, so the card the jump landed on is visibly the one; NOT
+        // armed, because nobody pressed its head.
         const start = parseInt(el.getAttribute('data-card-start'), 10);
-        if (!isNaN(start)) setSelectedStart(start);
+        if (!isNaN(start)) markCard(start, false);
         return;
       }
       tries += 1;
@@ -2714,7 +2730,7 @@ export function Editor(props) {
     const removed = (node.blocks || []).slice(start, start + count);
     edit(() => { node.blocks.splice(start, count); });
     setSelectedBlock(null);
-    setSelectedStart(-1);
+    markCard(-1, false);
     setToast({
       text: S.blockDeleted,
       action: S.undo,
@@ -2894,7 +2910,8 @@ export function Editor(props) {
       // Delete destroyed the whole table. The second is that the user actually
       // selected this card, which now means a press on its head; a press in a
       // card's body clears the selection instead of arming it.
-      if (ev.key === 'Delete' && !keyboardIsClaimed() && selectedStart >= 0) {
+      if (ev.key === 'Delete' && !keyboardIsClaimed()
+          && selectedStart >= 0 && deleteArmed) {
         ev.preventDefault();
         const node = currentRow && currentRow.node;
         const blocks = (node && node.blocks) || [];
@@ -2913,8 +2930,8 @@ export function Editor(props) {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [rows, rowIndex, selectedBlock, selectedStart, currentRow, drawer, newReport,
-      jumping, ui]);
+  }, [rows, rowIndex, selectedBlock, selectedStart, deleteArmed, currentRow, drawer,
+      newReport, jumping, ui]);
 
   /* ---- header actions ---- */
 
@@ -3071,7 +3088,7 @@ export function Editor(props) {
                       selectedStart=${selectedStart}
                       onSelectBlock=${(id, start) => {
                         setSelectedBlock(id || null);
-                        setSelectedStart(start === undefined ? -1 : start);
+                        markCard(start, true);
                         if (id) store.setUi({ cursorNode: nodeId, cursorBlock: id });
                       }}
                       onCursorBlock=${(id) => {
@@ -3080,7 +3097,7 @@ export function Editor(props) {
                         // follows this; the card-level Delete does not, so
                         // pressing into a card's body drops the selection.
                         setSelectedBlock(id || null);
-                        setSelectedStart(-1);
+                        markCard(-1, false);
                         if (id) store.setUi({ cursorNode: nodeId, cursorBlock: id });
                       }}
                       onDeleteCard=${deleteCard}
