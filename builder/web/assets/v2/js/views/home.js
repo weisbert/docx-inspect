@@ -50,7 +50,10 @@ import {
 const T = {
   // application chrome
   appName: 'Report Workbench',
-  service: 'Local service 127.0.0.1:8765 · runs offline',
+  // The one line that tells the reader WHERE they are, so it has to be read off
+  // the address bar rather than typed in here: the service takes --port, and a
+  // second copy running beside the first was being told the first one's number.
+  service: (host) => 'Local service ' + host + ' · runs offline',
   more: 'More',
   update: (n) => 'A newer version of the tool is available (' + n + ' fixes) · Pull and restart',
 
@@ -175,6 +178,20 @@ const STAGES = ['XDR', 'PDR', 'CDR', 'FDR'];
 // The synthetic bucket the server files a flat legacy report under. It is not a
 // folder, so it can never be renamed, deleted, or used as a create target.
 const UNFILED_ID = 'unfiled';
+
+/* ------------------------------------------------------------------ *
+ * Where this page is being served from
+ * ------------------------------------------------------------------ */
+
+// host:port as the address bar has it. The service binds 127.0.0.1 on whatever
+// --port it was given, so the number is only knowable at runtime; a page loaded
+// from a file (or a test harness with no location) says the loopback address
+// alone rather than a port that would be a guess.
+export function serviceHost(loc) {
+  const here = loc || (typeof window !== 'undefined' ? window.location : null);
+  const host = here && here.host ? String(here.host) : '';
+  return host || '127.0.0.1';
+}
 
 /* ------------------------------------------------------------------ *
  * Expansion state -- persisted under its own key
@@ -1067,7 +1084,7 @@ export function Home() {
         <span class="rw-topbar__mark" aria-hidden="true">R</span>
         <span class="rw-topbar__name">${T.appName}</span>
         <span class="rw-topbar__rule"></span>
-        <span class="rw-topbar__sub">${T.service}</span>
+        <span class="rw-topbar__sub">${T.service(serviceHost())}</span>
         <span class="rw-spacer"></span>
         <div class="rw-topbar__actions">
           ${updateReady
