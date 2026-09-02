@@ -145,6 +145,9 @@ function writePersisted(ui) {
 
 let state = initialState();
 const subscribers = new Set();
+// Controls that edit in place and can be holding a value the document has not
+// been told about yet -- see registerPendingEdit / commitPendingEdits.
+const pendingEdits = new Set();
 let notifying = false;
 let bannerSeq = 0;
 
@@ -362,6 +365,38 @@ export const store = {
     store.set({ dirty: true, rev: state.rev + 1 });
   },
 
+  // A control that edits IN PLACE registers here how to hand its open editor
+  // over to the document.
+  //
+  // `dirty` is the whole promise of this module, and a value being typed inside
+  // a third-party control is not in the document yet: the grid's cell editor
+  // holds it until the edition closes, so `dirty` is false, saveNow() writes a
+  // file without it, and the indicator still reads `Saved HH:MM`. Nothing here
+  // can know that; only the control can, so the control says so.
+  //
+  // `commit` returns true when it handed something over (and therefore called
+  // markDirty()), false when there was nothing open. Returns an unregister
+  // function, so a view registers once and drops it when it unmounts.
+  registerPendingEdit(commit) {
+    if (typeof commit !== 'function') return () => {};
+    pendingEdits.add(commit);
+    return () => { pendingEdits.delete(commit); };
+  },
+
+  // Close every open in-place editor into the document. Called before a save
+  // and before the page goes away; true when at least one had something.
+  commitPendingEdits() {
+    let took = false;
+    pendingEdits.forEach((commit) => {
+      try {
+        if (commit()) took = true;
+      } catch (err) {
+        /* one control that cannot close its editor must not stop the save */
+      }
+    });
+    return took;
+  },
+
   // Replace the project wholesale (an import, a restore, a merge) without
   // marking it dirty -- the copy on disk is already the one being shown.
   //
@@ -420,6 +455,10 @@ export const store = {
   // A barrier that resolves while `dirty` is still true is worse than no
   // barrier: it turns "your edit is safe" into a promise nothing kept.
   saveNow() {
+    // An open cell editor holds a value nothing else knows about. Take it
+    // BEFORE the flush, or this barrier reports the disk current while the
+    // screen still shows a number that never reached it.
+    store.commitPendingEdits();
     return flushSaves().then(() => {
       if (!state.dirty) {
         return { ok: true, dir: state.projectDir, savedAt: state.savedAt };

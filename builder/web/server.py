@@ -520,10 +520,19 @@ def parse_xlsx_compliance(xlsx_bytes):
                 stage = _first_str(stage_row, run)
                 groups.append((title, stage, [rc[0] for rc in run]))
 
+    taken = set()
     for gi, (title, stage, cols) in enumerate(groups):
+        key = _sanitize_name(title).lower() or ("sim%d" % (gi + 1))
+        # Two groups whose titles sanitize to the same word would otherwise be
+        # one key, and the per-group values below would collapse into it.
+        base, n = key, 2
+        while key in taken:
+            key = "%s%d" % (base, n)
+            n += 1
+        taken.add(key)
         sims.append(
             {
-                "key": _sanitize_name(title).lower() or ("sim%d" % (gi + 1)),
+                "key": key,
                 "title": title or ("Sim%d" % (gi + 1)),
                 "stage": stage,
             }
@@ -553,6 +562,23 @@ def parse_xlsx_compliance(xlsx_bytes):
                 else:
                     spec_ntwc = val
 
+        # EVERY declared group keeps its own values, under its own key, the way
+        # the engine reads them (row["sims"][key]). The flat sim_mtm below is
+        # the first group as well, kept because older callers read only that;
+        # without the per-group map a two-group sheet used to come back with the
+        # first group's numbers standing in for both.
+        row_sims = {}
+        for gi, (_title, _stage, cols) in enumerate(groups):
+            mtm = [None, None, None]
+            ntwc = None
+            for ai, ci in enumerate(cols[:4]):
+                val = _to_num_or_str(r[ci]) if ci < len(r) else None
+                if ai < 3:
+                    mtm[ai] = val
+                else:
+                    ntwc = val
+            row_sims[sims[gi]["key"]] = {"mtm": mtm, "ntwc": ntwc}
+
         sim_mtm = [None, None, None]
         sim_ntwc = None
         if groups:
@@ -564,21 +590,22 @@ def parse_xlsx_compliance(xlsx_bytes):
                 else:
                     sim_ntwc = val
 
-        rows.append(
-            {
-                "cat": last_cat,
-                "item": str(item),
-                "unit": "" if unit is None else str(unit),
-                "kind": "result",
-                "spec": spec,
-                "spec_mtm": spec_mtm,
-                "sim_mtm": sim_mtm,
-                "spec_ntwc": spec_ntwc,
-                "sim_ntwc": sim_ntwc,
-                "limit": None,
-                "sim_span": False,
-            }
-        )
+        row_out = {
+            "cat": last_cat,
+            "item": str(item),
+            "unit": "" if unit is None else str(unit),
+            "kind": "result",
+            "spec": spec,
+            "spec_mtm": spec_mtm,
+            "sim_mtm": sim_mtm,
+            "spec_ntwc": spec_ntwc,
+            "sim_ntwc": sim_ntwc,
+            "limit": None,
+            "sim_span": False,
+        }
+        if row_sims:
+            row_out["sims"] = row_sims
+        rows.append(row_out)
 
     return {"recognized": True, "data": {"spec_name": spec_name, "sims": sims, "rows": rows}}
 

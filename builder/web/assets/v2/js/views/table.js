@@ -44,7 +44,7 @@ import { store } from '../store.js';
 import * as api from '../api.js';
 import {
   numericValue, simAxisValues, axisValue as sharedAxisValue,
-  flagsFrom as sharedFlagsFrom, flagsForGroup,
+  flagsFrom as sharedFlagsFrom, flagsForGroup, plural,
 } from '../util.js';
 import {
   Button, IconButton, Select, SegmentedControl, Dialog, Menu, Pill, Spinner, Toast,
@@ -482,6 +482,79 @@ export async function exportBlockXlsx(dir, block) {
   return result;
 }
 
+/* ---- the other direction: a spreadsheet into the table ------------- */
+
+const IMPORT_UNRECOGNISED = 'No compliance table was recognised in that file — nothing was changed';
+const IMPORT_EMPTY = 'That file holds no rows — nothing was changed';
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const comma = text.indexOf(',');
+      resolve(comma >= 0 ? text.slice(comma + 1) : text);
+    };
+    reader.onerror = () => reject(new Error('the file could not be read'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// One axis value of one imported row, for one column of THIS table's plan.
+//
+// The file's groups are paired with the table's own by POSITION: a spreadsheet
+// names its groups whatever the document that produced it named them, and this
+// table's keys are its own. A group the file does not have leaves its column
+// untouched -- returning null rather than blanking a column the import knows
+// nothing about.
+function importedAxis(row, parsedSims, simGroups, col) {
+  if (col.group === 'spec') {
+    const arr = (Array.isArray(row.spec_mtm) ? row.spec_mtm : [null, null, null])
+      .concat([row.spec_ntwc === undefined ? null : row.spec_ntwc]);
+    return col.axis < arr.length ? fmtVal(arr[col.axis]) : null;
+  }
+  let at = -1;
+  for (let i = 0; i < simGroups.length; i++) {
+    if (String(simGroups[i].key) === String(col.group)) { at = i; break; }
+  }
+  if (at < 0 || at >= parsedSims.length) return null;
+  const key = String(parsedSims[at].key);
+  const holder = (row.sims && Object.prototype.hasOwnProperty.call(row.sims, key))
+    ? row.sims[key] || {}
+    : (at === 0 ? { mtm: row.sim_mtm, ntwc: row.sim_ntwc } : null);
+  if (!holder) return null;
+  const arr = (Array.isArray(holder.mtm) ? holder.mtm : [null, null, null])
+    .concat([holder.ntwc === undefined ? null : holder.ntwc]);
+  return col.axis < arr.length ? fmtVal(arr[col.axis]) : null;
+}
+
+// A parsed compliance file as a rectangle aligned to THIS table's columns, so
+// it can be laid down exactly like a paste. The '#', the Limit and the
+// separators are null: a spreadsheet carries none of them, and Word cannot
+// encode a limit at all, so an import must not clear one.
+export function importedComplianceCells(parsed, model) {
+  const data = (parsed && parsed.data) || {};
+  const rows = data.rows || [];
+  const parsedSims = data.sims || [];
+  const simGroups = (model.groups || []).filter((g) => g.role === 'sim' && !g.readOnly);
+  const plan = model.plan || [];
+  const lines = [];
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r] || {};
+    const line = [];
+    for (let x = 1; x < plan.length; x++) {
+      const col = plan[x];
+      if (col.kind === 'cat') line.push(String(row.cat == null ? '' : row.cat));
+      else if (col.kind === 'item') line.push(String(row.item == null ? '' : row.item));
+      else if (col.kind === 'unit') line.push(String(row.unit == null ? '' : row.unit));
+      else if (col.kind === 'axis') line.push(importedAxis(row, parsedSims, simGroups, col));
+      else line.push(null);
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
 /* ================================================================== *
  * 5 - grid model: block -> what the control draws
  * ================================================================== */
@@ -573,6 +646,33 @@ function cellName(x, y) {
   return columnLetter(x) + (y + 1);
 }
 
+/* Which group, if any, is off the right-hand edge right now.
+ *
+ * Returns the group's title when a whole group is out of sight, '' when
+ * something is hidden but no complete group, and null when everything fits.
+ * The plan's own widths are the measure -- they are what the columns were built
+ * with, and reading them needs no second pass over the DOM. */
+export function hiddenGroupName(model, content) {
+  if (!model || !content) return null;
+  const overflow = content.scrollWidth - content.clientWidth;
+  if (!(overflow > 1)) return null;
+  if (model.mode !== 'compliance') return '';
+  const right = content.scrollLeft + content.clientWidth;
+  const ends = {};
+  let left = 0;
+  for (let x = 0; x < model.plan.length; x++) {
+    const col = model.plan[x];
+    left += col.width || 0;
+    if (col.kind === 'axis') ends[col.group] = left;
+  }
+  for (let g = 0; g < model.groups.length; g++) {
+    const group = model.groups[g];
+    const end = ends[group.key];
+    if (end !== undefined && end > right) return group.title || String(group.key);
+  }
+  return '';
+}
+
 /* Category runs merge vertically; a sim_span row merges across each group's
  * axes. Both are what the exported table does, so the editor draws them too. */
 function buildMerges(model) {
@@ -623,6 +723,31 @@ function clearOwnClasses(el) {
   for (let i = 0; i < CELL_CLASSES.length; i++) el.classList.remove(CELL_CLASSES[i]);
 }
 
+/* Hand an open cell editor over to the document.
+ *
+ * A value typed into a cell lives INSIDE the control until its edition closes:
+ * `onchange` -- the only path from the grid into the block -- fires then and
+ * not before, so until then nothing outside the control knows the value exists.
+ * The store is therefore clean, saveNow() writes a file without it and the
+ * indicator still says `Saved HH:MM`, and the leave guard sees nothing to ask
+ * about. Every moment that assumes the document holds what the screen shows has
+ * to close the editor first: a save, the page going away, and the teardown of
+ * the grid host itself.
+ *
+ * `ws.edition` is the control's own record of the open editor,
+ * [element, innerHTML, x, y]; closeEditor(element, true) commits it and fires
+ * onchange. Returns true when something was closed. */
+export function commitOpenEdition(ws) {
+  if (!ws || !ws.edition || !ws.edition.length) return false;
+  if (typeof ws.closeEditor !== 'function') return false;
+  try {
+    ws.closeEditor(ws.edition[0], true);
+  } catch (err) {
+    return false;
+  }
+  return true;
+}
+
 export function TableBlock(props) {
   const block = props.block;
   const cfg = props.cfg || store.get().cfg;
@@ -633,6 +758,9 @@ export function TableBlock(props) {
   const modelRef = useRef(null);
   const undoRef = useRef({ past: [], future: [] });
   const catWarnRef = useRef(false);
+  // Set while the cursor is being nudged off a separator column, so the
+  // selection event that move causes is not read as a fresh landing.
+  const snapRef = useRef(false);
   // The control fires onchange while it builds -- laying out a merge blanks the
   // cells the merge covers -- so edits are ignored until the build has settled.
   const buildingRef = useRef(true);
@@ -646,6 +774,9 @@ export function TableBlock(props) {
   const [refOpen, setRefOpen] = useState(false);
   const [catAsk, setCatAsk] = useState(null);
   const [staleSources, setStaleSources] = useState({});
+  // The name of the first group that is off the right-hand edge, '' when
+  // something is hidden but no whole group, null when everything fits.
+  const [hidden, setHidden] = useState(null);
 
   // The keyboard and paste handlers are registered once on the document, so
   // everything they need is read through refs rather than captured.
@@ -744,6 +875,14 @@ export function TableBlock(props) {
           if (col.readOnly) el.classList.add('rw-grid__cell--ref');
           if (flagged[y + ':' + col.group + ':' + col.axis]) {
             el.classList.add('rw-grid__cell--overspec');
+            // A red cell that cannot say why leaves the reader to find the
+            // Limit column, which the same table has usually scrolled off the
+            // left by the time a simulation column is on screen.
+            const why = overSpecReason(m.rows[y], col.group, col.axis);
+            if (why) el.title = why;
+            else el.removeAttribute('title');
+          } else if (el.title) {
+            el.removeAttribute('title');
           }
           continue;
         }
@@ -838,17 +977,38 @@ export function TableBlock(props) {
       const cells = host.querySelectorAll('.jss_worksheet > tbody > tr > td.jss_freezed');
       for (let i = 0; i < cells.length; i++) cells[i].style.left = left;
     };
-    if (content) content.addEventListener('scroll', pinFrozen);
+    // A two-group table does not fit at 1440 even with the right panel folded
+    // away, and the control draws no scrollbar of its own: the second group was
+    // simply not there, and the only way to learn of it was the preview.
+    const measure = () => setHidden(hiddenGroupName(model, content));
+    const onScroll = () => { pinFrozen(); measure(); };
+    if (content) content.addEventListener('scroll', onScroll);
+    window.addEventListener('resize', measure);
     pinFrozen();
+    measure();
+    const remeasure = setTimeout(measure, 0);   // once the control has laid out
 
     return () => {
       clearTimeout(settle);
-      if (content) content.removeEventListener('scroll', pinFrozen);
+      clearTimeout(remeasure);
+      if (content) content.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', measure);
+      // BEFORE anything else, and before buildingRef closes the door on
+      // onchange: a cell being edited when this host goes away (a section
+      // change, a route change, a rebuild) would otherwise be wiped with the
+      // markup it lives in, and nobody would ever have been told about it.
+      commitOpenEdition(ws);
       buildingRef.current = true;
       sheetRef.current = null;
       try { host.innerHTML = ''; } catch (err) { /* the node may be gone */ }
     };
   }, [model, props.height]);
+
+  // The save barrier (store.saveNow) and the leave guard (boot.js) ask every
+  // control that edits in place whether it is holding a value. This answers for
+  // the grid, so Ctrl+S, an autosave flush, a reload and a tab close all see the
+  // cell that is being typed into.
+  useEffect(() => store.registerPendingEdit(() => commitOpenEdition(sheetRef.current)), []);
 
   /* ---- the control's events -------------------------------------- */
 
@@ -862,10 +1022,36 @@ export function TableBlock(props) {
   const gridEvents = useMemo(() => ({
     onselection: (instance, x1, y1, x2, y2) => {
       if (stateRef.current.buildingRef.current) return;
-      stateRef.current.setSelection({
+      const next = {
         x1: Math.min(x1, x2), y1: Math.min(y1, y2),
         x2: Math.max(x1, x2), y2: Math.max(y1, y2),
-      });
+      };
+      // A cursor parked on a separator column can be typed into and the
+      // keystroke goes nowhere: the column is read-only, so no editor opens and
+      // nothing says so. A single cell that lands on one steps off it, towards
+      // the group the separator introduces. A range is left alone -- selecting
+      // across a separator is normal and harmless.
+      if (next.x1 === next.x2 && next.y1 === next.y2 && !snapRef.current) {
+        const plan = (modelRef.current || {}).plan || [];
+        if (plan[next.x1] && plan[next.x1].kind === 'sep') {
+          let x = next.x1 + 1;
+          while (plan[x] && plan[x].kind === 'sep') x += 1;
+          if (!plan[x]) {
+            x = next.x1 - 1;
+            while (plan[x] && plan[x].kind === 'sep') x -= 1;
+          }
+          if (plan[x]) {
+            snapRef.current = true;
+            try {
+              handlersRef.current.moveTo(x, next.y1);
+            } finally {
+              snapRef.current = false;
+            }
+            return;
+          }
+        }
+      }
+      stateRef.current.setSelection(next);
     },
     onchange: (instance, cell, x, y, value, oldValue) => {
       if (stateRef.current.buildingRef.current) return;
@@ -903,6 +1089,17 @@ export function TableBlock(props) {
     const onKeyDown = (ev) => {
       if (!inside(ev.target) || editing()) return;
       const ctrl = ev.ctrlKey || ev.metaKey;
+      // A plain left/right arrow that would land on a separator column jumps
+      // the whole separator instead. Anything else about the arrow keys --
+      // Shift extension, Ctrl jumps, up and down -- is the control's.
+      if (!ctrl && !ev.altKey && !ev.shiftKey
+          && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
+        if (handlersRef.current.stepColumn(ev.key === 'ArrowRight' ? 1 : -1)) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        return;
+      }
       if (!ctrl) return;
       const key = String(ev.key || '').toLowerCase();
       const on = handlersRef.current;
@@ -1137,15 +1334,61 @@ export function TableBlock(props) {
     });
   };
 
+  /* ---- arrow keys and the separator columns ------------------------ *
+   *
+   * A separator column IS part of the exported table -- it is the 10px gap the
+   * engine draws between two groups -- but it holds nothing and takes nothing.
+   * The control does not know that, so a walk from the spec block to the first
+   * simulated value stopped on it, and a value typed there vanished without a
+   * word. The footer promises 'Arrow keys move'.
+   *
+   * So: an arrow that would land on a separator carries on to the far side of
+   * it, and a cursor that lands on one by any other route (a click, a
+   * right-click) is nudged off it. Only a plain, collapsed arrow move is
+   * claimed; Shift-extension and everything else stays the control's. */
+
+  const stepColumn = (dir) => {
+    const ws = sheetRef.current;
+    const sel = selectionRef.current;
+    const plan = (modelRef.current || {}).plan || [];
+    if (!ws || !sel || typeof ws.updateSelectionFromCoords !== 'function') return false;
+    if (sel.x1 !== sel.x2 || sel.y1 !== sel.y2) return false;
+    let x = sel.x1 + dir;
+    if (!plan[x] || plan[x].kind !== 'sep') return false;  // nothing to skip
+    while (plan[x] && plan[x].kind === 'sep') x += dir;
+    if (!plan[x]) return false;                            // past the edge: not ours
+    return moveTo(x, sel.y1);
+  };
+
+  const moveTo = (x, y) => {
+    const ws = sheetRef.current;
+    if (!ws || typeof ws.updateSelectionFromCoords !== 'function') return false;
+    try {
+      ws.updateSelectionFromCoords(x, y, x, y);
+    } catch (err) {
+      return false;
+    }
+    const next = { x1: x, y1: y, x2: x, y2: y };
+    selectionRef.current = next;
+    setSelection(next);
+    return true;
+  };
+
   /* ---- paste, exactly like Excel ---------------------------------- */
 
-  const applyPaste = (text) => {
-    const table = parseTsv(text);
-    if (!table.length) return;
+  // Lay a rectangle of values into the grid at one cell. This is the shared
+  // body of Ctrl+V and of an imported spreadsheet, so both grow rows the same
+  // way, drop the same extra columns, undo in one keystroke and report
+  // themselves in the same words.
+  //
+  // A cell of null is LEFT ALONE. A pasted rectangle never carries one; an
+  // import does, because a spreadsheet knows nothing about a Limit and must not
+  // blank the one the user set.
+  const applyCells = (table, start, words) => {
+    if (!table.length || !table[0].length) return;
     const fresh = gridModel(block, cfg);
-    const start = activeCell();
     const startX = Math.max(1, start.x);   // the row-number column is never a target
-    const startY = start.y;
+    const startY = Math.max(0, start.y);
     const room = fresh.plan.length - startX;
     const wide = table[0].length > room;
     const width = Math.min(table[0].length, room);
@@ -1157,18 +1400,65 @@ export function TableBlock(props) {
       const after = gridModel(block, cfg);
       for (let r = 0; r < table.length; r++) {
         for (let c = 0; c < width; c++) {
-          writeCell({ block, cfg, model: after }, startX + c, startY + r, table[r][c]);
+          const value = table[r][c];
+          if (value === null || value === undefined) continue;
+          writeCell({ block, cfg, model: after }, startX + c, startY + r, value);
         }
       }
     });
 
-    let message = 'Pasted ' + table.length + ' rows × ' + width + ' columns';
-    if (grew > 0) message = 'Rows were added to fit the paste';
+    let message = words.done + ' ' + plural(table.length, 'row')
+      + ' × ' + plural(width, 'column');
+    if (grew > 0) message = 'Rows were added to fit ' + words.noun;
     else if (wide) message = 'Extra columns were dropped';
     say(message, true);
   };
 
-  handlersRef.current = { undo, redo, fillDown, applyPaste };
+  const applyPaste = (text) => applyCells(
+    parseTsv(text), activeCell(), { done: 'Pasted', noun: 'the paste' }
+  );
+
+  /* ---- importing a spreadsheet ------------------------------------- *
+   *
+   * The server already parses an .xlsx into either a plain grid or the
+   * compliance model, and has since before this interface existed; the old
+   * editor called it from a file input beside the caption. Nothing in v2 did,
+   * so a user with results in a spreadsheet had to open Excel and paste.
+   *
+   * What arrives is a rectangle of values, and it lands exactly like a paste:
+   * at the top-left data cell, growing rows to fit, one undo step, one toast
+   * with Undo. Never a wholesale replacement of block.data -- that is how the
+   * old editor did it, and it took the table's limits, its row kinds and its
+   * reference columns with it. */
+
+  const fileRef = useRef(null);
+
+  const importXlsx = (file) => {
+    if (!file) return;
+    const isCompliance = block.type === 'datatable';
+    readAsBase64(file).then((b64) => api.importXlsx({
+      xlsx_b64: b64, mode: isCompliance ? 'compliance' : 'grid',
+    })).then((result) => {
+      const words = { done: 'Imported', noun: 'the imported table' };
+      if (!isCompliance) {
+        const rows = (result && result.rows) || [];
+        if (!rows.length) { say(IMPORT_EMPTY); return; }
+        applyCells(rows.map((r) => r.slice()), { x: 1, y: 0 }, words);
+        return;
+      }
+      // `recognized: false` is the parser saying it found no header band. The
+      // old editor's rule stands and is the only safe one: keep what the table
+      // already holds and say why nothing happened.
+      if (result && result.recognized === false) { say(IMPORT_UNRECOGNISED); return; }
+      const cells = importedComplianceCells(result, gridModel(block, cfg));
+      if (!cells.length) { say(IMPORT_EMPTY); return; }
+      applyCells(cells, { x: 1, y: 0 }, words);
+    }).catch((err) => {
+      say('The file could not be imported — ' + String(err && err.message ? err.message : err));
+    });
+  };
+
+  handlersRef.current = { undo, redo, fillDown, applyPaste, stepColumn, moveTo };
 
   /* ---- reference columns ------------------------------------------ */
 
@@ -1329,8 +1619,12 @@ export function TableBlock(props) {
   const selectionSize = selection
     ? (selection.y2 - selection.y1 + 1) + ' × ' + (selection.x2 - selection.x1 + 1) + ' selected'
     : null;
+  // One line, two things it can say about the cell under the cursor: why it is
+  // red, or why it can never be. A red cell is the more urgent of the two.
   const limitNote = compliance && selection
-    ? noLimitNote((block.data.rows || [])[selection.y1], cfg) : null;
+    ? (selectedCellReason(model, block, cfg, selection.x1, selection.y1)
+       || noLimitNote((block.data.rows || [])[selection.y1], cfg))
+    : null;
   const presets = tablePresets(cfg);
   const staleKeys = Object.keys(staleSources);
 
@@ -1381,6 +1675,15 @@ export function TableBlock(props) {
             onChange=${setDensity}
             ariaLabel="Density" />
           <${IconButton} glyph="⬇" title="Export .xlsx" onClick=${doExportXlsx} />
+          <${IconButton} glyph="⬆" title="Import .xlsx…"
+                         onClick=${() => fileRef.current && fileRef.current.click()} />
+          <input ref=${fileRef} class="rw-hidden" type="file" accept=".xlsx"
+                 aria-label="Import .xlsx…"
+                 onChange=${(ev) => {
+                   const file = ev.target.files && ev.target.files[0];
+                   ev.target.value = '';   // the same file again still fires
+                   importXlsx(file);
+                 }} />
         </span>
       </div>
 
@@ -1393,15 +1696,23 @@ export function TableBlock(props) {
             <//>`)}
         </div>` : null}
 
-      <div
-        class=${cx('rw-grid', 'rw-grid__scroll', density === 'tight' && 'rw-grid--tight',
-                   density === 'loose' && 'rw-grid--loose')}
-        ref=${hostRef}
-        onContextMenu=${onContextMenu}></div>
+      <div class="rw-gridwrap">
+        <div
+          class=${cx('rw-grid', 'rw-grid__scroll', density === 'tight' && 'rw-grid--tight',
+                     density === 'loose' && 'rw-grid--loose')}
+          ref=${hostRef}
+          onContextMenu=${onContextMenu}></div>
+        ${hidden === null ? null : html`
+          <div class="rw-gridmore" aria-hidden="true">
+            <span class="rw-gridmore__tag">
+              ${hidden ? 'More columns · ' + hidden : 'More columns'}
+            </span>
+          </div>`}
+      </div>
 
       <div class="rw-grid__foot">
         ${compliance ? html`
-          <span>${resultRows} result rows</span>
+          <span>${plural(resultRows, 'result row')}</span>
           <span class=${overSpec.length ? 'rw-grid__foot--bad' : ''}>${overSpec.length} over spec</span>
         ` : html`
           <span>This table has no spec columns, so nothing is checked against a spec</span>
@@ -1517,12 +1828,124 @@ function currentRowKind(block, cfg, selection) {
   return kinds[y] === 'setting' ? 'setting' : 'result';
 }
 
+/* ------------------------------------------------------------------ *
+ * why a row cannot be judged, and why a cell went red
+ *
+ * The two halves of one comparison. A limit alone decides nothing: `le` reads
+ * the row's spec MAX, `ge` its spec MIN, a range both -- and with that bound
+ * empty the row can never be marked over spec, however many numbers are typed
+ * into it. On screen such a row is indistinguishable from one that was checked
+ * and passed: a limit sign, a value, and no red. The note said so while the
+ * limit was blank and then went quiet the moment one was chosen, which is
+ * exactly the wrong way round.
+ *
+ * Same wording family, same one line under the grid, no new colour.
+ * ------------------------------------------------------------------ */
+
+const AXIS_NAMES = ['MIN', 'TYP', 'MAX', 'NTWC'];
+const NEVER_FLAGGED = ' — this row is never marked over spec';
+
+// The row's spec bounds as numbers, by the same reading flagsFrom uses.
+function specBounds(row) {
+  const sm = Array.isArray(row && row.spec_mtm) ? row.spec_mtm : [null, null, null];
+  return {
+    smin: numv(sm[0]), styp: numv(sm[1]), smax: numv(sm[2]), en: numv(row && row.spec),
+  };
+}
+
+// The threshold `violates` would compare against, and what to call it, for one
+// limit and one set of bounds. Returns null when there is none -- which is the
+// case the note exists for.
+function boundFor(limit, b) {
+  if (limit === 'le') {
+    if (b.smax !== null) return { value: b.smax, name: 'spec MAX' };
+    if (b.en !== null) return { value: b.en, name: 'spec' };
+    if (b.styp !== null) return { value: b.styp, name: 'spec TYP' };
+    return null;
+  }
+  if (limit === 'ge') {
+    if (b.smin !== null) return { value: b.smin, name: 'spec MIN' };
+    if (b.smax !== null) return { value: b.smax, name: 'spec MAX' };
+    if (b.en !== null) return { value: b.en, name: 'spec' };
+    return null;
+  }
+  if (limit === 'range') {
+    if (b.smin !== null || b.smax !== null) return { value: null, name: 'spec MIN or MAX' };
+    return null;
+  }
+  return null;
+}
+
+// The bound a set limit needs and does not have: 'spec MAX' for le, 'spec MIN'
+// for ge, either end of the range. Null when the row can in fact be judged.
+function missingBoundName(row) {
+  const limit = row && row.limit;
+  if (!limit) return null;
+  if (boundFor(limit, specBounds(row))) return null;
+  if (limit === 'le') return 'spec MAX';
+  if (limit === 'ge') return 'spec MIN';
+  if (limit === 'range') return 'spec MIN or MAX';
+  return null;
+}
+
 // Word cannot encode a limit, so an imported table comes back without one. Say
-// so where the user would otherwise expect the round trip to have kept it.
+// so where the user would otherwise expect the round trip to have kept it --
+// and say the same when the limit is set but the bound it compares against is
+// empty, because the outcome for the user is identical.
 function noLimitNote(row, cfg) {
   if (!row || isSettingRow(row, cfg)) return null;
-  if (row.limit) return null;
-  return 'No limit set — this row is never marked over spec';
+  if (!row.limit) return 'No limit set' + NEVER_FLAGGED;
+  const missing = missingBoundName(row);
+  if (!missing) return null;
+  return 'No ' + missing + ' to compare against' + NEVER_FLAGGED;
+}
+
+// Why one cell is red, in the terms the rule is written in: the value, the
+// bound it broke and the limit that condemned it -- e.g.
+// '4.8 > 4 (spec MAX, limit ≤)'. Returns '' when the cell is not over spec, so
+// a caller can use it as the predicate as well as the text.
+function overSpecReason(row, groupKey, ai) {
+  if (!row || !row.limit) return '';
+  if (!flagsFor(row, groupKey).has(ai)) return '';
+  const value = numv(axisValue(row, groupKey, ai));
+  if (value === null) return '';
+  let b = specBounds(row);
+  // The NTWC corner is judged against spec_ntwc when the row carries one, the
+  // MIN/TYP/MAX bounds otherwise -- the same substitution flagsFrom makes.
+  if (ai === 3) {
+    const nspec = numv(row.spec_ntwc);
+    if (nspec !== null) b = { smin: nspec, smax: nspec, en: nspec, styp: b.styp };
+  }
+  const sign = limitSign(row.limit) || String(row.limit);
+  if (row.limit === 'range') {
+    if (b.smin !== null && value < b.smin) {
+      return value + ' < ' + b.smin + ' (spec MIN, limit ' + sign + ')';
+    }
+    if (b.smax !== null && value > b.smax) {
+      return value + ' > ' + b.smax + ' (spec MAX, limit ' + sign + ')';
+    }
+    return '';
+  }
+  const bound = boundFor(row.limit, b);
+  if (!bound || bound.value === null) return '';
+  const relation = row.limit === 'ge' ? ' < ' : ' > ';
+  return value + relation + bound.value + ' (' + bound.name + ', limit ' + sign + ')';
+}
+
+// The same sentence for whichever cell the cursor is on, so the rule and the
+// value are on screen together even when the Limit column has scrolled away.
+function selectedCellReason(model, block, cfg, x, y) {
+  if (!model || model.mode !== 'compliance') return '';
+  const col = model.plan[x];
+  if (!col || col.kind !== 'axis' || col.role !== 'sim') return '';
+  const row = (block.data.rows || [])[y];
+  if (!row) return '';
+  const reason = overSpecReason(row, col.group, col.axis);
+  if (!reason) return '';
+  const axis = AXIS_NAMES[col.axis] || col.axis;
+  return String(row.item || '').trim()
+    ? row.item + ' · ' + axis + ': ' + reason
+    : axis + ': ' + reason;
 }
 
 function parseTsv(text) {
@@ -1650,6 +2073,14 @@ const REF_EXPLAIN = 'The values are fixed at the moment you insert them, and the
 const REF_READONLY = 'Reference columns are read-only, are not checked against a spec, '
   + 'and carry the source name into the exported header';
 
+// The dialog opens on the newest sibling report, which is also the one most
+// likely to be half-written. When it cannot be read the answer is another
+// source, not a parser message -- so say that, in those words.
+const SOURCE_UNREADABLE_TITLE = 'That report could not be read';
+const SOURCE_UNREADABLE = 'Its project.json is missing or is not valid JSON, so it has '
+  + 'no columns to offer. Pick another source report above.';
+const SOURCE_BROKEN_TAG = ' — cannot be read';
+
 function siblingReports(tree, dir) {
   const out = [];
   const projects = (tree && tree.projects) || [];
@@ -1676,7 +2107,19 @@ function ReferenceColumnDialog(props) {
   const [title, setTitle] = useState('');
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState('');
+  const [failed, setFailed] = useState(null);
+  // Sources whose document would not load. Kept in a ref as well, because the
+  // handler that adds one needs the list as it stands at that moment, not the
+  // copy its effect closed over.
+  const [broken, setBroken] = useState({});
+  const brokenRef = useRef({});
+  const chosenRef = useRef(false);   // did the user pick this source themselves?
+
+  const pickSource = (value) => {
+    chosenRef.current = true;
+    setFailed(null);
+    setSource(value);
+  };
 
   // Which columns the source offers: its own groups, read from its document.
   useEffect(() => {
@@ -1687,6 +2130,7 @@ function ReferenceColumnDialog(props) {
     if (!source) return undefined;
     api.getProject(source).then((payload) => {
       if (!live) return;
+      setFailed(null);
       const project = (payload && payload.project) || payload;
       const found = [];
       const walk = (nodes) => {
@@ -1720,9 +2164,24 @@ function ReferenceColumnDialog(props) {
         const preferred = found.filter((c) => c.axis === 'MAX')[0];
         setPick((preferred || found[0]).value);
       }
-    }).catch((err) => { if (live) setFailed(String(err && err.message)); });
+    }).catch((err) => {
+      if (!live) return;
+      brokenRef.current = Object.assign({}, brokenRef.current, { [source]: true });
+      setBroken(brokenRef.current);
+      // Nobody chose this source -- it is only the newest sibling. Open on the
+      // first one that actually loads instead of on a parser message.
+      const next = chosenRef.current
+        ? null
+        : options.filter((r) => r && !brokenRef.current[r.dir])[0];
+      if (next && next.dir !== source) { setSource(next.dir); return; }
+      setFailed({
+        title: SOURCE_UNREADABLE_TITLE,
+        body: SOURCE_UNREADABLE,
+        detail: String(err && err.message ? err.message : err),
+      });
+    });
     return () => { live = false; };
-  }, [source, cfg]);
+  }, [source, cfg, options]);
 
   // Ask the server to match the rows and value the column.
   useEffect(() => {
@@ -1731,7 +2190,7 @@ function ReferenceColumnDialog(props) {
     const chosen = columns.filter((c) => c.value === pick)[0];
     if (!chosen) return undefined;
     setBusy(true);
-    setFailed('');
+    setFailed(null);
     api.refcol({
       dir: dir, srcReport: source, targetBlock: block.id,
       group: chosen.group, axis: chosen.axis,
@@ -1742,7 +2201,11 @@ function ReferenceColumnDialog(props) {
       setBusy(false);
     }).catch((err) => {
       if (!live) return;
-      setFailed(String(err && err.message));
+      setFailed({
+        title: 'That column could not be read',
+        body: 'Pick another column, or another source report.',
+        detail: String(err && err.message ? err.message : err),
+      });
       setBusy(false);
     });
     return () => { live = false; };
@@ -1781,10 +2244,11 @@ function ReferenceColumnDialog(props) {
           <div class="rw-refcol__top">
             <label class="rw-field">
               <span class="rw-field__label">Source report</span>
-              <${Select} small value=${source} onChange=${setSource}
+              <${Select} small value=${source} onChange=${pickSource}
                 options=${options.map((r) => ({
                   value: r.dir,
-                  label: (r.stage ? r.stage + ' · ' : '') + (r.title || r.name || r.dir),
+                  label: (r.stage ? r.stage + ' · ' : '') + (r.title || r.name || r.dir)
+                         + (broken[r.dir] ? SOURCE_BROKEN_TAG : ''),
                 }))} />
             </label>
             <label class="rw-field">
@@ -1811,8 +2275,9 @@ function ReferenceColumnDialog(props) {
           <div class="rw-banner rw-banner--blocking">
             <span class="rw-banner__glyph">✕</span>
             <div class="rw-banner__body">
-              <div class="rw-banner__title">Something went wrong</div>
-              <div>${failed}</div>
+              <div class="rw-banner__title">${failed.title}</div>
+              ${failed.body ? html`<div>${failed.body}</div>` : null}
+              ${failed.detail ? html`<div class="rw-meta">${failed.detail}</div>` : null}
             </div>
           </div>` : null}
 

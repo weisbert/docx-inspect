@@ -349,6 +349,17 @@ function editAtRisk() {
 }
 
 function flushOnTheWayOut() {
+  // ASK THE CONTROLS FIRST. A value being typed into a grid cell lives inside
+  // the grid control until its editor closes, so `dirty` is false and this
+  // guard used to decide there was nothing to lose -- a reload or a tab close
+  // asked nothing and took the value with it. Committing an open editor turns
+  // it into an ordinary outstanding edit, which everything below already knows
+  // how to handle.
+  try {
+    store.commitPendingEdits();
+  } catch (err) {
+    /* a control that cannot close its editor must not stop the flush */
+  }
   if (!outstandingEdit()) return false;
   try {
     const flushing = store.saveNow();

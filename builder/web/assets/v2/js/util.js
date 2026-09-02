@@ -341,6 +341,17 @@ export function flagsForGroup(row, groupKey) {
  * Formatting
  * ------------------------------------------------------------------ */
 
+// plural(1, 'result row') -> '1 result row'; plural(0, 'result row') -> '0 result rows'.
+//
+// Every other string in this interface reads like a person wrote it, which is
+// exactly why '1 result rows' stands out. Pass the plural explicitly where 's'
+// is not the answer: plural(n, 'entry', 'entries').
+export function plural(n, one, many) {
+  const count = Number(n);
+  const word = (count === 1 || count === -1) ? one : (many || one + 's');
+  return count + ' ' + word;
+}
+
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
 // formatBytes(1234) -> '1.2 KB'. Bytes stay whole; anything larger keeps one
