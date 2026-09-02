@@ -59,6 +59,7 @@ const LINT_PY = path.join(REPO, 'builder', 'core', 'content_lint.py');
 
 const ARGS = process.argv.slice(2);
 const HEADED = ARGS.includes('--headed');
+const KEEP_ROOT = ARGS.includes('--keep-root');
 const VIEWPORT = { width: 1600, height: 940 };
 
 const PROJECT_ID = '1108';
@@ -371,6 +372,10 @@ async function browserChecks() {
   const cleanup = async () => {
     if (browser) { try { await browser.close(); } catch (err) { /* gone */ } }
     await stopServer(child);
+    // The fixture is a tree of reports plus four PNGs; leaving it behind grows
+    // the temporary directory by one copy per run, which is how the machine
+    // ends up carrying a month of them. --keep-root asks for the opposite.
+    if (!KEEP_ROOT) fs.rmSync(scratch, { recursive: true, force: true });
   };
 
   try {
