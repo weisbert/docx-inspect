@@ -701,6 +701,7 @@ def check_figures_and_pdf():
     try:
         f = check_figure_levels(RENDER_PORT)
         f += check_pdf_twice(RENDER_PORT)
+        f += check_word_only_leaves_pdf(RENDER_PORT)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -764,6 +765,42 @@ def check_pdf_twice(port):
     )
     return expect(ok, "two PDF exports in one session",
                   "first=%s second=%s %s" % (s1, s2, str(b2.get("error"))[:200]))
+
+
+def check_word_only_leaves_pdf(port):
+    """A Word-only export must own up to the PDF it leaves behind.
+
+    Exporting Word and PDF writes <name>.docx and <name>.pdf. Exporting Word
+    only then overwrites the .docx and does NOT touch the .pdf, which is from
+    that point a render of a report that no longer exists -- same name, same
+    folder, one edit out of date, and nothing in a directory listing to tell
+    them apart. Deleting it would be the tidier folder and the worse surprise
+    (it is the user's file, possibly the copy they already sent), so the export
+    reports it and the interface says which artefact is behind.
+
+    Needs a PDF export to have worked, so it is skipped on a machine without
+    Word exactly as check_pdf_twice is.
+    """
+    s1, b1 = post_at(port, "/api/export?dir=figs&fmt=pdf")
+    if s1 != 200:
+        record("a Word-only export names the older PDF beside it", "SKIP (no PDF export here)")
+        return 0
+    f = expect(not b1.get("stale_siblings"),
+               "a Word and PDF export leaves nothing behind it",
+               "stale_siblings=%r" % (b1.get("stale_siblings"),))
+    s2, b2 = post_at(port, "/api/export?dir=figs&fmt=docx")
+    older = b2.get("stale_siblings") or []
+    ok = (
+        s2 == 200 and len(older) == 1
+        and str(older[0].get("out", "")).endswith(".pdf")
+        and older[0].get("fmt") == "pdf"
+        and isinstance(older[0].get("older_by_s"), int)
+        # named, not removed: the file is still where the user left it
+        and os.path.isfile(str(older[0].get("abs", "")).replace("/", os.sep))
+    )
+    f += expect(ok, "a Word-only export names the older PDF beside it",
+                "status=%s stale_siblings=%r" % (s2, older))
+    return f
 
 
 def check_paste_import(root):

@@ -121,6 +121,7 @@ const S = {
   timings: 'Word {a}s' + SEP + 'PDF {b}s' + SEP + '{c}s total',
   openFile: 'Open file',
   openFolder: 'Open folder',
+  olderThanDoc: 'Older than the document' + MID + 'left by an earlier export',
   copyPath: 'Copy path',
   copied: 'Copied',
   exportChecks: "This export's checks: {e} errors" + SEP + '{w} warnings',
@@ -1799,10 +1800,17 @@ function cancelExport() {
 
 // The result names one file. A PDF export also leaves the .docx it was made
 // from, so both are listed - the user asked for Word and PDF and both are real.
+//
+// After those come the artefacts this export did NOT rewrite, which the server
+// names in `stale_siblings`: a Word-only export overwrites the .docx and leaves
+// the .pdf of an earlier export beside it, same name, same folder, one render
+// out of date. Nothing in a directory listing tells them apart, so this list
+// does - the file is still offered, because it is still the user's file, but it
+// is never presented as part of what just came out.
 function artefactsOf(result) {
   if (!result || !result.out) return [];
   const rows = [];
-  const add = (rel, abs) => {
+  const add = (rel, abs, stale) => {
     const parts = String(rel).split('/');
     const name = parts[parts.length - 1];
     const absolute = String(abs || '');
@@ -1812,6 +1820,7 @@ function artefactsOf(result) {
       abs: absolute,
       name: name,
       folder: cut > 0 ? absolute.slice(0, cut) : '',
+      stale: !!stale,
     });
   };
   if (result.fmt === 'pdf') {
@@ -1819,6 +1828,10 @@ function artefactsOf(result) {
       String(result.abs || '').replace(/\.pdf$/i, '.docx'));
   }
   add(result.out, result.abs);
+  const older = Array.isArray(result.stale_siblings) ? result.stale_siblings : [];
+  for (let i = 0; i < older.length; i++) {
+    if (older[i] && older[i].out) add(older[i].out, older[i].abs, true);
+  }
   return rows;
 }
 
@@ -1911,6 +1924,7 @@ function ArtefactRow(props) {
   return html`
     <div class="rw-export__file">
       <div class="rw-export__filename">${row.name}</div>
+      ${row.stale ? html`<${Pill} tone="warn">${S.olderThanDoc}<//>` : null}
       <div class="rw-export__filemeta">
         ${row.folder}${row.size ? ' ' + formatBytes(row.size) : ''}
       </div>

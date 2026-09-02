@@ -37,6 +37,12 @@
  *   4. Asset delete does not reach /api/asset-delete, and the screen names it.
  *   5. With saves working, all three behave exactly as before: the export
  *      finishes with no stale notice, the rename lands, the delete lands.
+ *   6. A SECOND kind of staleness, in the same finished panel: a Word-only
+ *      export overwrites the .docx and leaves any .pdf of an earlier export
+ *      beside it, same name, same folder, one render out of date. The panel
+ *      names that file and calls it older than the document, and the file is
+ *      still there -- reporting it is the answer, deleting the user's copy is
+ *      not. (before the fix: the panel listed only the .docx and said nothing)
  *
  * IT NEVER TOUCHES REAL REPORTS. The fixture is generated from scratch into the
  * OS temporary directory and the server is booted against THAT with an explicit
@@ -564,6 +570,14 @@ async function pressExport(page, item) {
 
     refuseSaves = false;
     try { fs.rmSync(outDir, { recursive: true, force: true }); } catch (err) { /* windows */ }
+
+    // A PDF from an EARLIER export, sitting where the next one will write its
+    // .docx. A Word-only export does not touch it, so once the export below has
+    // run this file is a render of a report that no longer exists -- same name,
+    // same folder, nothing in a listing to say so. The finished panel has to.
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(path.join(outDir, 'CDR.pdf'), '%PDF-1.4 from an earlier export\n');
+
     await openEditor();
     await page.evaluate(OPEN_TRAY);
     await wait(800);
@@ -581,6 +595,11 @@ async function pressExport(page, item) {
     check('the edit reached the disk before the render',
       firstParagraph() === EDIT_TEXT, JSON.stringify(firstParagraph()));
     check('a file was produced', exported().length > 0, JSON.stringify(exported()));
+    check('the PDF this export did not rewrite is named, and called older',
+      /CDR\.pdf/.test(text) && /Older than the document/i.test(text),
+      text.slice(0, 900).replace(/\s+/g, ' '));
+    check('and it is still on disk -- nothing of the user\'s was deleted',
+      fs.existsSync(path.join(outDir, 'CDR.pdf')), JSON.stringify(exported()));
 
     await clickText(page, 'Back to editing');
     await wait(500);

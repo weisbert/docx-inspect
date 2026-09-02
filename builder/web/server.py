@@ -880,11 +880,52 @@ def _level_blank_figures(warnings):
     return warnings
 
 
+def _stale_siblings(fresh_abs, project_dir):
+    """Artefacts of an EARLIER export that this one did not rewrite.
+
+    A Word-only export overwrites ``<name>.docx`` and leaves any ``<name>.pdf``
+    from a previous export sitting beside it: same folder, same name, one render
+    out of date, and nothing in a directory listing to tell them apart. Handing
+    that PDF on hands on a report that no longer exists.
+
+    Deleting the file would be the tidier folder and the worse surprise -- it is
+    the user's file, and it may be the copy they already sent -- so the export
+    REPORTS it instead and the interface says which artefact is behind. Only a
+    file genuinely older than what was just written is named.
+    """
+    stem = os.path.splitext(fresh_abs)[0]
+    try:
+        fresh_at = os.path.getmtime(fresh_abs)
+    except OSError:
+        return []
+    found = []
+    for ext, kind in ((".pdf", "pdf"),):
+        sibling = stem + ext
+        try:
+            older_by = fresh_at - os.path.getmtime(sibling)
+        except OSError:
+            continue                    # not there, or unreadable: nothing to say
+        if older_by <= 0:
+            continue                    # as new as what we just wrote
+        found.append({
+            "out": os.path.relpath(sibling, project_dir).replace("\\", "/"),
+            "abs": os.path.abspath(sibling).replace("\\", "/"),
+            "fmt": kind,
+            "older_by_s": int(round(older_by)),
+        })
+    return found
+
+
 def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=None):
     """Render the project via the engine. fmt in {docx, pdf}.
 
-    Returns {out, abs, fmt}. For pdf: render docx then COM-export (Export then
-    Close, never a method call after Close). Output lands in <dir>/out/.
+    Returns {out, abs, fmt, warnings, stats}. For pdf: render docx then
+    COM-export (Export then Close, never a method call after Close). Output
+    lands in <dir>/out/.
+
+    ``stale_siblings`` is ADDITIVE and appears only when there is something to
+    say: the artefacts of an earlier export that this one left behind -- see
+    _stale_siblings.
 
     ``on_progress(done, total, label)`` (per heading/block) and ``on_phase(label)``
     ('preparing'|'rendering'|'converting') drive a live progress bar; both optional
@@ -948,8 +989,14 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
 
     if fmt == "docx":
         rel = os.path.relpath(docx_abs, project_dir).replace("\\", "/")
-        return {"out": rel, "abs": docx_abs.replace("\\", "/"), "fmt": "docx",
-                "warnings": warnings, "stats": stats}
+        answer = {"out": rel, "abs": docx_abs.replace("\\", "/"), "fmt": "docx",
+                  "warnings": warnings, "stats": stats}
+        # Only a Word-only export can leave an artefact behind: the PDF export
+        # below rewrites both files.
+        older = _stale_siblings(docx_abs, project_dir)
+        if older:
+            answer["stale_siblings"] = older
+        return answer
 
     if fmt == "pdf":
         pdf_abs = os.path.splitext(docx_abs)[0] + ".pdf"
