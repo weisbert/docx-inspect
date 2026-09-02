@@ -90,7 +90,16 @@ const TEXT = {
     'The changes are not smaller than the whole report — copy the whole report instead',
   noChanges: 'No changes since the last exchange',
   neverExchanged: 'Never exchanged',
-  sectionsSince: (n) => n + ' sections changed since',
+  sectionsSince: (n) => n + (n === 1 ? ' section changed' : ' sections changed'),
+  /* What the delta carries, so a retyped sentence and forty rewritten table
+   * rows are not both reported as "2 sections". These count what TRAVELS: a
+   * delta resends a whole section and this machine cannot subtract the state
+   * it was cut from, so none of them is phrased as a difference. */
+  nParas: (n) => n + (n === 1 ? ' paragraph' : ' paragraphs'),
+  nFigures: (n) => n + (n === 1 ? ' figure' : ' figures'),
+  nTables: (n) => n + (n === 1 ? ' table' : ' tables'),
+  nCells: (n) => n + (n === 1 ? ' table cell' : ' table cells'),
+  toSend: ' to send',
   dropHere: 'Drop the returned package here',
   dropKinds: '.zip or a single .md — or choose a file',
   chooseFile: 'Choose a file',
@@ -155,6 +164,17 @@ const TEXT = {
   useSnapshot: (when) => 'Use the ' + when + ' snapshot as the ancestor',
   sendAgain: 'Send the changes again',
   baseUnknown: 'The common ancestor could not be checked',
+  /* The same missing fingerprint, on a report that has not been touched since
+   * the last exchange. The check is still impossible and is still said to be;
+   * what changes is that nothing of the user's is at stake, which is the only
+   * reason the warning existed. Said plainly, so the amber one keeps meaning
+   * something on the day it fires for real. */
+  baseUnknownSafe: 'Nothing of yours is at stake here',
+  baseUnknownSafeBody:
+    'This package does not name the state it was cut from, so there is nothing to check '
+    + "this machine's baseline against. It does not matter for this report: nothing has "
+    + 'changed here since the last exchange, so every difference the comparison finds was '
+    + 'made on the other side and none of your work can be overwritten by taking it.',
   baseUnknownTheirs:
     'This package does not name the state it was cut from, so there is nothing to check '
     + "this machine's baseline against. The comparison still runs and every passage both "
@@ -1158,8 +1178,11 @@ function changedSections(diffText, project) {
   }
   for (const op of (Array.isArray(diff.ops) ? diff.ops : [])) {
     const id = op.node_id == null ? '' : String(op.node_id);
+    const carried = isObj(op.fields) && Array.isArray(op.fields.blocks)
+      ? op.fields.blocks : null;
     let detail = TEXT.section;
     if (op.op === 'set_children') detail = TEXT.sections;
+    else if (carried) detail = shapeOf(carried).join(' · ') || TEXT.rowBlocks;
     else if (isObj(op.fields) && Object.prototype.hasOwnProperty.call(op.fields, 'blocks')) {
       detail = TEXT.rowBlocks;
     }
@@ -1167,10 +1190,70 @@ function changedSections(diffText, project) {
       loc: locations.get(id) || '',
       title: String(op.title || id),
       detail: detail,
+      blocks: carried || [],
       size: sizeOf(op),
     });
   }
   return rows;
+}
+
+/* -- what the changed sections are made of --------------------------
+ * A count of sections says how many places moved and nothing about whether
+ * that is one retyped sentence or forty rewritten table rows -- which is the
+ * question the two copy buttons ask, and it was being answered with the word
+ * "Blocks".
+ *
+ * These are the blocks the delta CARRIES, not a before-and-after: a delta
+ * resends a whole section, and this machine holds no copy of the state it was
+ * cut from to subtract. So it is phrased as what travels, never as a change of
+ * size, because one of those is knowable here and the other is not. */
+function countBlocks(blocks) {
+  const out = { paras: 0, figures: 0, tables: 0, cells: 0 };
+  for (const block of (Array.isArray(blocks) ? blocks : [])) {
+    if (!isObj(block)) continue;
+    if (block.type === 'para') {
+      out.paras += 1;
+    } else if (block.type === 'image' || block.type === 'imagegrid') {
+      out.figures += 1;
+    } else if (block.type === 'table') {
+      out.tables += 1;
+      for (const row of (Array.isArray(block.rows) ? block.rows : [])) {
+        out.cells += Array.isArray(row) ? row.length : 0;
+      }
+    } else if (block.type === 'datatable') {
+      out.tables += 1;
+      const data = isObj(block.data) ? block.data : {};
+      const groups = Array.isArray(data.sims) ? Math.max(1, data.sims.length) : 1;
+      out.cells += (Array.isArray(data.rows) ? data.rows.length : 0) * groups;
+    }
+  }
+  return out;
+}
+
+function shapeParts(counts) {
+  const parts = [];
+  if (counts.paras) parts.push(TEXT.nParas(counts.paras));
+  if (counts.figures) parts.push(TEXT.nFigures(counts.figures));
+  if (counts.tables) parts.push(TEXT.nTables(counts.tables));
+  if (counts.cells) parts.push(TEXT.nCells(counts.cells));
+  return parts;
+}
+
+function shapeOf(blocks) {
+  return shapeParts(countBlocks(blocks));
+}
+
+// The same count over every changed section, for the status line.
+function changeShape(rows) {
+  const total = { paras: 0, figures: 0, tables: 0, cells: 0 };
+  for (const row of (rows || [])) {
+    const counts = countBlocks(row.blocks);
+    total.paras += counts.paras;
+    total.figures += counts.figures;
+    total.tables += counts.tables;
+    total.cells += counts.cells;
+  }
+  return shapeParts(total);
 }
 
 /* -- the one input that cannot be retyped ---------------------------
@@ -1261,6 +1344,7 @@ export function SyncDrawer(props) {
   const notes = useMemo(() => collectNotes(project), [project]);
   const changed = useMemo(
     () => changedSections(diff && diff.diff_text, project), [diff, project]);
+  const shape = useMemo(() => changeShape(changed), [changed]);
 
   const noBaseline = !!(diff && diff.no_baseline);
   const empty = !!(diff && diff.empty);
@@ -1409,7 +1493,10 @@ export function SyncDrawer(props) {
           <div class="rw-sync__k">${TEXT.changesSince}</div>
           <div class="rw-sync__v">
             ${busy ? TEXT.loading
-              : (changed.length ? TEXT.sectionsSince(changed.length) : TEXT.noChanges)}
+              : (changed.length
+                ? TEXT.sectionsSince(changed.length)
+                  + (shape.length ? ' · ' + shape.join(' · ') + TEXT.toSend : '')
+                : TEXT.noChanges)}
           </div>
           <div class="rw-sync__k">${TEXT.suggested}</div>
           <div class="rw-sync__v">${busy ? TEXT.loading : suggestion}</div>
@@ -1554,7 +1641,13 @@ export function SyncDrawer(props) {
         <${ImportDialog}
           dir=${dir}
           pkg=${pkg}
-          baseline=${{ none: noBaseline, sha: baselineShaOf(diff) }}
+          baseline=${{
+            none: noBaseline,
+            sha: baselineShaOf(diff),
+            // Nothing has been edited here since the last exchange, so a merge
+            // cannot overwrite local work whatever ancestor the package names.
+            unchanged: !noBaseline && empty,
+          }}
           onClose=${() => setPkg(null)}
           onDone=${async () => {
             setPkg(null);
@@ -1817,7 +1910,12 @@ export function ImportDialog(props) {
             ${TEXT.baseOkBody(declared)}
           <//>` : null}
 
-        ${verdict === 'unknown' ? html`
+        ${verdict === 'unknown' && baseline.unchanged ? html`
+          <${Banner} level="done" title=${TEXT.baseUnknownSafe}>
+            ${TEXT.baseUnknownSafeBody}
+          <//>` : null}
+
+        ${verdict === 'unknown' && !baseline.unchanged ? html`
           <${Banner} level="warn" title=${TEXT.baseUnknown}>
             ${declared ? TEXT.baseUnknownOurs(declared) : TEXT.baseUnknownTheirs}
           <//>` : null}

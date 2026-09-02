@@ -445,6 +445,11 @@ function labelScript(label, scope) {
       check('a suggestion line is on screen', false, 'no "% smaller" line in the drawer');
     }
 
+    const statusLine = await drawerText();
+    check('"Changes since" says what the delta carries, not just how many sections',
+      /section changed/.test(statusLine) && /paragraph/.test(statusLine),
+      statusLine.replace(/\s+/g, ' ').slice(0, 300));
+
     /* ============================================================ *
      * 3 - a half-typed paste survives a click in the editor
      * ============================================================ */
@@ -627,6 +632,25 @@ function labelScript(label, scope) {
     check('the report is back at the state that was chosen',
       para(1) === 'v2 method' && para(0) === 'v1 first',
       JSON.stringify([para(0), para(1), para(2)]));
+
+    /* ============================================================ *
+     * 8 - the ancestor warning is kept for the day it means something
+     * ============================================================ */
+
+    console.log('\n8 - a package with no fingerprint, on an untouched report  (PIN: fails before)');
+    resetFixture(root);
+    await open();
+    await openExchange();
+    if (!(await page.$('.rw-sync__paste'))) await page.evaluate(clickScript('Or paste text'));
+    await wait(300);
+    await page.fill('.rw-sync__paste', JSON.stringify(report(RETURNED), null, 2));
+    await page.evaluate(clickScript('Use this text'));
+    await wait(1800);
+    const quiet = await dialogText();
+    check('nothing here can be overwritten, and that is what it says',
+      quiet.indexOf('Nothing of yours is at stake here') >= 0
+      && quiet.indexOf('The common ancestor could not be checked') < 0,
+      quiet.replace(/\s+/g, ' ').slice(0, 300));
 
     if (consoleErrors.length) {
       check('no uncaught page errors', false, consoleErrors.slice(0, 3).join(' | '));

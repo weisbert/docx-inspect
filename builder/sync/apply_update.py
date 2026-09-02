@@ -983,12 +983,31 @@ def cmd_snapshot(root):
         return 1
     os.makedirs(_outbox(root), exist_ok=True)
     out = os.path.join(_outbox(root), "to_send_%s.zip" % _ts())
+
+    # The package says which state each report was cut from, when that report
+    # has one. Without it the receiving side has nothing to check its own
+    # baseline against, so it must warn that the common ancestor is unknown --
+    # and a warning that fires on every package this project's own tooling
+    # builds is one nobody reads by the time it means something. The value is
+    # the fingerprint of the report's OWN _baseline.json, which is exactly what
+    # check_baseline compares against.
+    projects = {}
+    for d in proj_dirs:
+        _has, ancestor = baseline_state(root, d + "/project.json")
+        projects[d] = {"mode": "replace"}
+        if ancestor:
+            projects[d]["base_sha"] = ancestor
+    manifest = {"note": "", "projects": projects, "files": []}
+
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("update.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         for d in proj_dirs:
             z.write(os.path.join(root, d, "project.json"), d + "/project.json")
+    named = sum(1 for spec in projects.values() if spec.get("base_sha"))
     print("packaged %d project.json (images excluded):" % len(proj_dirs))
     for d in proj_dirs:
-        print("  -", d)
+        print("  -", d, "" if projects[d].get("base_sha") else "(no baseline yet)")
+    print("%d of %d name the state they were cut from" % (named, len(proj_dirs)))
     print("-> %s" % out)
     return 0
 

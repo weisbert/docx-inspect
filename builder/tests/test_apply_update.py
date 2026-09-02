@@ -199,9 +199,29 @@ def test_snapshot_finds_nested_reports():
         with zipfile.ZipFile(zips[0]) as z:
             names = sorted(z.namelist())
     check(names == ["P1/MOD_A/CDR/project.json", "P1/MOD_A/FDR/project.json",
-                    "flat/project.json"],
+                    "flat/project.json", "update.json"],
           "each member is addressed by its path under the reports root",
           str(names))
+
+    # A package that does not say which state it was cut from makes the
+    # receiving side warn that the common ancestor cannot be checked -- on every
+    # package, which is how that warning stopped being read. A report with a
+    # baseline now travels with its fingerprint.
+    base_dir = os.path.join(root, "P1", "MOD_A", "CDR")
+    with open(os.path.join(base_dir, "project.json"), "rb") as fh:
+        au._atomic_write(os.path.join(base_dir, "_baseline.json"), fh.read())
+    au.cmd_snapshot(root)
+    zips = sorted(os.listdir(outbox))
+    with zipfile.ZipFile(os.path.join(outbox, zips[-1])) as z:
+        manifest = json.loads(z.read("update.json").decode("utf-8"))
+    declared = (manifest.get("projects") or {}).get("P1/MOD_A/CDR") or {}
+    _has, ancestor = au.baseline_state(root, "P1/MOD_A/CDR/project.json")
+    check(declared.get("base_sha") == ancestor and bool(ancestor),
+          "the package names the state each report was cut from",
+          str(manifest.get("projects")))
+    check("base_sha" not in ((manifest.get("projects") or {}).get("flat") or {}),
+          "and says nothing for a report that has never been exchanged",
+          str(manifest.get("projects")))
 
     found = au.find_report_dirs(root)
     check(found == ["P1/MOD_A/CDR", "P1/MOD_A/FDR", "flat"],
