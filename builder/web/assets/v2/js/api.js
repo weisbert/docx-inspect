@@ -221,11 +221,20 @@ export function getProject(dir) {
 }
 
 // options: {savedAt} -- the mtime this client last saw. The server answers 409
-// when the file changed underneath, which surfaces as ApiError.status === 409.
+// when the file changed underneath, which surfaces as ApiError.status === 409,
+// and 410 (payload.gone) when the report is no longer on disk at all.
+//
+// {overwrite: true} is the explicit way past a 409: the token is left out ON
+// PURPOSE and the server snapshots the version it is about to replace first.
+// It is sent only from the store's "keep my version" action, never by a retry.
 export function saveProject(dir, project, options) {
   const opt = options || {};
   return request('PUT', '/api/project', {
-    query: { dir: dir, saved_at: opt.savedAt },
+    query: {
+      dir: dir,
+      saved_at: opt.overwrite ? undefined : opt.savedAt,
+      overwrite: opt.overwrite ? 1 : undefined,
+    },
     body: project,
     signal: opt.signal,
   });

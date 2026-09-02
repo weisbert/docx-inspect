@@ -450,6 +450,18 @@ async function copyToClipboard(text) {
   }
 }
 
+/* -- the whole report, as text ---------------------------------------
+ * The in-memory document, whole, on the clipboard. This is the drawer's own
+ * "Copy whole report", and it is also what a blocked save offers as "Copy my
+ * version" -- the same bytes from the same place, so the text the user rescues
+ * from a conflict is exactly the text the exchange channel would carry. It
+ * reads memory, not disk, on purpose: the point is the version the disk does
+ * NOT hold. -> true when the clipboard took it. */
+export async function copyWholeReport() {
+  const text = JSON.stringify(store.get().project || {}, null, 2);
+  return copyToClipboard(text);
+}
+
 /* -- flushing before a write ----------------------------------------
  * Every server-side operation on this screen reads or replaces the project.json
  * ON DISK, and each one is followed by a re-read that replaces what is in
@@ -983,8 +995,7 @@ export function SyncDrawer(props) {
   };
 
   const onCopyWhole = async () => {
-    const text = JSON.stringify(store.get().project || {}, null, 2);
-    if (await copyToClipboard(text)) flash();
+    if (await copyWholeReport()) flash();
   };
 
   // Restarting throws the page away, and with it every edit that has not

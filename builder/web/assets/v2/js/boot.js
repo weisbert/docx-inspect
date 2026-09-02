@@ -79,8 +79,19 @@ export function decodeDir(text) {
 
 const HOME_ROUTE = { view: 'home', dir: null, node: null };
 
-// From 02_GLOSSARY_EN.md.
+// From the frozen string list, plus the two ways past it.
 const STAYING_PUT = 'Staying in this report — leaving now would discard the change that is not saved';
+const STAYING_PUT_BODY = 'Nothing was written and nothing was loaded over the edit. Retry runs the '
+  + 'save again and then leaves; Leave and discard throws the edit away on purpose.';
+const RETRY_LEAVE = 'Retry';
+const LEAVE_DISCARD = 'Leave and discard';
+
+// A report whose file cannot be read. The parser's own words go to Copy
+// details; the screen gets a sentence somebody can act on.
+const UNREADABLE_TITLE = 'This report cannot be opened';
+const UNREADABLE_MESSAGE = 'Its project.json is not valid JSON — the file was probably edited by '
+  + 'hand or cut off. Fix the file, or copy a snapshot from its _autosave folder over it, then '
+  + 'open the report again.';
 
 // '#/r/1108/CLKDIV_5G/CDR?node=sec-3' -> {view:'editor', dir:'...', node:'sec-3'}
 export function parseHash(rawHash) {
@@ -146,7 +157,42 @@ function sameRoute(a, b) {
 // So: flush first, and only then move. If the flush could not get the document
 // to disk, do not move at all -- loading the next report replaces the document
 // in memory, and the edit would be gone with nothing left that could write it.
+//
+// The refusal is not a wall. It offers Retry (the save again, then the same
+// address) and Leave and discard (the edit is dropped on purpose, then the
+// address). Both are the user's decision; neither is taken on their behalf.
 let applyGen = 0;
+
+function refuseToLeave(wanted, dir) {
+  store.pushBanner({
+    level: 'error',
+    code: 'leave-blocked',
+    dir: dir,
+    title: STAYING_PUT,
+    message: STAYING_PUT_BODY,
+    actions: [
+      {
+        label: RETRY_LEAVE,
+        level: 'primary',
+        onClick: () => {
+          // Setting the hash re-enters applyHash, which flushes again first.
+          if (window.location.hash === wanted) applyHash();
+          else window.location.hash = wanted;
+        },
+      },
+      {
+        label: LEAVE_DISCARD,
+        level: 'danger',
+        onClick: () => {
+          store.discardEdits();
+          store.dismissBannerCode('leave-blocked');
+          if (window.location.hash === wanted) applyHash();
+          else window.location.hash = wanted;
+        },
+      },
+    ],
+  });
+}
 
 async function applyHash() {
   const token = (applyGen += 1);
@@ -155,6 +201,7 @@ async function applyHash() {
   if (sameRoute(current, next)) return;
 
   if (current && current.dir && current.dir !== next.dir) {
+    const wanted = window.location.hash;
     let flushed = true;
     try {
       await store.saveNow();
@@ -164,7 +211,7 @@ async function applyHash() {
     // Another address arrived while we were waiting; that call owns the screen.
     if (token !== applyGen) return;
     if (!flushed) {
-      store.pushBanner({ level: 'error', code: 'leave-blocked', message: STAYING_PUT });
+      refuseToLeave(wanted, current.dir);
       const back = routeHref(store.get().route);
       if (window.location.hash !== back) window.location.hash = back;
       return;
@@ -174,6 +221,11 @@ async function applyHash() {
     next = parseHash(window.location.hash);
     if (sameRoute(store.get().route, next)) return;
   }
+
+  // A banner belongs to the report it was raised on. Moving to another report
+  // -- or to the shelf -- drops the ones that were about the report being
+  // left; a load that failed in A must not stay pinned above B.
+  if (!current || current.dir !== next.dir) store.clearReportBanners(next.dir);
 
   store.set({ route: next });
   diag.setRoute(next.view + (next.dir ? ' ' + next.dir : '') + (next.node ? '  node=' + next.node : ''));
@@ -189,6 +241,9 @@ async function applyHash() {
 // would make a cycle: boot dynamically imports the views).
 store.navigate = navigate;
 store.routeHref = routeHref;
+// "Load theirs" and every other on-purpose re-read go through the same guarded
+// loader as a route change, so a superseded read still lands on the floor.
+store.reloadReport = (dir) => loadReport(dir, true);
 
 /* ------------------------------------------------------------------ *
  * global error trap
@@ -272,12 +327,25 @@ function installDiagnosticsKey() {
 // asked, nothing written, and the file still holding the previous state.
 //
 // Flushing is always attempted, because a write that lands needs no prompt.
-// Where the browser lets a page object to being unloaded, it is also asked --
-// the flush cannot be waited for at that point, so the question is the only
-// thing that actually guarantees the edit survives.
+// And it lands: the PUT is on the wire before the page is torn down, and the
+// server writes whether or not anybody is left to read the answer -- measured
+// in a real browser, for a navigation, a tab close and a window close, with a
+// document of several hundred KB (test_v2_save_conflict.js keeps the proof).
+// So the debounce window alone earns no prompt.
+//
+// The prompt is kept for the cases the flush cannot cover: a write already in
+// flight (a second edit typed during it has no request of its own yet), one
+// that failed and is waiting to retry, and one the loop has stopped because
+// the file moved or is gone. There the question is the only thing standing
+// between the edit and the void, and the prompt is telling the truth.
 function outstandingEdit() {
   const s = store.get();
   return !!(s.dirty && s.project && s.projectDir);
+}
+
+function editAtRisk() {
+  const s = store.get();
+  return s.saveState === 'saving' || s.saveState === 'retrying' || s.saveState === 'blocked';
 }
 
 function flushOnTheWayOut() {
@@ -301,7 +369,11 @@ function installUnloadGuard() {
     flushOnTheWayOut();
   });
   window.addEventListener('beforeunload', (event) => {
+    // Read BEFORE the flush: the flush itself turns a pending edit into a
+    // write in flight, and that is the one case that needs no question.
+    const atRisk = editAtRisk();
     if (!flushOnTheWayOut()) return; // nothing outstanding: never interrupt
+    if (!atRisk) return; // the flush just sent it: the write lands on its own
     // The browser shows its own wording here; a page cannot choose it.
     event.preventDefault();
     event.returnValue = '';
@@ -376,7 +448,8 @@ function BootBanners() {
   //   puts the whole picture -- version, address, the requests that failed and
   //   the ones that never came back -- on the clipboard as plain text.
   const copy = (banner) => {
-    diag.copyReport({ banner: (banner.code || 'error') + ': ' + banner.message })
+    const detail = banner.detail ? ' -- ' + String(banner.detail) : '';
+    diag.copyReport({ banner: (banner.code || 'error') + ': ' + banner.message + detail })
       .then((ok) => setCopied(ok ? Date.now() : -1));
   };
 
@@ -384,11 +457,22 @@ function BootBanners() {
     (level === 'attention' ? 'attention' : level === 'done' ? 'done' : 'blocking');
   const glyph = (level) => (level === 'attention' ? '!' : level === 'done' ? '✓' : '✕');
 
+  // A banner may carry its own ways out ({label, level, onClick}); they come
+  // before the two every banner has. The handler gets the banner, so a store
+  // action can tell which report it was pressed for.
+  const actionsOf = (b) => (Array.isArray(b.actions) ? b.actions : []).map((a, i) => html`
+    <button key=${'a' + i} type="button"
+            class=${'rw-btn rw-btn--' + (a.level || 'secondary')}
+            onClick=${() => { if (typeof a.onClick === 'function') a.onClick(b); }}>
+      ${a.label}
+    </button>`);
+
   return html`
     <div class="rw-banners">
       ${banners.map(
         (b) => html`
-          <div class=${'rw-banner rw-banner--' + tone(b.level)} key=${b.id} role="alert">
+          <div class=${'rw-banner rw-banner--' + tone(b.level)} key=${b.id} role="alert"
+               data-code=${b.code || ''}>
             <span class="rw-banner__glyph" aria-hidden="true">${glyph(b.level)}</span>
             <div class="rw-banner__body">
               <div class="rw-banner__title">
@@ -397,6 +481,7 @@ function BootBanners() {
               <div class="rw-banner__message">${b.message}</div>
             </div>
             <div class="rw-banner__actions">
+              ${actionsOf(b)}
               <button class="rw-btn rw-btn--tertiary" type="button" onClick=${() => copy(b)}>
                 ${copied > 0 ? 'Copied' : copied < 0 ? 'Copy failed' : 'Copy details'}
               </button>
@@ -581,6 +666,21 @@ export async function loadReport(dir, force) {
     if (token !== loadGen) return;
     loadedDir = null;
     store.set({ project: null, projectDir: null });
+    // A file the server could not parse is a fact about the file, said in
+    // words somebody can act on; the parser's own text travels with Copy
+    // details rather than being the whole message.
+    if (err && err.payload && typeof err.payload === 'object' && err.payload.unreadable) {
+      diag.note('project', describe(err));
+      store.pushBanner({
+        level: 'error',
+        code: 'project',
+        dir: dir,
+        title: UNREADABLE_TITLE,
+        message: UNREADABLE_MESSAGE,
+        detail: String(err.payload.detail || err.message || ''),
+      });
+      return;
+    }
     trap(err, 'project');
   } finally {
     // Only the newest load owns the in-flight slot; an older one finishing must

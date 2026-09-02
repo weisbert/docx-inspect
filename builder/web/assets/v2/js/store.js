@@ -84,8 +84,10 @@ function initialState() {
     dirty: false,
     rev: 0,
     // 'blocked' is a save the store will not attempt again on its own: the
-    // file changed under this window, so only a fresh read starts it again.
+    // file changed under this window (or is gone), so nothing goes out until
+    // the user says which version wins -- see the "blocked" section below.
     saveState: 'saved', // 'saved' | 'saving' | 'retrying' | 'blocked'
+    saveBlock: null, // while blocked: 'conflict' (409) | 'gone' (410)
     savedAt: null,
     warnings: [],
     overlay: null,
@@ -247,8 +249,23 @@ export const store = {
   // screen. A second banner with a code already on screen updates that banner in
   // place instead: same id, so it does not re-animate or move, with the newest
   // message, the newest time and a count of how many attempts it stands for.
+  //
+  // A BANNER BELONGS TO THE REPORT IT WAS RAISED ON. Every banner is stamped
+  // with `dir` -- the report on screen when it was raised, or the one the caller
+  // names -- and boot.js drops the banners of a report the user has left. A
+  // load that failed in report A used to stay pinned above report B, which
+  // loaded fine, and a save that was refused went on saying so over a document
+  // that was never in question. A banner raised with no report on screen (the
+  // shelf's own faults) has `dir: null` and is not tied to any route.
+  //
+  // `actions` is an optional list of {label, level, onClick} the banner renders
+  // as buttons before its own Copy details / Close. That is how a refusal
+  // offers the way past it instead of only naming it.
   pushBanner(banner) {
-    const incoming = banner || {};
+    const incoming = Object.assign({}, banner || {});
+    if (incoming.dir === undefined) {
+      incoming.dir = (state.route && state.route.dir) || null;
+    }
     const code = incoming.code;
     if (code) {
       const at = state.banners.findIndex((b) => b.code === code);
@@ -275,8 +292,25 @@ export const store = {
     store.set({ banners: state.banners.filter((b) => b.id !== id) });
   },
 
+  // Drop the banner of a KIND of problem, by its code, if it is on screen.
+  dismissBannerCode(code) {
+    if (!code) return;
+    if (state.banners.some((b) => b.code === code)) {
+      store.set({ banners: state.banners.filter((b) => b.code !== code) });
+    }
+  },
+
   clearBanners() {
     if (state.banners.length) store.set({ banners: [] });
+  },
+
+  // Drop every banner that belongs to a report other than `dir` (null: every
+  // report). Called by the router when the user moves to another report or to
+  // the shelf; a banner with no report of its own stays.
+  clearReportBanners(dir) {
+    const keep = dir == null ? null : String(dir);
+    const kept = state.banners.filter((b) => b.dir == null || b.dir === keep);
+    if (kept.length !== state.banners.length) store.set({ banners: kept });
   },
 
   showToast(toast) {
@@ -293,6 +327,14 @@ export const store = {
   navigate(/* route */) {},
   routeHref(/* route */) {
     return '#/';
+  },
+  // Re-read a report from disk on purpose (boot.js installs loadReport(dir,
+  // true) here). The fallback fetches directly, so "load theirs" works even
+  // before the router has installed anything.
+  async reloadReport(dir) {
+    const payload = await api.getProject(dir);
+    const project = payload && payload.project ? payload.project : payload;
+    store.setProject(project, Object.assign({}, (payload && payload.meta_info) || {}, { dir: dir }));
   },
 
   // Restore the persisted ui slice. Called once by boot.js before the first render.
@@ -335,11 +377,13 @@ export const store = {
       ? String(info.dir)
       : (state.projectDir || (state.route && state.route.dir) || null);
     const movedReport = dir !== state.projectDir;
+    const unblocks = movedReport || info.mtime != null;
     store.set({
       project: project,
       projectDir: dir,
       dirty: false,
       saveState: 'saved',
+      saveBlock: unblocks ? null : state.saveBlock,
       savedAt: info.mtime == null ? state.savedAt : info.mtime,
     });
     // The token belongs to a file, so it never crosses reports: loading another
@@ -348,7 +392,7 @@ export const store = {
     else if (info.mtime != null) lastSavedAt = info.mtime;
     // A fresh read is also the recovery from a conflict: this document now
     // matches the file, so saving it is allowed again.
-    if (movedReport || info.mtime != null) saveBlocked = null;
+    if (unblocks) clearBlock();
     // No rev bump: this document came FROM the disk, so nothing is outstanding.
     // A save still in flight will see an unchanged rev and clear `dirty`, which
     // is the right answer -- the bytes it wrote have just been superseded by the
@@ -382,12 +426,85 @@ export const store = {
       }
       // A conflict is only this document's conflict when it is this document's
       // destination that is blocked.
-      const conflict = !!saveBlocked && saveBlocked === state.projectDir;
+      const blocked = !!saveBlocked && saveBlocked === state.projectDir;
+      const gone = blocked && blockedKind === 'gone';
       throw new SaveFailedError(
-        conflict ? SAVE_CONFLICT_MESSAGE : SAVE_FAILED_MESSAGE,
-        conflict ? 'save-conflict' : 'save-failed'
+        gone ? SAVE_GONE_MESSAGE : blocked ? SAVE_CONFLICT_MESSAGE : SAVE_FAILED_MESSAGE,
+        gone ? 'save-gone' : blocked ? 'save-conflict' : 'save-failed'
       );
     });
+  },
+
+  /* ---- the way past a blocked save ---- */
+
+  // "Keep my version": write this window's document over the file, once,
+  // explicitly. The token is left out on purpose and the server is told so
+  // (`overwrite`), which makes it snapshot the version it is replacing first --
+  // nothing is lost, and the write is the user's decision, not a retry's.
+  // Afterwards the loop runs normally again.
+  keepMine() {
+    const dir = saveBlocked;
+    if (!dir || dir !== state.projectDir || blockedKind !== 'conflict') return Promise.resolve(null);
+    overwriteOnce = dir;
+    clearBlock();
+    store.dismissBannerCode(BLOCKED_CODE);
+    store.set({ saveState: 'saved', saveBlock: null });
+    return store.saveNow().catch(() => null);
+  },
+
+  // "Load theirs": drop what is only in this window and read the file again.
+  // The confirmation step lives in the banner (confirmLoadTheirs); this is the
+  // act itself, and it is only ever reached from the danger button.
+  loadTheirs() {
+    const dir = saveBlocked || state.projectDir;
+    if (!dir) return Promise.resolve(null);
+    store.discardEdits();
+    store.dismissBannerCode(BLOCKED_CODE);
+    return Promise.resolve(store.reloadReport(dir)).catch((err) => {
+      store.pushBanner({
+        level: 'error', code: 'project', dir: dir,
+        message: String(err && err.message ? err.message : err),
+      });
+      return null;
+    });
+  },
+
+  // "Copy my version": the in-memory document, whole, on the clipboard -- the
+  // exchange screen's own copy action, so the text is the same one that screen
+  // produces. The verdict is said in the banner it was pressed from.
+  copyMyVersion() {
+    const dir = state.projectDir;
+    return import('./views/sync.js')
+      .then((mod) => (mod && typeof mod.copyWholeReport === 'function' ? mod.copyWholeReport() : false))
+      .catch(() => false)
+      .then((ok) => {
+        store.pushBanner({
+          level: ok ? 'done' : 'error',
+          code: 'copy-my-version',
+          dir: dir,
+          title: ok ? COPIED_TITLE : COPY_FAILED_TITLE,
+          message: ok ? COPIED_MESSAGE : COPY_FAILED_MESSAGE,
+        });
+        return ok;
+      });
+  },
+
+  // Throw away the edit that exists only in this window, on purpose. The
+  // document stays on screen until whatever replaces it is loaded; nothing
+  // here writes, and a save still on the wire lands on the floor. Reached only
+  // from "Leave and discard" and "Load theirs" -- the two places the user has
+  // said so in as many words.
+  discardEdits() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    saveGen += 1;
+    savePending = false;
+    savePromise = null;
+    saveAgain = false;
+    saveFailed = false;
+    overwriteOnce = null;
+    clearBlock();
+    store.set({ dirty: false, saveState: 'saved', saveBlock: null, rev: state.rev });
   },
 
   // Test seam: drop everything back to the startup state. Bumping the
@@ -401,7 +518,8 @@ export const store = {
     savePromise = null;
     saveAgain = false;
     saveFailed = false;
-    saveBlocked = null;
+    overwriteOnce = null;
+    clearBlock();
     lastSavedAt = null;
     state = initialState();
     notify();
@@ -419,9 +537,34 @@ const RETRY_DELAY_MS = 1500;
 // stops a pathological caller that edits from inside a subscriber.
 const MAX_FLUSH_PASSES = 8;
 
-// The two messages the save loop puts on screen, from 02_GLOSSARY_EN.md.
+// The messages the save loop puts on screen. The first two are from the frozen
+// string list; the rest are the words of the way past a blocked save.
 const SAVE_FAILED_MESSAGE = 'Not saved — the change is only in this window until the save succeeds';
 const SAVE_CONFLICT_MESSAGE = 'This report was changed somewhere else — nothing was written';
+const SAVE_GONE_MESSAGE = 'This report is no longer on disk — nothing was written';
+
+const BLOCKED_CODE = 'save-blocked';
+const CONFLICT_TITLE = 'Not saved — which version should stand?';
+const CONFLICT_BODY = SAVE_CONFLICT_MESSAGE + '. Keep my version writes what is in this window '
+  + 'over the file (a snapshot of the other version is taken first). Load theirs drops the edits '
+  + 'that exist only here and reads the file again.';
+const GONE_TITLE = 'Not saved — this report was deleted';
+const GONE_BODY = SAVE_GONE_MESSAGE + '. It was moved to the trash from somewhere else, and a '
+  + 'save does not bring a report back. Copy my version to keep the edits, then restore the '
+  + 'report from Trash on the shelf.';
+const DISCARD_TITLE = 'Discard my version?';
+const DISCARD_BODY = 'The edits that exist only in this window are dropped and the report is read '
+  + 'again from the file. Copy my version first to keep a record of them.';
+const KEEP_MINE = 'Keep my version';
+const COPY_MINE = 'Copy my version';
+const LOAD_THEIRS = 'Load theirs';
+const KEEP_EDITING = 'Keep editing';
+const DISCARD_AND_LOAD = 'Discard and load theirs';
+const COPIED_TITLE = 'Copied';
+const COPIED_MESSAGE = 'Your version of the whole report is on the clipboard — paste it somewhere safe.';
+const COPY_FAILED_TITLE = 'Could not reach the clipboard';
+const COPY_FAILED_MESSAGE = 'The browser refused the clipboard. Open the exchange drawer and press '
+  + 'Copy whole report instead.';
 
 // What saveNow() rejects with. `alreadyReported` marks the failure as one the
 // save loop has already put on screen, so a caller (and boot.js's global
@@ -440,7 +583,10 @@ let savePending = false; // a save is in flight
 let savePromise = null; // the promise of that save; it never rejects
 let saveAgain = false; // a save was asked for while one was in flight
 let saveFailed = false; // the last attempt exhausted its retry
-let saveBlocked = null; // the destination a 409 stopped us writing to
+let saveBlocked = null; // the destination a 409 / 410 stopped us writing to
+let blockedKind = null; // 'conflict' | 'gone' while saveBlocked is set
+let blockedRaisedRev = -1; // the rev the blocked banner was last raised for
+let overwriteOnce = null; // destination whose NEXT write is the explicit overwrite
 let lastSavedAt = null; // mtime token for optimistic concurrency
 let saveGen = 0; // bumped by reset(); a save from an older generation is dropped
 
@@ -453,10 +599,96 @@ function scheduleSave() {
 }
 
 async function attemptSave(dir, project) {
-  const result = await api.saveProject(dir, project, { savedAt: lastSavedAt });
+  // The one write that goes out without the token is the one the user asked
+  // for by name; the flag is consumed here so no later save inherits it.
+  const overwrite = overwriteOnce === dir;
+  overwriteOnce = null;
+  const result = await api.saveProject(dir, project,
+    overwrite ? { overwrite: true } : { savedAt: lastSavedAt });
   if (result && result.mtime != null) lastSavedAt = result.mtime;
   else if (result && result.saved_at != null) lastSavedAt = result.saved_at;
   return result;
+}
+
+/* ---- blocked: a save the loop will not repeat on its own ----------------
+ *
+ * Two answers stop the loop rather than retry it. 409: the file changed under
+ * this window -- a second window, an applied package, a rename from the shelf.
+ * 410 (or payload.gone): the report is not on disk at all any more -- it was
+ * moved to the trash while this window still held it. In both cases the bytes
+ * on the wire would overwrite something the user has not seen, so nothing is
+ * repeated with the token dropped and nothing is repeated at all.
+ *
+ * Blocked is a STATE THE USER CAN LEAVE, not a dead end. The banner it raises
+ * carries the ways out (keep mine / copy mine / load theirs), the indicator
+ * says the loop has stopped, and every save that is suppressed while blocked
+ * -- a keystroke, Ctrl+S, a flush before an export, an attempt to leave --
+ * raises that same banner again rather than doing nothing. */
+
+function isConflict(err) {
+  return !!(err && err.status === 409);
+}
+
+function isGone(err) {
+  if (!err) return false;
+  if (err.status === 410) return true;
+  return !!(err.payload && typeof err.payload === 'object' && err.payload.gone);
+}
+
+function clearBlock() {
+  saveBlocked = null;
+  blockedKind = null;
+  blockedRaisedRev = -1;
+}
+
+function blockedFor(dir) {
+  return !!saveBlocked && saveBlocked === dir;
+}
+
+function raiseBlockedBanner(dir) {
+  blockedRaisedRev = state.rev;
+  const gone = blockedKind === 'gone';
+  const actions = gone
+    ? [{ label: COPY_MINE, level: 'secondary', onClick: () => store.copyMyVersion() }]
+    : [
+      { label: KEEP_MINE, level: 'primary', onClick: () => store.keepMine() },
+      { label: COPY_MINE, level: 'secondary', onClick: () => store.copyMyVersion() },
+      { label: LOAD_THEIRS, level: 'danger', onClick: () => confirmLoadTheirs(dir) },
+    ];
+  store.pushBanner({
+    level: 'error',
+    code: BLOCKED_CODE,
+    dir: dir,
+    title: gone ? GONE_TITLE : CONFLICT_TITLE,
+    message: gone ? GONE_BODY : CONFLICT_BODY,
+    actions: actions,
+  });
+}
+
+// The second step of "load theirs": the same banner, now asking. No browser
+// dialog -- the answer is a button, and one of them is the way back.
+function confirmLoadTheirs(dir) {
+  store.pushBanner({
+    level: 'error',
+    code: BLOCKED_CODE,
+    dir: dir,
+    title: DISCARD_TITLE,
+    message: DISCARD_BODY,
+    actions: [
+      { label: COPY_MINE, level: 'secondary', onClick: () => store.copyMyVersion() },
+      { label: KEEP_EDITING, level: 'secondary', onClick: () => raiseBlockedBanner(dir) },
+      { label: DISCARD_AND_LOAD, level: 'danger', onClick: () => store.loadTheirs() },
+    ],
+  });
+}
+
+// A save that was asked for and not sent because the loop is blocked. Said
+// once per edit: the banner is updated in place, and a keystroke that changes
+// nothing since the last time it was said does not repeat it.
+function suppressedWhileBlocked(dir, force) {
+  if (!blockedFor(dir)) return;
+  if (!force && blockedRaisedRev === state.rev) return;
+  raiseBlockedBanner(dir);
 }
 
 // Is (document, destination) still the pair the store holds? A save is only
@@ -478,8 +710,12 @@ function runSave() {
   const dir = snapshot.projectDir;
   if (!dir || !snapshot.project || !snapshot.dirty) return Promise.resolve(null);
   // A conflict means the file moved under us. Writing again would overwrite
-  // whatever moved it, so nothing goes out until the document is re-read.
-  if (saveBlocked === dir) return Promise.resolve(null);
+  // whatever moved it, so nothing goes out until the user decides -- and the
+  // decision is put back on screen rather than the save silently dropped.
+  if (blockedFor(dir)) {
+    suppressedWhileBlocked(dir, false);
+    return Promise.resolve(null);
+  }
   if (savePending) {
     saveAgain = true;
     return savePromise || Promise.resolve(null);
@@ -506,9 +742,9 @@ async function performSave(dir, project, revAtSerialise, gen) {
     // 409: the file changed on disk since the token was issued -- a second
     // window, an applied package, or a save addressed at the wrong report. The
     // token is the only thing that catches that, so it is never dropped and the
-    // write is never repeated without it. Say so and stop.
-    if (err && err.status === 409) {
-      saveBlocked = dir;
+    // write is never repeated without it. 410: the report is gone from disk,
+    // and a save must not bring it back. Say so and stop.
+    if (isConflict(err) || isGone(err)) {
       finishSave(dir, revAtSerialise, gen, err);
       return null;
     }
@@ -527,7 +763,6 @@ async function performSave(dir, project, revAtSerialise, gen) {
       finishSave(dir, revAtSerialise, gen, null);
       return result;
     } catch (err2) {
-      if (err2 && err2.status === 409) saveBlocked = dir;
       finishSave(dir, revAtSerialise, gen, err2);
       return null;
     }
@@ -562,15 +797,24 @@ function finishSave(dir, revAtSerialise, gen, err) {
     saveFailed = current;
     if (!current) return;
     // The document stays dirty and stays in memory; the next edit, or the next
-    // scheduled pass, tries again -- unless a conflict stopped the loop, in
-    // which case only a fresh read of the report starts it again, and saying
-    // 'retrying' would promise an attempt that is never going to come.
-    const conflict = !!(err && err.status === 409);
-    store.set({ saveState: conflict ? 'blocked' : 'retrying' });
+    // scheduled pass, tries again -- unless a conflict (or a report gone from
+    // disk) stopped the loop, in which case saying 'retrying' would promise an
+    // attempt that is never going to come. Blocked is said as blocked, with the
+    // ways out attached.
+    const blocked = isConflict(err) || isGone(err);
+    if (blocked) {
+      saveBlocked = dir;
+      blockedKind = isGone(err) ? 'gone' : 'conflict';
+      store.set({ saveState: 'blocked', saveBlock: blockedKind });
+      raiseBlockedBanner(dir);
+      return;
+    }
+    store.set({ saveState: 'retrying', saveBlock: null });
     store.pushBanner({
       level: 'error',
-      code: conflict ? 'save-conflict' : 'save-failed',
-      message: conflict ? SAVE_CONFLICT_MESSAGE : SAVE_FAILED_MESSAGE,
+      code: 'save-failed',
+      dir: dir,
+      message: SAVE_FAILED_MESSAGE,
       detail: err && err.message ? String(err.message) : String(err),
     });
     return;
@@ -585,12 +829,16 @@ function finishSave(dir, revAtSerialise, gen, err) {
   }
   store.set({
     saveState: 'saved',
+    saveBlock: null,
     savedAt: Date.now() / 1000,
     // `rev` is passed through unchanged so writing dirty:true here is not itself
     // counted as a new edit.
     dirty: changedSince,
     rev: state.rev,
   });
+  // A write that landed answers the failure banners of this report.
+  store.dismissBannerCode('save-failed');
+  store.dismissBannerCode(BLOCKED_CODE);
   if (saveAgain || changedSince) {
     saveAgain = false;
     scheduleSave();
@@ -615,7 +863,13 @@ async function flushSaves() {
     // A server that is refusing writes must not hold the caller forever -- but
     // it gets one attempt from this flush first, whatever happened before it.
     if (saveFailed && tries > 0) return last;
-    if (saveBlocked && saveBlocked === state.projectDir) return last;
+    // A flush that is refused because the loop is blocked is a save that was
+    // asked for by name -- Ctrl+S, an export, leaving -- so the choice goes
+    // back on screen every time, not once per edit.
+    if (blockedFor(state.projectDir)) {
+      suppressedWhileBlocked(state.projectDir, true);
+      return last;
+    }
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -632,10 +886,15 @@ async function flushSaves() {
 // one the DOCUMENT came from -- leaving for the shelf does not strand the edit,
 // and does not aim it at wherever the user went.
 function afterChange() {
-  if (state.dirty && state.project && state.projectDir && !savePending
-      && saveBlocked !== state.projectDir) {
-    scheduleSave();
+  if (!(state.dirty && state.project && state.projectDir) || savePending) return;
+  if (blockedFor(state.projectDir)) {
+    // An edit made while blocked is a save that will not be sent. Once per
+    // edit (by rev, so the banner's own update does not re-enter here) the
+    // choice is put back on screen -- including after the user closed it.
+    suppressedWhileBlocked(state.projectDir, false);
+    return;
   }
+  scheduleSave();
 }
 
 /* ------------------------------------------------------------------ *

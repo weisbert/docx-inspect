@@ -1070,7 +1070,12 @@ await test('leaving a report flushes the pending edit BEFORE the route changes',
   assert.equal(recorder.puts[1].dir, DIR);
 }, { pin: true });
 
-await test('the page unloading inside the debounce is guarded', async () => {
+// The unload guard FLUSHES an edit inside the debounce and asks nothing: the
+// write is on the wire before the page goes, and lands (measured in a real
+// browser by test_v2_save_conflict.js). The browser's prompt is kept for the
+// one case the flush cannot cover -- a write already in flight, which a second
+// edit typed during it has no request of its own for yet.
+await test('the page unloading inside the debounce is flushed, without a prompt', async () => {
   const recorder = putRecorder();
   const project = openReport();
   store.set({ route: { view: 'editor', dir: DIR, node: null } });
@@ -1084,11 +1089,35 @@ await test('the page unloading inside the debounce is guarded', async () => {
   const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, returnValue: null };
   for (const fn of handlers('beforeunload')) fn(event);
 
-  assert.equal(event.defaultPrevented, true, 'nothing asked before the page went away');
   assert.ok(await until(() => recorder.puts.length === 1, 4000),
     'the guard did not even try to write the edit out');
   assert.ok(recorder.puts[0].body.indexOf('UNLOADEDIT') >= 0);
+  assert.equal(event.defaultPrevented, false, 'the prompt fired for an edit the flush covers');
   await until(() => store.get().dirty === false, 4000);
+  store.reset();
+}, { pin: true });
+
+await test('the page unloading with a write IN FLIGHT is asked about', async () => {
+  const recorder = putRecorder();
+  const release = recorder.hold();
+  const project = openReport();
+  store.set({ route: { view: 'editor', dir: DIR, node: null } });
+  store.setProject(project, { dir: DIR, mtime: 100 });
+  typeInto(project, 'base INFLIGHT');
+  store.markDirty();
+  assert.ok(await until(() => recorder.puts.length === 1, 4000), 'the save never started');
+  assert.equal(store.get().saveState, 'saving');
+  // A second keystroke during the held PUT: nothing on the wire carries it.
+  typeInto(project, 'base INFLIGHT SECOND');
+  store.markDirty();
+
+  const handlers = (name) => (fakeBrowserListeners.get(name) || []);
+  const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, returnValue: null };
+  for (const fn of handlers('beforeunload')) fn(event);
+  assert.equal(event.defaultPrevented, true, 'nothing asked with an edit that no request carries');
+
+  release();
+  await until(() => store.get().dirty === false, 6000);
   store.reset();
 }, { pin: true });
 

@@ -38,7 +38,7 @@ import {
   flagsFrom, flagsForGroup,
 } from '../util.js';
 import {
-  Button, IconButton, Pill, Menu, Dialog, Drawer, Toast, EmptyState,
+  Button, IconButton, Pill, Menu, Dialog, Drawer, Toast, EmptyState, Banner,
   html, cx, Fragment,
   useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback,
 } from '../components/index.js';
@@ -53,8 +53,18 @@ const S = {
   more: 'More',
   saving: 'Saving…',
   notSaved: 'Not saved — retrying',
+  // The loop has stopped on its own and will not write again until the user
+  // picks a version (the banner carries the choice); the chip says which fact.
+  blocked: 'This report was changed somewhere else — nothing was written',
+  blockedGone: 'This report is no longer on disk — nothing was written',
   saved: 'Saved',
   unsaved: 'Unsaved changes',
+  // A new report that inherits from this one is built from the FILE, so the
+  // same barrier the export has stands in front of it, in the same words.
+  notCreated: 'Not created — this report is not saved',
+  notCreatedBody: 'The last save did not reach the disk, so the new report would inherit the '
+    + 'last saved version, without the edits that exist only in this page. The save keeps '
+    + 'retrying; create it once it reports Saved.',
   loading: 'Loading…',
   notAvailable: 'This screen is not available yet',
   // header
@@ -633,14 +643,20 @@ function SaveIndicator(props) {
   // report was just opened. With nothing saved yet there is no time to show, and
   // inventing "now" would claim a save that never happened.
   const clock = formatClock(props.savedAt);
+  // 'blocked' is not a pending edit: the loop has stopped and nothing will be
+  // written until the user chooses. It reads as a failure, in red, and never
+  // falls through to the grey "Unsaved changes" of a keystroke half a second
+  // old.
   const label = state === 'saving' ? S.saving
     : state === 'retrying' ? S.notSaved
-      : dirty ? S.unsaved
-        : clock ? S.saved + ' ' + clock : S.saved;
+      : state === 'blocked' ? (props.block === 'gone' ? S.blockedGone : S.blocked)
+        : dirty ? S.unsaved
+          : clock ? S.saved + ' ' + clock : S.saved;
   return html`
     <div class=${cx('rw-save', state === 'saving' && 'rw-save--busy',
-                    state === 'retrying' && 'rw-save--failed')}
-         role="status" aria-live="polite">
+                    (state === 'retrying' || state === 'blocked') && 'rw-save--failed',
+                    state === 'blocked' && 'rw-save--blocked')}
+         role="status" aria-live="polite" data-save-state=${state}>
       <span class="rw-save__dot" aria-hidden="true"></span>
       <span>${label}</span>
     </div>`;
@@ -676,6 +692,7 @@ function Header(props) {
   const { dir, project, cfg } = props;
   const tree = useStore((s) => s.tree);
   const saveState = useStore((s) => s.saveState);
+  const saveBlock = useStore((s) => s.saveBlock);
   const savedAt = useStore((s) => s.savedAt);
   const dirty = useStore((s) => s.dirty);
   const ui = useStore((s) => s.ui);
@@ -756,7 +773,7 @@ function Header(props) {
 
         <span class="rw-spacer"></span>
 
-        <${SaveIndicator} state=${saveState} dirty=${dirty} savedAt=${savedAt} />
+        <${SaveIndicator} state=${saveState} block=${saveBlock} dirty=${dirty} savedAt=${savedAt} />
         ${ExportMenu
           ? html`<${ExportMenu} dir=${dir} />`
           : html`
@@ -1965,10 +1982,34 @@ function NewReportDialog(props) {
   const [stage, setStage] = useState(free[0] || STAGES[0]);
   const [mode, setMode] = useState(dir ? 'inherit' : 'template');
   const [busy, setBusy] = useState(false);
+  const [held, setHeld] = useState(false);
+
+  // Inheriting reads the source report's project.json ON DISK, so an edit the
+  // save loop still owes would simply not be in what the new report is built
+  // from -- whichever of the debounce and the request got there first decided.
+  // The same barrier the export and the exchange screen stand behind: flush,
+  // and when the flush does not land, do not create. Pressing Create again is
+  // the retry; the dialog stays open with the edit still on screen.
+  const flushed = async () => {
+    try {
+      if (typeof store.saveNow !== 'function') return true;
+      const answer = await store.saveNow();
+      if (answer && answer.ok === false) return false;
+      return !store.get().dirty;
+    } catch (err) {
+      return false; // the save loop has already said why
+    }
+  };
 
   const create = async () => {
     if (!here.project || !here.module) return;
     setBusy(true);
+    setHeld(false);
+    if (mode === 'inherit' && !(await flushed())) {
+      setHeld(true);
+      setBusy(false);
+      return;
+    }
     try {
       const result = await api.reportNew({
         project: here.project.id,
@@ -1997,6 +2038,8 @@ function NewReportDialog(props) {
       footer=${html`
         <${Button} level="tertiary" onClick=${props.onClose}>${S.cancel}<//>
         <${Button} level="primary" disabled=${busy} onClick=${create}>${S.createReport}<//>`}>
+      ${held ? html`
+        <${Banner} level="error" title=${S.notCreated}>${S.notCreatedBody}<//>` : null}
       <div class="rw-formgrid rw-formgrid--full">
         <div class="rw-field">
           <label class="rw-field__label">${S.stage}</label>

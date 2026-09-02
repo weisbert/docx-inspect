@@ -1316,3 +1316,16 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 }
 .rw-seam--visible:focus-visible { outline: none; }
 .rw-seam--visible:focus-visible::before { background: var(--accent-line); }
+
+/* == 12 - a shelf row whose file cannot be read =============================
+ * The badge is the one thing that is red; the rest of the row goes quiet so
+ * the eye lands on the reason rather than on a title that may be a guess. */
+.rw-row--unreadable .rw-row__title { color: var(--fg-muted); font-weight: var(--fw-regular); }
+.rw-row__unreadable {
+  display: inline-grid; place-items: center; height: 18px; padding: 0 var(--sp-6);
+  border: 1px solid var(--bad-line); border-radius: var(--r-badge); background: var(--bad-wash);
+  color: var(--bad-ink); font-size: var(--fs-micro); font-weight: var(--fw-title); letter-spacing: .02em;
+  white-space: nowrap;
+}
+/* The save chip while the loop has stopped: red like a failure, and it is one. */
+.rw-save--blocked { font-weight: var(--fw-strong); }
