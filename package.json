@@ -5,7 +5,7 @@
   "description": "Development-only tooling for the Report Workbench tests. The application itself has no build step and no runtime dependencies: everything it ships is vendored under builder/web/assets/v2/vendor/. Every builder/tests/test_v2_* file has a script of its own here and appears in test:v2-all; a new one is added to both in the same commit, or nothing runs it.",
   "scripts": {
     "test": "npm run test:v2-all",
-    "test:v2-all": "npm run test:v2-api && npm run test:v2-numeric && npm run test:v2-rename-guard && npm run test:v2 && npm run test:v2-over-spec && npm run test:v2-over-spec-scope && npm run test:v2-load-race && npm run test:v2-card-move && npm run test:v2-grid-drag && npm run test:v2-assets && npm run test:v2-restart-flush && npm run test:v2-sync-flush-guard && npm run test:v2-export-stale && npm run test:v2-apply-update-shelf && npm run test:v2-grid-menu && npm run test:v2-card-delete-guard && npm run test:v2-trash-restore && npm run test:v2-menu-scroll && npm run test:v2-asset-insert && npm run test:v2-preview-follow && npm run test:v2-home-rail && npm run test:v2-diagnostics && npm run test:v2-figure-swap && npm run test:v2-chrome-once && npm run test:v2-outline-expand && npm run test:v2-preview-width && npm run test:v2-crossref && npm run test:v2-save-conflict && npm run test:v2-table-editor && npm run test:v2-outline-parity && npm run test:v2-exchange && npm run test:v2-proof-flush && npm run test:v2-grid-typing",
+    "test:v2-all": "npm run test:v2-api && npm run test:v2-numeric && npm run test:v2-rename-guard && npm run test:v2 && npm run test:v2-over-spec && npm run test:v2-over-spec-scope && npm run test:v2-load-race && npm run test:v2-card-move && npm run test:v2-grid-drag && npm run test:v2-assets && npm run test:v2-restart-flush && npm run test:v2-sync-flush-guard && npm run test:v2-export-stale && npm run test:v2-apply-update-shelf && npm run test:v2-grid-menu && npm run test:v2-card-delete-guard && npm run test:v2-trash-restore && npm run test:v2-menu-scroll && npm run test:v2-asset-insert && npm run test:v2-preview-follow && npm run test:v2-home-rail && npm run test:v2-diagnostics && npm run test:v2-figure-swap && npm run test:v2-chrome-once && npm run test:v2-outline-expand && npm run test:v2-preview-width && npm run test:v2-crossref && npm run test:v2-save-conflict && npm run test:v2-table-editor && npm run test:v2-outline-parity && npm run test:v2-exchange && npm run test:v2-proof-flush && npm run test:v2-grid-typing && npm run test:v2-paste-package",
     "test:v2": "node builder/tests/test_v2_smoke.js",
     "test:v2-api": "node builder/tests/test_v2_api.mjs",
     "test:v2-numeric": "node builder/tests/test_v2_numeric.mjs",
@@ -38,7 +38,8 @@
     "test:v2-outline-parity": "node builder/tests/test_v2_outline_parity.js",
     "test:v2-exchange": "node builder/tests/test_v2_exchange.js",
     "test:v2-proof-flush": "node builder/tests/test_v2_proof_flush.js",
-    "test:v2-grid-typing": "node builder/tests/test_v2_grid_typing.js"
+    "test:v2-grid-typing": "node builder/tests/test_v2_grid_typing.js",
+    "test:v2-paste-package": "node builder/tests/test_v2_paste_package.js"
   },
   "devDependencies": {
     "playwright-core": "1.62.1"

@@ -104,7 +104,9 @@ const TEXT = {
   dropKinds: '.zip or a single .md — or choose a file',
   chooseFile: 'Choose a file',
   orPaste: 'Or paste text',
-  pastePlaceholder: 'Paste the returned text here',
+  pastePlaceholder:
+    'Paste the returned text here — a whole report, a list of changes, or the '
+    + 'base64 of a package .zip when this machine has no file channel',
   useText: 'Use this text',
   promise:
     'Non-overlapping edits merge on their own. Only a passage both sides changed stops to '
@@ -993,6 +995,63 @@ async function readPackage(file, dir, project) {
   return packageFromText(name, text, created);
 }
 
+/* -- a .zip that arrived as text -------------------------------------
+ * The channel this report travels down cannot always carry a file: on the
+ * machines where it cannot, the package is base64 and it arrives in a chat
+ * window, which is what the old interface's "paste base64 zip text here" box
+ * was for. Nothing else about it differs, so it is turned back into the bytes
+ * it was and handed to the SAME reader the file picker uses -- one rule for
+ * what a package may contain, not a second one that happens to accept less.
+ *
+ * -> the bytes, or null when the text is not base64 of a zip. Recognition is
+ *    by content, not by hope: the alphabet has to be base64's, and the bytes it
+ *    decodes to have to open with a local file header (PK 03 04).
+ */
+export function zipBytesFromBase64(text) {
+  let raw = String(text == null ? '' : text).trim();
+  // A clipboard round trip through a browser can bring the data URI with it.
+  if (raw.slice(0, 5).toLowerCase() === 'data:') {
+    const comma = raw.indexOf(',');
+    if (comma >= 0) raw = raw.slice(comma + 1);
+  }
+  raw = raw.replace(/\s+/g, '');
+  if (raw.length < 24 || raw.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return null;
+  let binary = '';
+  try {
+    binary = atob(raw);
+  } catch (err) {
+    return null;
+  }
+  if (binary.length < 22) return null;
+  if (binary.charCodeAt(0) !== 0x50 || binary.charCodeAt(1) !== 0x4b
+      || binary.charCodeAt(2) !== 0x03 || binary.charCodeAt(3) !== 0x04) return null;
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
+// A Blob wearing the two things readPackage asks a picked file for: a name it
+// can recognise a .zip by, and the bytes.
+function fileFromBytes(name, bytes) {
+  const blob = new Blob([bytes]);
+  return {
+    name: name,
+    size: blob.size,
+    lastModified: Date.now(),
+    arrayBuffer: () => blob.arrayBuffer(),
+    text: () => blob.text(),
+  };
+}
+
+// What the paste box and a dropped selection go through: base64 of a zip first,
+// then the text package kinds.
+export async function readPastedPackage(text, dir, project) {
+  const bytes = zipBytesFromBase64(text);
+  if (bytes) return readPackage(fileFromBytes('update.zip', bytes), dir, project);
+  return packageFromText('', text, Date.now() / 1000);
+}
+
 // Exported because the shelf takes the same kinds of package this drawer does,
 // through the same dialog: one rule for what a returned package may be, in one
 // place, rather than a second reader that happens to accept less.
@@ -1439,10 +1498,10 @@ export function SyncDrawer(props) {
     }
   };
 
-  const takeText = () => {
+  const takeText = async () => {
     setPkgError('');
     try {
-      setPkg(packageFromText('', pasteText, Date.now() / 1000));
+      setPkg(await readPastedPackage(pasteText, dir, store.get().project || {}));
       setPasteOpen(false);
       // It has been read into a package; keeping the draft as well would put it
       // back in front of the user next time as unfinished work.
@@ -1452,13 +1511,14 @@ export function SyncDrawer(props) {
     }
   };
 
-  const onDrop = (ev) => {
+  const onDrop = async (ev) => {
     const files = ev && ev.dataTransfer ? ev.dataTransfer.files : null;
     if (files && files.length) { takeFile(files[0]); return; }
     const text = ev && ev.dataTransfer ? ev.dataTransfer.getData('text/plain') : '';
     if (text) {
+      setPkgError('');
       try {
-        setPkg(packageFromText('', text, Date.now() / 1000));
+        setPkg(await readPastedPackage(text, dir, store.get().project || {}));
       } catch (err) {
         setPkgError(errText(err));
       }
