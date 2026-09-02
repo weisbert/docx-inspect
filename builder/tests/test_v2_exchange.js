@@ -620,8 +620,11 @@ function labelScript(label, scope) {
 
     await page.evaluate(`(() => {
       const items = Array.from(document.querySelectorAll('.rw-timeline__item'));
-      const button = Array.from(items[2].querySelectorAll('button'))
+      const row = items[2];
+      if (!row) return 'only ' + items.length + ' entries';
+      const button = Array.from(row.querySelectorAll('button'))
         .filter((b) => b.textContent.trim().indexOf('Restore this state') === 0)[0];
+      if (!button) return 'no restore button on that entry';
       button.click();
       return 'clicked';
     })()`);
@@ -651,6 +654,34 @@ function labelScript(label, scope) {
       quiet.indexOf('Nothing of yours is at stake here') >= 0
       && quiet.indexOf('The common ancestor could not be checked') < 0,
       quiet.replace(/\s+/g, ' ').slice(0, 300));
+
+    /* ============================================================ *
+     * 9 - a roll back leaves the report ON SCREEN
+     * ============================================================ */
+
+    console.log('\n9 - after a roll back the editor still holds a report  (PIN: fails before)');
+    resetFixture(root);
+    // The shared backup history the roll back reads, in the layout the apply
+    // path writes it in.
+    fs.rmSync(path.join(root, '_backups'), { recursive: true, force: true });
+    writeJson(path.join(root, '_backups', '20260830-090000', ...DIR.split('/'), 'project.json'),
+      report({ one: 'v0 first', two: 'v0 method', three: 'v0 results' }));
+    await open();
+    await openHistory();
+    const rolled = await page.evaluate(clickScript('Roll back'));
+    check('the newest exchange offers a roll back', rolled === 'clicked', String(rolled));
+    await wait(4000);
+    check('the backup is what is on disk afterwards',
+      para(0) === 'v0 first', JSON.stringify(para(0)));
+    const after = await page.evaluate(`(async () => {
+      const { store } = await import('/assets/v2/js/store.js');
+      const s = store.get();
+      let first = '';
+      try { first = s.project.outline[0].blocks[0].runs[0].t; } catch (err) { first = ''; }
+      return { hasProject: !!s.project, first: first };
+    })()`);
+    check('and the rolled-back report is on screen, not an empty editor',
+      after.hasProject && after.first === 'v0 first', JSON.stringify(after));
 
     if (consoleErrors.length) {
       check('no uncaught page errors', false, consoleErrors.slice(0, 3).join(' | '));
