@@ -780,7 +780,7 @@ function Header(props) {
 // reachable through its parent's twisty and stays closed until asked for. A
 // search shows every match plus the ancestors that lead to it, so a hit is never
 // orphaned from its chapter.
-function visibleRows(rows, query, expanded) {
+export function visibleRows(rows, query, expanded) {
   const needle = String(query || '').trim().toLowerCase();
   if (needle) {
     const keep = new Set();
@@ -798,13 +798,17 @@ function visibleRows(rows, query, expanded) {
     }
     return rows.filter((row) => keep.has(row.node.id));
   }
+  // Only an ancestor that can be CLOSED gates its descendants, and that is
+  // exactly the set OutlineRow gives a twisty to (`hasChildren && depth >= 1`).
+  // A top-level chapter is always on screen and draws no twisty, so it holds no
+  // expanded state and must not be asked for one -- asking made every depth-2
+  // row unreachable, because the flag it waited on had no control to set it.
   return rows.filter((row) => {
     if (row.depth <= 1) return true;
-    let parent = row.parent;
-    while (parent) {
-      if (!expanded[parent.id]) return false;
-      const parentRow = findRow(rows, parent.id);
-      parent = parentRow ? parentRow.parent : null;
+    let parentRow = row.parent ? findRow(rows, row.parent.id) : null;
+    while (parentRow && parentRow.depth >= 1) {
+      if (!expanded[parentRow.node.id]) return false;
+      parentRow = parentRow.parent ? findRow(rows, parentRow.parent.id) : null;
     }
     return true;
   });
