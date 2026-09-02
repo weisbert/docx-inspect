@@ -325,6 +325,65 @@ const scrollerFacts = (page) => page.evaluate(() => {
  * columns; null takes any. */
 const PINNED_W = 296;   // # + Category + Item, pinned over the left edge
 
+/* A cell that is on screen NOW and that scrolling the grid to its maximum will
+ * certainly take out of view. Anchoring on a cell that merely survives a 4000px
+ * wheel is not the same thing: the scroller saturates long before 4000px, so on
+ * a wide centre pane the anchor never leaves the view and the case this section
+ * means to cover is silently not exercised. (It used to be covered by accident:
+ * the preview column was stealing width from the centre pane, which made the
+ * grid narrow enough that any cell scrolled away.) */
+async function pickCellThatLeavesView(page) {
+  return page.evaluate((pinned) => {
+    const content = document.querySelector('.rw-grid .jss_content');
+    if (!content) return { error: 'no scroller' };
+    const view = content.getBoundingClientRect();
+    const max = content.scrollWidth - content.clientWidth;
+    const out = [];
+    const cells = Array.from(document.querySelectorAll('.rw-grid td[data-x][data-y]'));
+    for (const td of cells) {
+      if (td.classList.contains('jss_freezed')) continue;
+      const b = td.getBoundingClientRect();
+      if (b.width < 20 || b.height < 10) continue;
+      if (b.left < view.left + pinned || b.right > view.right - 8) continue;
+      if (b.top < view.top + 8 || b.bottom > view.bottom - 8) continue;
+      if (b.top < 0 || b.bottom > window.innerHeight) continue;
+      const leftInContent = b.left - view.left + content.scrollLeft;
+      // Where its right edge lands once the scroller is at its maximum. It must
+      // leave the SCROLLER's box: Menu.js decides "out of sight" by clipping the
+      // anchor against its overflow ancestors and the window, so a cell merely
+      // slid UNDER the pinned columns is still visible as far as it can tell --
+      // occlusion is not clipping.
+      if (leftInContent + b.width > max) continue;
+      out.push({
+        x: Number(td.getAttribute('data-x')), y: Number(td.getAttribute('data-y')),
+        cx: b.left + b.width / 2, cy: b.top + b.height / 2, left: b.left,
+      });
+    }
+    out.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    if (out.length) return out[0];
+    return { error: 'no cell the grid can scroll out of view -- max travel '
+      + Math.round(max) + 'px, pane ' + Math.round(view.width) + 'px' };
+  }, PINNED_W);
+}
+
+/* Did the scroll actually remove the anchor? Asserted before the menu is, so a
+ * scroll that moved nothing can never read as "the menu closed correctly". */
+const anchorOutOfView = (page, cell) => page.evaluate((arg) => {
+  const content = document.querySelector('.rw-grid .jss_content');
+  if (!content) return { gone: false, why: 'no scroller' };
+  const view = content.getBoundingClientRect();
+  const td = document.querySelector(
+    '.rw-grid td[data-x="' + arg.x + '"][data-y="' + arg.y + '"]');
+  if (!td) return { gone: true, why: 'the anchor cell left the DOM' };
+  const b = td.getBoundingClientRect();
+  const hidden = b.right <= view.left + 1 || b.left >= view.right - 1;
+  return {
+    gone: hidden,
+    why: 'anchor at [' + Math.round(b.left) + '-' + Math.round(b.right)
+      + '], pane [' + Math.round(view.left) + '-' + Math.round(view.right) + ']',
+  };
+}, { x: cell.x, y: cell.y });
+
 async function pickCell(page, wantColumns) {
   return page.evaluate((cols) => {
     const content = document.querySelector('.rw-grid .jss_content');
@@ -608,14 +667,23 @@ async function browserChecks() {
     section('the same menu, scrolled until its anchor is gone');
     await settle(page, 400);
     await primeScroll(page, null);
-    const cell2 = await pickCell(page, null);
+    // from the left end of the travel: a cell can only be scrolled clear of the
+    // pane if the scroller still has its whole travel left to give
+    await page.evaluate(() => {
+      const el = document.querySelector('.rw-grid .jss_content');
+      if (el) el.scrollLeft = 0;
+    });
+    await settle(page, 220);
+    const cell2 = await pickCellThatLeavesView(page);
     if (cell2.error) {
-      check('there is a cell to anchor the second menu on', false, cell2.error);
+      check('there is a cell the grid can scroll out of view', false, cell2.error);
     } else {
       const opened2 = await openMenuOnCell(page, cell2);
       check('the second menu opened', !!opened2, opened2 ? '' : 'no .rw-menu on screen');
-      await scrollGridBy(page, 4000);
+      await scrollGridBy(page, 4000);          // more than enough: this saturates
       await settle(page, 300);
+      const gone = await anchorOutOfView(page, cell2);
+      check('the scroll really did take the anchor out of view', gone.gone === true, gone.why);
       check('the menu closes once its anchor has been scrolled out of view',
         !(await menuOpen(page)), 'the menu is still on screen beside nothing');
       await page.screenshot({ path: path.join(shots, 'anchor-gone.png') });

@@ -493,8 +493,16 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-editor__legend { display: flex; align-items: center; gap: var(--sp-9); font-size: var(--fs-micro); color: var(--fg-dim); }
 .rw-editor__railbody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 var(--sp-6) var(--sp-16); }
 .rw-editor__centre { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-app); }
+/* min-width:0 is load-bearing, not tidiness. Without it this column's automatic
+   minimum size is its MIN-CONTENT width, and the preview inside it mounts and
+   unmounts sections as the wheel turns -- so a section holding a wide table
+   pushed the whole column open and letting that section scroll away snapped it
+   shut again. The panel jumped between its own width and nearly double it while
+   the reader was only scrolling. Pinned to the flex basis, a wide table scrolls
+   inside .rw-preview__wide, which is what that wrapper is for. */
 .rw-editor__right {
-  flex: 0 0 var(--lay-right-w); display: flex; flex-direction: column; min-height: 0;
+  flex: 0 0 var(--lay-right-w); display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
   background: var(--bg-panel); border-left: 1px solid var(--line);
 }
 .rw-editor__right--collapsed { flex-basis: var(--lay-right-cw); }
