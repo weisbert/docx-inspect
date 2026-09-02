@@ -100,6 +100,10 @@ const T = {
   neverExchanged: 'Never exchanged',
   exchanged: (when) => 'Exchanged ' + when,
   sectionsSince: (n) => n + ' sections changed since',
+  // A report whose project.json the server could not parse. Said on the shelf,
+  // before it is opened, so the failure is not the first anyone hears of it.
+  unreadable: 'Unreadable',
+  unreadableWhy: 'project.json is not valid JSON',
 
   // create / rename / duplicate / delete
   newTitle: 'New',
@@ -1495,10 +1499,11 @@ function Row({ project, module, report, selected, onOpen, onRowMenu }) {
   const exchange = report.exchange || {};
   const since = Number(exchange.sectionsSince) || 0;
   const last = exchange.last;
+  const unreadable = !!report.unreadable;
 
   return html`
     <div
-      class=${classNames('rw-row', selected && 'rw-row--on')}
+      class=${classNames('rw-row', selected && 'rw-row--on', unreadable && 'rw-row--unreadable')}
       data-dir=${report.dir}
       role="button"
       tabIndex="0"
@@ -1513,9 +1518,18 @@ function Row({ project, module, report, selected, onOpen, onRowMenu }) {
       <span class="rw-row__name">
         ${report.stage ? html`<span class="rw-stage">${report.stage}</span>` : null}
         <span class="rw-row__title">${reportLabel(report)}</span>
+        ${unreadable ? html`
+          <span class="rw-row__unreadable" role="img"
+                title=${T.unreadableWhy + (report.error ? ' — ' + report.error : '')}
+                aria-label=${T.unreadable + ' — ' + T.unreadableWhy}>
+            ${T.unreadable}
+          </span>` : null}
       </span>
       <span class="rw-row__path rw-truncate">${projectModulePath(project, module)}</span>
-      <span class="rw-row__spec">${report.overSpec ? '✕ ' + T.overSpec(report.overSpec) : ''}</span>
+      <span class="rw-row__spec">
+        ${unreadable ? html`<span class="rw-dim">${T.unreadableWhy}</span>`
+          : report.overSpec ? '✕ ' + T.overSpec(report.overSpec) : ''}
+      </span>
       <span class=${classNames('rw-row__exchange', !last && 'rw-row__exchange--never')}>
         ${last ? T.exchanged(relativeTime(last)) : T.neverExchanged}
         ${since ? html`<span class="rw-row__since"> · ${T.sectionsSince(since)}</span>` : null}
