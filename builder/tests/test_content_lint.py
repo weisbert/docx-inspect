@@ -583,7 +583,10 @@ def _dt(rows, sims=None):
     data = {"rows": rows}
     if sims is not None:
         data["sims"] = sims
-    return {"type": "datatable", "id": "b", "data": data}
+    # Captioned, because an uncaptioned table is itself a finding: without one
+    # the renderer gives it no table number and nothing can refer to it.
+    return {"type": "datatable", "id": "b", "caption": "Measured performance",
+            "data": data}
 
 
 def _row(**kw):
@@ -762,6 +765,56 @@ def _ref_project(blocks, extra=None):
     if extra:
         outline.append(extra)
     return {"schema_version": 1, "outline": outline}
+
+
+def test_uncaptioned_table_is_reported_before_the_export():
+    """The engine warns no_caption for a table or data table with no caption --
+    but only into an export manifest, so the one moment it can still be fixed
+    cheaply (while the table is on screen) had nothing to say about it."""
+    plain = {"type": "table", "id": "t1", "rows": [["Pin", "Type"], ["VDD", "supply"]]}
+    codes = _lint_codes(_one_block_project(plain), _FULL_CFG)
+    check("no_caption" in codes, "an uncaptioned table is reported", "codes=%r" % codes)
+    named = dict(plain, caption="Pin list")
+    check("no_caption" not in _lint_codes(_one_block_project(named), _FULL_CFG),
+          "and stays silent once it has one")
+
+    data = {"type": "datatable", "id": "t2", "data": {"rows": _clean_table_rows()}}
+    check("no_caption" in _lint_codes(_one_block_project(data), _FULL_CFG),
+          "so is an uncaptioned data table")
+    check("no_caption" not in _lint_codes(
+        _one_block_project(dict(data, caption="Measured performance")), _FULL_CFG),
+        "and it too stays silent once it has one")
+
+    # The engine's own test is truthiness, not .strip(): a caption of one space
+    # takes a table number and is rendered, so the two must not disagree about
+    # whether that table has one.
+    spaced = _lint_codes(_one_block_project(dict(plain, caption=" ")), _FULL_CFG)
+    check("no_caption" not in spaced,
+          "a caption the renderer accepts is a caption here too", "codes=%r" % spaced)
+
+
+def test_a_pinned_section_is_not_linted_for_content_it_does_not_render():
+    """"Fixed body wins over blocks": a section pinned to a body the template
+    defines renders that body and nothing else, so blocks left behind under it
+    are not in the document. Reporting them is noise nobody can act on -- the
+    section is pinned, there is nothing on screen to fix."""
+    stale = {"type": "image", "id": "i1", "file": "C:/elsewhere/old.png", "caption": ""}
+    node = {"id": "n1", "title": "Preface", "fixed_body": "preface",
+            "blocks": [stale], "children": []}
+    project = {"schema_version": 1, "outline": [node]}
+
+    cfg = dict(_FULL_CFG)
+    cfg["fixed_bodies"] = {"preface": {"paragraphs": [{"runs": [{"t": "Scope."}]}]}}
+    check(_lint_codes(project, cfg) == [],
+          "a pinned section says nothing about the blocks the export drops",
+          "codes=%r" % _lint_codes(project, cfg))
+
+    # ... and a key the template does NOT have falls back to the blocks, which
+    # ARE rendered -- the same fallback the renderer makes.
+    codes = _lint_codes(project, dict(_FULL_CFG, fixed_bodies={"other": {}}))
+    check("image_path" in codes,
+          "a key the template does not have is linted as the blocks it renders",
+          "codes=%r" % codes)
 
 
 def test_dangling_reference_is_an_error():
@@ -1128,6 +1181,8 @@ def main():
     test_sim_span_mirrors_the_real_renderer()
     test_each_rule_fires_and_stays_silent()
     test_inherited_report_full_of_empty_frames_is_not_broken()
+    test_uncaptioned_table_is_reported_before_the_export()
+    test_a_pinned_section_is_not_linted_for_content_it_does_not_render()
     test_dangling_reference_is_an_error()
     test_reference_column_is_not_this_stage_work()
     test_missing_image_needs_a_folder()

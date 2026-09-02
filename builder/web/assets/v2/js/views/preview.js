@@ -171,6 +171,10 @@ export function flattenOutline(outline) {
       depth: depth,
       blocks: Array.isArray(node.blocks) ? node.blocks : [],
       fixedBody: !!node.fixed_body,
+      // The KEY, not just the fact of one: whether it resolves against the
+      // template decides what the export puts on the page, so every reader of
+      // this list needs the key to ask that question for itself.
+      fixedKey: node.fixed_body || null,
     });
     const kids = node.children || [];
     for (let i = 0; i < kids.length; i++) walk(kids[i], path + '.' + (i + 1), depth + 1);
@@ -252,6 +256,11 @@ const LINT_MESSAGES = {
     'Image has no caption',
   'no_caption.imagegrid':
     'Image grid has no caption',
+  'no_caption.table':
+    'Table has no caption, so it takes no table number and nothing can refer to it',
+  'no_caption.datatable':
+    'Data table has no caption, so it takes no table number and nothing can '
+    + 'refer to it',
   'table_no_rows.missing':
     'Table has no rows',
   'table_no_rows.not_list':
@@ -511,6 +520,16 @@ function lintRefs(block, add, targets) {
   }
 }
 
+// A table's caption AS THE RENDERER SEES IT. The engine warns no_caption for a
+// table whose caption is falsy, and the same truth test decides whether the
+// table takes a table number and can be referred to -- so an image is checked
+// with a trim here and a table is not, because the renderer does not. That
+// warning only ever reached the reader inside an export manifest, which is one
+// step too late to be cheap to fix.
+function tableCaption(block) {
+  return block.caption;
+}
+
 function lintBlock(block, add, defaultAxes, settingKinds, targets) {
   const bt = block.type;
   if (bt === 'para') {
@@ -530,6 +549,7 @@ function lintBlock(block, add, defaultAxes, settingKinds, targets) {
     } else {
       lintFreeTable(block, block.rows, add);
     }
+    if (!tableCaption(block)) add('no_caption', 'no_caption.table');
   } else if (bt === 'datatable') {
     const data = block.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -537,6 +557,7 @@ function lintBlock(block, add, defaultAxes, settingKinds, targets) {
     } else {
       lintDatatable(data, add, defaultAxes, settingKinds);
     }
+    if (!tableCaption(block)) add('no_caption', 'no_caption.datatable');
   }
 }
 
@@ -565,9 +586,11 @@ export function lintProject(project, cfg) {
   const comp = conf.compliance && typeof conf.compliance === 'object' ? conf.compliance : {};
   const defaultAxes = Array.isArray(comp.axis_labels) ? comp.axis_labels : DEFAULT_AXES;
   const settingKinds = Array.isArray(comp.setting_kinds) ? comp.setting_kinds : DEFAULT_SETTING_KINDS;
+  const fixedBodies = (conf.fixed_bodies && typeof conf.fixed_bodies === 'object')
+    ? conf.fixed_bodies : {};
   // Whole-document, so a reference pointing FORWARD (or into another section)
   // is not reported as broken -- collected once, before the walk.
-  const targets = refTargets((project && project.outline) || [], conf.fixed_bodies);
+  const targets = refTargets((project && project.outline) || [], fixedBodies);
 
   // Block ids and section (node) ids are each other's own namespace, shared
   // across the WHOLE project (not reset per section): the engine numbers
@@ -598,7 +621,16 @@ export function lintProject(project, cfg) {
       findings.push(makeFinding('empty_section', lintMessage('empty_section.none'),
         loc0, sec.loc, sec.id, null));
     }
-    for (let bi = 0; bi < sec.blocks.length; bi++) {
+    // "Fixed body wins over blocks": a section pinned to a body the template
+    // DOES define renders that body and nothing else, so blocks left behind
+    // under it are not in the exported document. Reporting a missing picture
+    // for content the export drops is noise nobody can act on -- the section is
+    // pinned, there is nothing on screen to fix. The same test refTargets makes,
+    // so the two agree about what exists. A key the template does not have
+    // falls back to the blocks, which ARE rendered, and those are linted.
+    const pinned = !!(sec.fixedKey
+      && Object.prototype.hasOwnProperty.call(fixedBodies, sec.fixedKey));
+    for (let bi = 0; !pinned && bi < sec.blocks.length; bi++) {
       const block = sec.blocks[bi];
       if (!block || typeof block !== 'object') continue;
       const location = loc0 + ' / block ' + bi + ' (' + (block.type || '?') + ')';
@@ -1028,17 +1060,35 @@ function PaperBlock(props) {
     </div>`;
 }
 
+// The paragraphs a pinned section puts on the page, or null when the template
+// this report is bound to has no such body. The renderer falls back to the
+// section's own blocks in that case, and so does this: printing the config key
+// as if it were the body text put a word like "preface" on the paper that is
+// nowhere in the document, while the paragraphs that ARE exported were not
+// shown at all.
+function fixedBodyOf(section, fixedBodies) {
+  const key = section.fixedKey;
+  if (!key || !fixedBodies) return null;
+  if (!Object.prototype.hasOwnProperty.call(fixedBodies, key)) return null;
+  const body = fixedBodies[key];
+  const paragraphs = (body && Array.isArray(body.paragraphs)) ? body.paragraphs : [];
+  return paragraphs.map((para) => ((para && para.runs) || [])
+    .map((run) => String((run && run.t) || '')).join(''));
+}
+
 // One section of the document as one sheet of paper.
 function PaperSection(props) {
-  const { section, dir, captions, comp, cursor, onJump } = props;
+  const { section, dir, captions, comp, cursor, onJump, fixedBodies } = props;
   const level = Math.min(3, section.depth + 1);
+  const fixed = fixedBodyOf(section, fixedBodies);
   return html`
     <section class="rw-paper" data-node=${section.id}>
       <div class=${'rw-preview__h rw-preview__h' + level}>
         <span class="rw-preview__hnum">${section.loc}</span>${section.title}
       </div>
-      ${section.fixedBody
-        ? html`<div class="rw-preview__fixed">${String(section.fixedBody === true ? '' : section.fixedBody)}</div>`
+      ${fixed
+        ? fixed.map((line, i) => html`
+            <div class="rw-preview__fixed" key=${i}>${line}</div>`)
         : section.blocks.map((block, i) => html`
             <${PaperBlock} key=${(block && block.id) || i} block=${block} dir=${dir}
                            sectionId=${section.id} captions=${captions} comp=${comp}
@@ -1048,8 +1098,8 @@ function PaperSection(props) {
 
 // A rough height for a section that has not been rendered yet, so the scroll bar
 // is about the right length before anything is measured.
-function estimateHeight(section) {
-  if (section.fixedBody) return 200;
+function estimateHeight(section, fixedBodies) {
+  if (fixedBodyOf(section, fixedBodies)) return 200;
   let h = 84;
   const blocks = section.blocks;
   for (let i = 0; i < blocks.length; i++) {
@@ -1153,6 +1203,7 @@ export function PreviewTab(props) {
     [project, stamp, cfg]
   );
   const comp = (cfg && cfg.compliance) || null;
+  const fixedBodies = (cfg && cfg.fixed_bodies) || null;
 
   const scrollRef = useRef(null);
   const heights = useRef(new Map());
@@ -1188,7 +1239,7 @@ export function PreviewTab(props) {
   for (let i = 0; i < sections.length; i++) {
     offsets.push(total);
     const stored = heights.current.get(heightKey(sections[i]));
-    total += stored === undefined ? estimateHeight(sections[i]) : stored;
+    total += stored === undefined ? estimateHeight(sections[i], fixedBodies) : stored;
   }
 
   let first = 0;
@@ -1470,7 +1521,8 @@ export function PreviewTab(props) {
     } else {
       built.push(html`
         <${PaperSection} key=${section.id} section=${section} dir=${dir} captions=${captions}
-                         comp=${comp} cursor=${cursorBlock} onJump=${onJump} />`);
+                         comp=${comp} fixedBodies=${fixedBodies}
+                         cursor=${cursorBlock} onJump=${onJump} />`);
     }
   }
 

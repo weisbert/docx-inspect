@@ -125,6 +125,12 @@ MESSAGES = {
         "Image has no caption",
     "no_caption.imagegrid":
         "Image grid has no caption",
+    "no_caption.table":
+        "Table has no caption, so it takes no table number and nothing can "
+        "refer to it",
+    "no_caption.datatable":
+        "Data table has no caption, so it takes no table number and nothing "
+        "can refer to it",
     "table_no_rows.missing":
         "Table has no rows",
     "table_no_rows.not_list":
@@ -476,6 +482,21 @@ def _lint_datatable(data, add, default_axes, setting_kinds):
                 keys=", ".join(thin))
 
 
+def _table_caption(block):
+    """A table's caption AS THE RENDERER SEES IT.
+
+    The engine warns ``no_caption`` for a table or data table whose caption is
+    falsy (engine.py, the two ``if cap:`` branches), and the same truth test
+    decides whether the table takes a table number and can be referred to. That
+    warning only ever reached the reader as part of an export manifest, so a
+    table left uncaptioned was invisible to the standing check -- the one place
+    it can still be fixed cheaply. Mirrored here on exactly the engine's test:
+    an image is checked with .strip(), a table is not, because the renderer
+    does not.
+    """
+    return block.get("caption")
+
+
 def _lint_block(block, add, default_axes, setting_kinds, project_dir=None, targets=None):
     bt = block.get("type")
     if bt == "para":
@@ -496,12 +517,16 @@ def _lint_block(block, add, default_axes, setting_kinds, project_dir=None, targe
             add("table_no_rows", "table_no_rows.missing")
         else:
             _lint_free_table(block, rows, add)
+        if not _table_caption(block):
+            add("no_caption", "no_caption.table")
     elif bt == "datatable":
         data = block.get("data")
         if not isinstance(data, dict):
             add("datatable_no_data", "datatable_no_data.block")
         else:
             _lint_datatable(data, add, default_axes, setting_kinds)
+        if not _table_caption(block):
+            add("no_caption", "no_caption.datatable")
 
 
 # ---------------------------------------------------------------------------
@@ -527,9 +552,10 @@ def lint_project(project, cfg=None, project_dir=None):
     comp = cfg.get("compliance", {}) if isinstance(cfg.get("compliance"), dict) else {}
     default_axes = comp.get("axis_labels", _DEFAULT_AXES)
     setting_kinds = set(comp.get("setting_kinds", _DEFAULT_SETTING_KINDS))
+    fixed_bodies = cfg.get("fixed_bodies") or {}
     # Whole-document, so a reference that points FORWARD (or into another
     # section) is not reported as broken -- collected once, before the walk.
-    targets = _ref_targets(project.get("outline") or [], cfg.get("fixed_bodies"))
+    targets = _ref_targets(project.get("outline") or [], fixed_bodies)
 
     def emit(code, mid, location, loc, node_id, block_id, kw):
         text = message(mid, **kw)
@@ -558,7 +584,17 @@ def lint_project(project, cfg=None, project_dir=None):
         loc0 = 'section "%s"' % title
         blocks = node.get("blocks") or []
         children = node.get("children") or []
-        has_fixed = bool(node.get("fixed_body"))
+        fb_key = node.get("fixed_body")
+        has_fixed = bool(fb_key)
+        # A section pinned to a body the template DOES define renders that body
+        # and nothing else -- "fixed body wins over blocks" -- so blocks left
+        # behind under it are not in the exported document at all. Reporting a
+        # missing picture, or a table with no rows, for content the export drops
+        # is noise the reader cannot act on: there is nothing on screen to fix,
+        # because the section is pinned. The same test _ref_targets already
+        # makes, so the two agree on what exists. A key the template does NOT
+        # have falls back to the blocks, and those are linted as usual.
+        fixed_wins = has_fixed and fb_key in fixed_bodies
         if not blocks and not children and not has_fixed:
             emit("empty_section", "empty_section.none", loc0, path, node_id, None, {})
         if node_id:
@@ -567,7 +603,7 @@ def lint_project(project, cfg=None, project_dir=None):
                      {"id": node_id, "other": seen_node_ids[node_id]})
             else:
                 seen_node_ids[node_id] = loc0
-        for idx, block in enumerate(blocks):
+        for idx, block in enumerate(blocks if not fixed_wins else []):
             if not isinstance(block, dict):
                 continue
             location = '%s / block %d (%s)' % (loc0, idx, block.get("type", "?"))
