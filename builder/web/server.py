@@ -2634,16 +2634,39 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json(out)
 
     def _api_rollback(self):
-        """Undo the most recent apply / paste-import by restoring the newest
-        backup (shared history). Non-interactive counterpart of the CLI
-        --rollback. Returns {ok, restored, from, pre} or an error."""
+        """Undo the most recent apply / paste-import OF ONE REPORT by restoring
+        that report's newest backup. Non-interactive counterpart of the CLI
+        --rollback. Body {dir} names the report the sync screen has open.
+
+        The backup history is shared by the whole root, so the newest backup in
+        it is whichever report was written last -- undoing that when the screen
+        says another report's name reverts a change nobody asked about and
+        leaves the one they did ask about untouched. With no ``dir`` (the old
+        single-file UI asks for exactly that) the root-wide behaviour stands.
+
+        Returns {ok, dir, restored, from, pre}, or 409 when this report has
+        nothing of its own to undo."""
         if not CFG.reports_root:
             return self._send_error_json("no reports root configured", status=400)
+        payload = self._read_json()
+        dir_arg = payload.get("dir")
+        rel_dir = None
+        if dir_arg:
+            # Same containment guard as every other dir-taking endpoint: the
+            # scope is a path under reports_root or it is nothing.
+            project_dir = resolve_project_dir(dir_arg, create=False)
+            rel = os.path.relpath(project_dir, CFG.reports_root).replace("\\", "/")
+            if rel not in (".", ""):       # the root itself is not a report
+                rel_dir = rel
         apply_update = _import_apply_update()
-        result = apply_update.rollback_last(CFG.reports_root)
+        result = apply_update.rollback_last(CFG.reports_root, dir_name=rel_dir)
         if not result.get("ok"):
+            # "nothing of yours to undo" is a state, not a bad request: 409 so
+            # the drawer can tell the two apart.
+            status = (409 if result.get("reason") in ("out_of_scope", "spans_reports")
+                      else 400)
             return self._send_error_json(result.get("error", "rollback failed"),
-                                         status=400)
+                                         status=status)
         return self._send_json(result)
 
     def _api_autosaves(self, qs):

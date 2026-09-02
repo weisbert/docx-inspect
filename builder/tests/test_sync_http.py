@@ -20,6 +20,13 @@ that channel breaks on when they drift:
    before validating, so a request that was then turned away still left a file
    behind; test_apply_without_token_writes_nothing fails against that.
 
+3. UNDO ACTS ON THE REPORT THE SCREEN IS SHOWING. ``_backups/`` is one history
+   for the whole root, so its newest entry belongs to whichever report was
+   written last -- not necessarily the open one. /api/rollback used to ignore
+   the ``dir`` its caller sends and restore that newest entry regardless, which
+   silently reverted another report while reporting the open one as restored;
+   test_rollback_is_scoped_to_the_open_report fails against that.
+
 Run:  python builder/tests/test_sync_http.py
 """
 
@@ -364,6 +371,86 @@ def test_nested_report_diff_is_addressed_by_path(root):
           digest(os.path.join(decoy_dir, "project.json")) == before_decoy)
 
 
+# ---------------------------------------------------------------------------
+# Undo: the backup history is shared, the screen is not.
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_is_scoped_to_the_open_report(root):
+    """Undo on report A's sync screen undoes A, whatever landed after it.
+
+    ``_backups/`` is one history for the whole root, so the newest entry in it
+    belongs to whichever report was written last. Against the old behaviour
+    (POST /api/rollback ignored the ``dir`` the client sends and restored that
+    newest entry) this test reverts B while telling the caller A was restored:
+    the "B kept the apply" and "A went back" checks both fail.
+    """
+    a, b = "undo_mine", "undo_theirs"
+    adir, bdir = make_report(root, a), make_report(root, b)
+    a_pre = digest(os.path.join(adir, "project.json"))
+
+    status, _ = post("/api/apply-update", {"dir": a, "diff": cut_diff(root, a)})
+    check("apply to A", status == 200)
+    status, _ = post("/api/apply-update", {"dir": b, "diff": cut_diff(root, b)})
+    check("apply to B lands on top of A in the shared history", status == 200)
+
+    b_applied = digest(os.path.join(bdir, "project.json"))
+    b_baseline = digest(os.path.join(bdir, "_baseline.json"))
+
+    status, body = post("/api/rollback", {"dir": a})
+    check("rollback of the open report succeeds",
+          status == 200 and body.get("ok"), "-> %s %s" % (status, body))
+    check("the answer names the report that was asked for",
+          body.get("dir") == a, "-> %r" % body.get("dir"))
+    check("only that report's file is reported restored",
+          body.get("restored") == [a + "/project.json"],
+          "-> %r" % body.get("restored"))
+    check("A really is back to its pre-apply bytes",
+          digest(os.path.join(adir, "project.json")) == a_pre)
+    check("B kept the apply that was never undone",
+          digest(os.path.join(bdir, "project.json")) == b_applied)
+    check("and the baseline stamped by the rollback is A's, not B's",
+          digest(os.path.join(bdir, "_baseline.json")) == b_baseline
+          and digest(os.path.join(adir, "_baseline.json"))
+          == digest(os.path.join(adir, "project.json")))
+
+
+def test_rollback_refuses_when_nothing_of_ours_is_on_record(root):
+    """A report with no change of its own to undo is told so -- it does not get
+    somebody else's undone on its behalf."""
+    quiet, loud = "undo_quiet", "undo_loud"
+    qdir, ldir = make_report(root, quiet), make_report(root, loud)
+    status, _ = post("/api/apply-update", {"dir": loud, "diff": cut_diff(root, loud)})
+    check("apply to the other report", status == 200)
+
+    q_before = digest(os.path.join(qdir, "project.json"))
+    l_before = digest(os.path.join(ldir, "project.json"))
+    status, body = post("/api/rollback", {"dir": quiet})
+    check("undo with nothing of ours on record is refused",
+          status == 409 and "error" in body, "-> %s %s" % (status, body))
+    check("the refusal says whose report it is about",
+          quiet in str(body.get("error", "")), "-> %r" % body.get("error"))
+    check("the refusal wrote nothing at all",
+          digest(os.path.join(qdir, "project.json")) == q_before
+          and digest(os.path.join(ldir, "project.json")) == l_before)
+
+
+def test_rollback_without_a_dir_still_undoes_the_newest(root):
+    """The old single-file UI sends no ``dir``; root-wide undo stays its answer."""
+    name = "undo_legacy"
+    pdir = make_report(root, name)
+    before = digest(os.path.join(pdir, "project.json"))
+    status, _ = post("/api/apply-update", {"dir": name, "diff": cut_diff(root, name)})
+    check("apply to the last-written report", status == 200)
+    status, body = post("/api/rollback", {})
+    check("a rollback with no dir undoes the newest change anywhere",
+          status == 200 and body.get("ok")
+          and body.get("restored") == [name + "/project.json"],
+          "-> %s %s" % (status, body))
+    check("which is exactly the file it backed up",
+          digest(os.path.join(pdir, "project.json")) == before)
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="sync_http_")
     root = os.path.join(tmp, "reports")
@@ -393,6 +480,10 @@ def run():
         test_apply_without_token_writes_nothing(root)
         print("addressing")
         test_nested_report_diff_is_addressed_by_path(root)
+        print("undo")
+        test_rollback_is_scoped_to_the_open_report(root)
+        test_rollback_refuses_when_nothing_of_ours_is_on_record(root)
+        test_rollback_without_a_dir_still_undoes_the_newest(root)
     finally:
         httpd.shutdown()
         httpd.server_close()

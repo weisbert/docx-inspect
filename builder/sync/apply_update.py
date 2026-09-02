@@ -962,23 +962,104 @@ def cmd_snapshot(root):
     return 0
 
 
-def _latest_backup(root):
+def _backup_dirs(root):
+    """Every backup dir, newest first. The name is a timestamp, so it breaks the
+    ties mtime alone leaves when two ops land in the same second."""
     b = _backups(root)
     if not os.path.isdir(b):
-        return None
+        return []
     subs = [os.path.join(b, d) for d in os.listdir(b)
             if os.path.isdir(os.path.join(b, d))]
-    return max(subs, key=os.path.getmtime) if subs else None
+    return sorted(subs, key=lambda p: (os.path.getmtime(p), os.path.basename(p)),
+                  reverse=True)
 
 
-def rollback_last(root):
+def _backup_touches(bdir):
+    """The root-relative paths a rollback of this backup would write or delete."""
+    rels = []
+    for dp, _dn, fn in os.walk(bdir):
+        for f in fn:
+            if f == _CREATED_MARK:
+                continue
+            rels.append(os.path.relpath(os.path.join(dp, f), bdir)
+                        .replace("\\", "/"))
+    cmark = os.path.join(bdir, _CREATED_MARK)
+    if os.path.isfile(cmark):
+        rels.extend(ln.strip().replace("\\", "/")
+                    for ln in _read(cmark).decode("utf-8").splitlines()
+                    if ln.strip())
+    return rels
+
+
+def _norm_scope(dir_name):
+    """A report scope as a root-relative, forward-slash path -- or "" for none."""
+    return str(dir_name or "").replace("\\", "/").strip("/")
+
+
+def _cmp_path(p):
+    """A root-relative path in the form paths are COMPARED in: normcase for the
+    platform's case rules, then back to forward slashes -- on Windows normcase
+    also swaps the separator, which silently defeats a prefix test."""
+    return os.path.normcase(p.strip("/").replace("\\", "/")).replace("\\", "/")
+
+
+def _under(rel, scope):
+    """True when the root-relative path ``rel`` lies inside the report ``scope``."""
+    r, s = _cmp_path(rel), _cmp_path(scope)
+    return r == s or r.startswith(s + "/")
+
+
+def _latest_backup(root, dir_name=None):
+    """The backup a rollback should restore -> (dir, error dict or None).
+
+    Unscoped, that is simply the newest backup in the root: the CLI --rollback
+    and any caller that names no report keep exactly that behaviour.
+
+    Scoped to one report, the newest backup in the root is usually NOT the one
+    to undo -- the history is shared, so an apply to another report sits on top
+    of it. The walk therefore goes newest-first and stops at the first backup
+    that touched this report; backups belonging only to other reports are that
+    report's history, not this one's, and are stepped over. A backup that
+    touched this report AND others came from one package: undoing it for a
+    single report would half-apply it, so it is reported instead.
+    """
+    dirs = _backup_dirs(root)
+    if not dirs:
+        return None, {"error": "no backups to roll back to", "reason": "no_backups"}
+    scope = _norm_scope(dir_name)
+    if not scope:
+        return dirs[0], None
+    for bdir in dirs:
+        touched = _backup_touches(bdir)
+        if not any(_under(rel, scope) for rel in touched):
+            continue
+        others = sorted(rel for rel in touched if not _under(rel, scope))
+        if others:
+            return None, {
+                "error": ("the last change to %s came in one package that also "
+                          "changed %s, so it cannot be undone for a single "
+                          "report; undo the whole package from the command line "
+                          "instead" % (scope, ", ".join(others[:3]))),
+                "reason": "spans_reports", "scope": scope, "others": others}
+        return bdir, None
+    return None, {"error": "nothing to undo for %s: the changes on record belong "
+                           "to other reports" % scope,
+                  "reason": "out_of_scope", "scope": scope}
+
+
+def rollback_last(root, dir_name=None):
     """Programmatic rollback of the most recent backup (used by the GUI's
-    'Undo last apply' button -- no input() prompt). The current state is snapshot
-    to a ``-pre-rollback`` backup first. Returns a JSON-able summary:
-    {ok, restored:[rel...], from, pre} or {ok:False, error}."""
-    bdir = _latest_backup(root)
-    if not bdir:
-        return {"ok": False, "error": "no backups to roll back to"}
+    'Undo last apply' button -- no input() prompt). ``dir_name`` narrows it to
+    one report (root-relative path); without it the whole root's newest backup
+    is restored. The current state is snapshot to a ``-pre-rollback`` backup
+    first. Returns a JSON-able summary:
+    {ok, dir, restored:[rel...], from, pre} or {ok:False, error, reason}."""
+    bdir, err = _latest_backup(root, dir_name)
+    if err:
+        out = {"ok": False}
+        out.update(err)
+        return out
+    scope = _norm_scope(dir_name)
     # created files (undo = delete them), read from the marker and excluded from the
     # restore walk.
     created = []
@@ -1007,13 +1088,13 @@ def rollback_last(root):
             shutil.copy2(tgt, dst)
             os.remove(tgt)
             deleted.append(rel)
-    return {"ok": True, "restored": restored, "deleted": deleted,
+    return {"ok": True, "dir": scope, "restored": restored, "deleted": deleted,
             "from": bdir.replace("\\", "/"), "pre": pre.replace("\\", "/")}
 
 
 def cmd_rollback(root, yes):
-    bdir = _latest_backup(root)
-    if not bdir:
+    bdir, err = _latest_backup(root)
+    if err:
         print("no backups to roll back to.")
         return 1
     files = [os.path.relpath(os.path.join(dp, f), bdir)
