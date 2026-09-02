@@ -989,6 +989,20 @@ def check_errors(root):
     # unknown route
     s, body = call("GET", "/api/nope")
     f += expect(s == 404 and "error" in body, "unknown route -> 404 error", "status=%s" % s)
+    # a body that parses but is not an object. Every handler reads its arguments
+    # with .get, so this used to come back as a 500 with an AttributeError in it
+    # instead of the bad request it is. /api/rollback is the one that took it
+    # furthest: no argument of its own is required, so nothing stopped it first.
+    for raw, what in ((b"null", "null"), (b"[1,2]", "a list")):
+        s, body = call(
+            "POST", "/api/rollback", raw=raw,
+            headers={"Content-Type": "application/json"},
+        )
+        f += expect(
+            s == 400 and "error" in body,
+            "a JSON body that is %s -> 400 error, not 500" % what,
+            "status=%s body=%r" % (s, body),
+        )
     return f
 
 

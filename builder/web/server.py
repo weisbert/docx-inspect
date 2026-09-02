@@ -2057,10 +2057,22 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _read_json(self):
+        """The request body as a dict. An empty body is an empty one.
+
+        Every handler that calls this reads its arguments with ``.get``, so a
+        body that parses but is not an object -- ``null``, a list, a bare string
+        -- used to reach them as something without ``.get`` and come back as a
+        500 with an AttributeError in it. It is a bad request, and it is
+        answered as one here, once, rather than in each of the thirty handlers.
+        """
         raw = self._read_body()
         if not raw:
             return {}
-        return json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object body, got %s"
+                             % type(payload).__name__)
+        return payload
 
     def handle_one_request(self):
         # One cached body per REQUEST. The handler instance is per CONNECTION,
