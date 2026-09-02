@@ -1713,17 +1713,42 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # The body of the request being served, once something has asked for it.
+    # None means "not read yet"; see _read_body.
+    _body = None
+
     def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
-            return b""
-        return self.rfile.read(length)
+        """The request body -- read from the socket once, then remembered.
+
+        Reading it twice used to mean reading PAST it, into the first line of
+        the next request on a kept-alive connection. Caching is what lets the
+        drain guard in do_POST ask for the body unconditionally without having
+        to know whether the handler already took it."""
+        if self._body is None:
+            length = int(self.headers.get("Content-Length") or 0)
+            self._body = self.rfile.read(length) if length > 0 else b""
+        return self._body
+
+    def _drain_body(self):
+        """Take the body off the socket if nothing else did. Never raises: it
+        runs on the way out of a request that may already have failed."""
+        try:
+            self._read_body()
+        except Exception:
+            pass
 
     def _read_json(self):
         raw = self._read_body()
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
+
+    def handle_one_request(self):
+        # One cached body per REQUEST. The handler instance is per CONNECTION,
+        # so without this reset the second request on a kept-alive socket would
+        # be handed the first request's body.
+        self._body = None
+        BaseHTTPRequestHandler.handle_one_request(self)
 
     def log_message(self, fmt, *args):  # quieter logging
         sys.stderr.write("[server] %s - %s\n" % (self.address_string(), fmt % args))
@@ -1787,10 +1812,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_project_put(qs)
             if path == "/api/template":
                 return self._api_template_put(qs)
-            self._read_body()      # see do_POST: an unread body desyncs the socket
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
+        finally:
+            self._drain_body()     # see do_POST: an unread body desyncs the socket
 
     def do_DELETE(self):
         try:
@@ -1802,6 +1828,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
+        finally:
+            self._drain_body()     # see do_POST: an unread body desyncs the socket
 
     def do_POST(self):
         try:
@@ -1862,15 +1890,20 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/open-path":
                 return self._api_open_path()
 
-            # Drain the body of an unknown route before answering. The socket is
-            # kept alive, so a body left unread is parsed as the START of the
-            # next request on that connection: a POST answered with 404 here used
-            # to turn the FOLLOWING request into a 501 "Unsupported method", which
-            # hides the real 404 behind a second, invented failure.
-            self._read_body()
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
             self._handle_exc(exc)
+        finally:
+            # The body comes off the socket on EVERY route out of here -- the
+            # unknown path, the handler that refused before reading, the one
+            # that raised half way. The socket is kept alive, so bytes left on
+            # it are parsed as the START of the next request: that request is
+            # then answered out of the leftovers -- 501 "Unsupported method",
+            # or 400 "Bad request syntax" -- and the caller sees an invented
+            # failure instead of the answer it asked for.
+            # Only a drain that no handler can forget holds that shut, so it
+            # lives here rather than in each of the thirty handlers.
+            self._drain_body()
 
     def _handle_exc(self, exc):
         # Never crash the serve loop; always return a JSON error.

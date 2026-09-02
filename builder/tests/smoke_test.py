@@ -16,6 +16,7 @@ Run:
 """
 
 import base64
+import http.client
 import io
 import json
 import os
@@ -208,6 +209,8 @@ def run():
         failures += check_apply_and_rollback(root)
         failures += check_concurrency(root)
         failures += check_errors(root)
+        # Last: against the old code this one leaves a stray rollback behind.
+        failures += check_keepalive_body_drain()
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -235,6 +238,48 @@ def check_app_html():
                "GET /app.html", "status=%s" % s)
     s2, _ = call("GET", "/")
     f += expect(s2 == 200, "GET / (app.html)", "status=%s" % s2)
+    return f
+
+
+def check_keepalive_body_drain():
+    """A POST that refuses must still take its body off the socket.
+
+    HTTP/1.1 keeps the connection open, so bytes left behind are read as the
+    first line of the NEXT request on it. That request is then answered out of
+    our leftovers -- 501 "Unsupported method", or 400 "Bad request syntax",
+    depending on what the body happens to start with -- and the caller sees an
+    invented failure in place of the answer it asked for: a report that never
+    loads, say. A dozen handlers returned before reading their body (every "no
+    reports root configured" guard, every argument check, /api/rollback among
+    them), so against the old code the second call in each pair below is that
+    manufactured error.
+    """
+    f = 0
+    probes = [
+        ("/api/rollback", {"dir": "keepalive_probe"}),
+        ("/api/export?dir=keepalive_probe&fmt=bogus", {"note": "x" * 200}),
+    ]
+    for path, body in probes:
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)
+        try:
+            conn.request("POST", path, body=json.dumps(body).encode("utf-8"),
+                         headers={"Content-Type": "application/json"})
+            r1 = conn.getresponse()
+            s1, reusable = r1.status, not r1.will_close
+            r1.read()
+            # Connection: close so the server lets go of the socket itself --
+            # hanging up on a thread still waiting to read logs a reset.
+            conn.request("GET", "/api/health", headers={"Connection": "close"})
+            r2 = conn.getresponse()
+            s2 = r2.status
+            r2.read()
+        finally:
+            conn.close()
+        f += expect(s1 >= 400, "POST %s is refused" % path, "status=%s" % s1)
+        f += expect(reusable, "the refusal keeps the connection open", "%s" % path)
+        f += expect(s2 == 200,
+                    "the next request on that socket gets its own answer (%s)"
+                    % path, "status=%s" % s2)
     return f
 
 
