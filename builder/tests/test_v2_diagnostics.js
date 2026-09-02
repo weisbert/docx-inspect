@@ -42,11 +42,12 @@ const path = require('node:path');
 const os = require('node:os');
 const net = require('node:net');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '..', '..');
 const SERVER_PY = path.join(REPO, 'builder', 'web', 'server.py');
+const PREVIEW_JS = path.join(REPO, 'builder', 'web', 'assets', 'v2', 'js', 'views', 'preview.js');
 
 const ARGS = process.argv.slice(2);
 const HEADED = ARGS.includes('--headed');
@@ -361,7 +362,79 @@ async function browserChecks() {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * lint level parity: core/content_lint.py's LEVELS vs the hand-ported
+ * LINT_LEVELS in web/assets/v2/js/views/preview.js.
+ *
+ * preview.js is documented as "same rule ids, same levels, same sentences"
+ * as content_lint.py, but nothing enforces that -- a rule added on one side
+ * (or a level changed on one side) silently drifts from the other. This runs
+ * the REAL python module (not a copy of its source) to get the ground truth,
+ * and regexes the REAL preview.js source for its mirror, so a future edit to
+ * either file is caught here instead of only in the wild.
+ * ------------------------------------------------------------------ */
+
+function pythonLintLevels() {
+  const python = process.env.RW_PYTHON || 'python';
+  const coreDir = path.join(REPO, 'builder', 'core');
+  const code = [
+    'import sys, json',
+    'sys.path.insert(0, ' + JSON.stringify(coreDir) + ')',
+    'import content_lint',
+    'print(json.dumps(content_lint.LEVELS))',
+  ].join('; ');
+  const out = execFileSync(python, ['-c', code], { cwd: REPO, encoding: 'utf8' });
+  const lastLine = out.trim().split('\n').pop();
+  return JSON.parse(lastLine);
+}
+
+function jsLintLevels() {
+  const src = fs.readFileSync(PREVIEW_JS, 'utf8');
+  const m = /const LINT_LEVELS = \{([\s\S]*?)\n\};/.exec(src);
+  if (!m) throw new Error('LINT_LEVELS block not found in preview.js');
+  const body = m[1].replace(/\/\/.*$/gm, '');   // strip line comments first
+  const out = {};
+  const re = /(\w+):\s*'([^']+)'/g;
+  let mm;
+  while ((mm = re.exec(body))) out[mm[1]] = mm[2];
+  return out;
+}
+
+function checkLintLevelParity() {
+  section('lint level parity: content_lint.py LEVELS vs preview.js LINT_LEVELS');
+  let pyLevels;
+  try {
+    pyLevels = pythonLintLevels();
+  } catch (err) {
+    check('could read content_lint.LEVELS via python', false,
+      String(err && err.message ? err.message : err));
+    return;
+  }
+  let jsLevels;
+  try {
+    jsLevels = jsLintLevels();
+  } catch (err) {
+    check('could read LINT_LEVELS from preview.js', false,
+      String(err && err.message ? err.message : err));
+    return;
+  }
+  const pyIds = Object.keys(pyLevels).sort();
+  check('content_lint.LEVELS is non-empty', pyIds.length > 0);
+  check('preview.js LINT_LEVELS is non-empty', Object.keys(jsLevels).length > 0);
+
+  const missing = pyIds.filter((id) => !(id in jsLevels));
+  check('every content_lint rule id has an entry in LINT_LEVELS',
+    missing.length === 0, 'missing from preview.js: ' + JSON.stringify(missing));
+
+  const wrongLevel = pyIds.filter((id) => id in jsLevels && jsLevels[id] !== pyLevels[id]);
+  check('every shared rule id agrees on its level',
+    wrongLevel.length === 0,
+    wrongLevel.map((id) => id + ' (py=' + pyLevels[id] + ' js=' + jsLevels[id] + ')').join(', '));
+}
+
 async function main() {
+  checkLintLevelParity();
+
   section('in a real browser');
   if (!chromium) {
     console.log('  SKIP: ' + chromiumMissing);

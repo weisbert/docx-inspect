@@ -229,6 +229,7 @@ const LINT_LEVELS = {
   empty_sim_result: 'warn',
   empty_section: 'warn',
   unknown_sim_key: 'warn',
+  duplicate_id: 'error',
   image_placeholder: 'info',
   unit_empty: 'info',
 };
@@ -289,6 +290,11 @@ const LINT_MESSAGES = {
   'dangling_ref.missing':
     'A cross-reference in this paragraph points at a figure or table that no '
     + 'longer exists - the export prints a red marker there',
+  'duplicate_id.block':
+    'Block id "%(id)s" is also used by another block at %(other)s - captions '
+    + 'and cross-references cannot tell them apart',
+  'duplicate_id.section':
+    'Section id "%(id)s" is also used by another section at %(other)s',
 };
 
 const REQUIRED_ROW_KEYS = ['cat', 'item', 'kind', 'unit'];
@@ -533,7 +539,10 @@ function makeFinding(code, text, location, loc, nodeId, blockId) {
   return {
     type: code,
     code: code,
-    level: LINT_LEVELS[code] || 'warn',
+    // A code missing from LINT_LEVELS is a bug in this mirror, not a reason to
+    // hide the finding: default to 'error' so a rule ported on the python side
+    // but forgotten here fails loud instead of silently downgrading to 'warn'.
+    level: code in LINT_LEVELS ? LINT_LEVELS[code] : 'error',
     detail: text,
     message: text,
     location: location,
@@ -555,10 +564,30 @@ export function lintProject(project, cfg) {
   // is not reported as broken -- collected once, before the walk.
   const targets = refTargets((project && project.outline) || []);
 
+  // Block ids and section (node) ids are each other's own namespace, shared
+  // across the WHOLE project (not reset per section): the engine numbers
+  // captions and resolves cross-references off a single project-wide
+  // id -> target map, so two blocks (or two sections) that happen to share an
+  // id collide there too -- the second one silently overwrites the first.
+  // First-seen location wins; every later occurrence is flagged. Mirrors
+  // content_lint.py's walk() exactly (seen_node_ids / seen_block_ids).
+  const seenNodeIds = Object.create(null);
+  const seenBlockIds = Object.create(null);
+
   const sections = flattenOutline((project && project.outline) || []);
   for (let si = 0; si < sections.length; si++) {
     const sec = sections[si];
     const loc0 = 'section "' + sec.title + '"';
+    const rawNodeId = sec.node.id;
+    if (rawNodeId) {
+      if (seenNodeIds[rawNodeId]) {
+        findings.push(makeFinding('duplicate_id',
+          lintMessage('duplicate_id.section', { id: rawNodeId, other: seenNodeIds[rawNodeId] }),
+          loc0, sec.loc, sec.id, null));
+      } else {
+        seenNodeIds[rawNodeId] = loc0;
+      }
+    }
     const hasKids = ((sec.node.children || []).length) > 0;
     if (!sec.blocks.length && !hasKids && !sec.fixedBody) {
       findings.push(makeFinding('empty_section', lintMessage('empty_section.none'),
@@ -569,6 +598,15 @@ export function lintProject(project, cfg) {
       if (!block || typeof block !== 'object') continue;
       const location = loc0 + ' / block ' + bi + ' (' + (block.type || '?') + ')';
       const blockId = block.id || null;
+      if (blockId) {
+        if (seenBlockIds[blockId]) {
+          findings.push(makeFinding('duplicate_id',
+            lintMessage('duplicate_id.block', { id: blockId, other: seenBlockIds[blockId] }),
+            location, sec.loc, sec.id, blockId));
+        } else {
+          seenBlockIds[blockId] = location;
+        }
+      }
       const add = (code, mid, kw) => {
         findings.push(makeFinding(code, lintMessage(mid, kw), location, sec.loc, sec.id, blockId));
       };
@@ -628,7 +666,9 @@ export function checkReport(project, cfg, manifest) {
     const finding = {
       type: code,
       code: code,
-      level: w.level || LINT_LEVELS[code] || 'warn',
+      // Same rule as makeFinding: an unrecognized code fails loud (error)
+      // rather than being silently downgraded to 'warn'.
+      level: w.level || (code in LINT_LEVELS ? LINT_LEVELS[code] : 'error'),
       detail: text,
       message: text,
       location: w.location || '',
