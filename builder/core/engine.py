@@ -19,7 +19,6 @@ CLI:
 Output: ``<report_folder>/out/<name>.docx``.
 """
 import argparse
-import json
 import os
 import sys
 
@@ -1611,8 +1610,7 @@ def _resolve_config_path(project, project_dir, explicit):
 
 
 def _load_config(config_path):
-    with open(config_path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    cfg = content_lint._load_json_file(config_path)
     # resolve logo relative to the config file's folder
     cfg_dir = os.path.dirname(os.path.abspath(config_path))
     logo = cfg.get("logo", "")
@@ -1634,8 +1632,7 @@ def main(argv=None):
     if not os.path.exists(proj_path):
         print(f"error: {proj_path} not found", file=sys.stderr)
         return 2
-    with open(proj_path, encoding="utf-8") as f:
-        project = json.load(f)
+    project = content_lint._load_json_file(proj_path)
 
     config_path = _resolve_config_path(project, project_dir, args.config)
     cfg = _load_config(config_path)

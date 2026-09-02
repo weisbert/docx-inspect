@@ -45,12 +45,15 @@ from urllib.error import HTTPError
 
 HERE = os.path.dirname(os.path.abspath(__file__))       # builder/tests
 BUILDER = os.path.dirname(HERE)                         # builder/
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 if BUILDER not in sys.path:
     sys.path.insert(0, BUILDER)
 import buildpath  # noqa: E402,F401  (registers core/docx_io/store/sync/web)
 
 import apply_update  # noqa: E402  (builder/sync)
 import server        # noqa: E402  (builder/web)
+from test_render_golden import golden_config  # noqa: E402  (fully renderable config)
 
 PORT = 8797
 BASE = "http://127.0.0.1:%d" % PORT
@@ -104,7 +107,7 @@ def sample_report():
                 "blocks": [{"type": "para",
                             "runs": [{"t": "Body text %d." % i}]}],
                 "children": []}
-    return {"meta": {"title": "Sample Report", "stage": "check"},
+    return {"schema_version": 1, "meta": {"title": "Sample Report", "stage": "check"},
             "outline": [section(i) for i in range(1, 7)]}
 
 
@@ -543,7 +546,9 @@ def test_save_after_delete_is_refused(root):
 def test_bom_project_loads(root):
     """A project.json saved with a leading UTF-8 BOM (a common artefact from
     Windows editors / Excel / Notepad) must still open in the editor instead of
-    answering a 400 that exposes a raw JSONDecodeError."""
+    answering a 400 that exposes a raw JSONDecodeError -- and every OTHER
+    project.json reader in the server (export, xlsx export, paste-import,
+    title write) must tolerate the same BOM, not just the editor GET."""
     name = "bom_project"
     pdir = os.path.join(root, name)
     os.makedirs(pdir, exist_ok=True)
@@ -560,13 +565,91 @@ def test_bom_project_loads(root):
           (got.get("project") or {}).get("meta", {}).get("title")
           == "Sample Report", "-> %s" % got)
 
+    # The editor opening it is not enough on its own -- run_export used to load
+    # project.json a SECOND time with plain utf-8 and die on the same BOM.
+    status, exported = post("/api/export?dir=%s&fmt=docx" % name, {})
+    check("a BOM'd project.json EXPORTS (was 400 Unexpected UTF-8 BOM)",
+          status == 200 and exported.get("fmt") == "docx",
+          "-> %s %s" % (status, exported))
+    check("content_lint ran over it as part of the export (stats present)",
+          isinstance(exported.get("stats"), dict)
+          and "errors" in exported["stats"] and "warns" in exported["stats"],
+          "-> %s" % exported.get("stats"))
+
+    # export-xlsx loads project.json again on its own path (_api_export_xlsx).
+    block = {"type": "table", "rows": [["a", "b"]], "header_rows": 1}
+    status, xlsx = post("/api/export-xlsx", {"dir": name, "block": block})
+    check("a BOM'd project.json also survives export-xlsx (was 400)",
+          status == 200 and xlsx.get("ok"), "-> %s %s" % (status, xlsx))
+
+    # project-rename writes meta.title through _write_project_title, which
+    # reads project.json a third way (open(pj, encoding='utf-8')). A BOM used to
+    # make that read raise, and the handler's own try/except swallowed it into a
+    # silent no-op ({"ok": True, "title": None}) -- so the status/ok pair alone
+    # does not catch the regression; the title actually written does.
+    status, renamed = post("/api/project-rename",
+                           {"dir": name, "title": "Renamed while BOM'd"})
+    check("renaming a BOM'd report actually writes the title (was silently dropped)",
+          status == 200 and renamed.get("ok")
+          and renamed.get("title") == "Renamed while BOM'd",
+          "-> %s %s" % (status, renamed))
+    with urlopen(BASE + "/api/project?dir=" + name) as resp:
+        after_rename = json.loads(resp.read().decode("utf-8"))
+    check("the new title is really on disk, not just in the response",
+          (after_rename.get("project") or {}).get("meta", {}).get("title")
+          == "Renamed while BOM'd", "-> %s" % after_rename)
+
+
+def test_bom_baseline_diff_apply(root):
+    """apply_update.py reads a project.json / _baseline.json on the same upstream
+    'Copy diff' -> 'Apply update' path this whole file otherwise exercises. A BOM
+    on either file used to make project_sha() return None (decode error swallowed
+    by its own try/except), which check_baseline() cannot tell apart from a real
+    ancestor mismatch, so a perfectly-cut diff against a BOM'd baseline could be
+    refused as baseline_mismatch instead of applied."""
+    name = "bom_diff"
+    pdir = os.path.join(root, name)
+    os.makedirs(pdir, exist_ok=True)
+    agreed = sample_report()
+
+    def write_bom(path, obj):
+        raw = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + raw)
+
+    write_bom(os.path.join(pdir, "_baseline.json"), agreed)
+    write_bom(os.path.join(pdir, "project.json"), agreed)
+
+    rel = os.path.join(name, "project.json")
+    baseline_sha = apply_update.baseline_state(root, rel)[1]
+    check("a BOM'd baseline still fingerprints (was None)", bool(baseline_sha))
+
+    theirs = copy.deepcopy(agreed)
+    theirs["outline"][2]["blocks"][0]["runs"][0]["t"] = \
+        "Body text 3, retyped on the work machine."
+    diff = apply_update.make_text_diff(agreed, theirs, name)
+    check("the diff correctly declares the BOM'd baseline as its ancestor",
+          diff.get("base_sha") == baseline_sha)
+
+    status, body = post("/api/apply-update", {"dir": name, "diff": diff})
+    check("a correctly-cut diff against a BOM'd baseline applies (was refused)",
+          status == 200 and body.get("ok") and body.get("baseline") == "ok",
+          "-> %s %s" % (status, body))
+    with open(os.path.join(pdir, "project.json"), "rb") as fh:
+        merged = json.loads(fh.read().decode("utf-8-sig"))
+    check("their edit landed",
+          "retyped on the work machine"
+          in merged["outline"][2]["blocks"][0]["runs"][0]["t"])
+
 
 def run():
     tmp = tempfile.mkdtemp(prefix="sync_http_")
     root = os.path.join(tmp, "reports")
     os.makedirs(root, exist_ok=True)
     config_path = os.path.join(tmp, "template_config_test.json")
-    write_json(config_path, {"id": "test_tpl_v1", "styles": {}})
+    # A fully renderable config (not a minimal stub) so test_bom_project_loads
+    # can assert an actual 200 from POST /api/export, not merely "not a 400".
+    write_json(config_path, golden_config())
 
     httpd = server.make_server(port=PORT, root=root, config_path=config_path,
                                bind="127.0.0.1")
@@ -598,6 +681,7 @@ def run():
         test_save_after_delete_is_refused(root)
         print("loader robustness")
         test_bom_project_loads(root)
+        test_bom_baseline_diff_apply(root)
     finally:
         httpd.shutdown()
         httpd.server_close()

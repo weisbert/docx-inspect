@@ -463,7 +463,7 @@ def restore_autosave(project_dir, name):
         raise FileNotFoundError("snapshot not found: %s" % name)
     with open(src, "rb") as fh:
         data = fh.read()
-    json.loads(data.decode("utf-8"))  # validate JSON before installing
+    json.loads(data.decode("utf-8-sig"))  # validate JSON before installing (BOM-tolerant)
     autosave_snapshot(project_dir, reason="prerestore")  # keep the restore undoable
     pj = os.path.join(project_dir, "project.json")
     atomic_write(pj, data)
@@ -980,8 +980,7 @@ def run_export(project_dir, fmt, save_first=False, on_progress=None, on_phase=No
     os.makedirs(out_dir, exist_ok=True)
 
     # Load the project document.
-    with open(os.path.join(project_dir, "project.json"), "r", encoding="utf-8") as fh:
-        project = json.load(fh)
+    project = _load_json_file(os.path.join(project_dir, "project.json"))
 
     # Resolve and load the template config (engine resolves the logo path).
     # A project bound to a library template wins over the global --config.
@@ -1596,8 +1595,7 @@ def _json_read_error(path):
     (or does not exist). Only called for a file _read_json_quiet gave up on, so
     the second parse is of a broken file and fails fast."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            json.load(fh)
+        _load_json_file(path)
         return ""
     except FileNotFoundError:
         return ""
@@ -2600,8 +2598,7 @@ class Handler(BaseHTTPRequestHandler):
         pj = os.path.join(project_dir, "project.json")
         if not os.path.isfile(pj):
             return self._send_error_json("no project.json in dir", status=404)
-        with open(pj, "r", encoding="utf-8") as fh:
-            project = json.load(fh)
+        project = _load_json_file(pj)
         # resolve the template config exactly like run_export (compliance section)
         engine = _import_engine()
         tid = project.get("template")
@@ -2783,7 +2780,7 @@ class Handler(BaseHTTPRequestHandler):
         if not raw:
             return self._send_error_json("empty paste body -- nothing changed")
         try:
-            project = json.loads(raw.decode("utf-8"))
+            project = json.loads(raw.decode("utf-8-sig"))
         except Exception as exc:
             return self._send_error_json(
                 "could not parse pasted JSON (truncated?): %s -- nothing changed" % exc)
@@ -2800,8 +2797,7 @@ class Handler(BaseHTTPRequestHandler):
         old_project = None
         if os.path.isfile(pj):
             try:
-                with open(pj, "r", encoding="utf-8") as fh:
-                    old_project = json.load(fh)
+                old_project = _load_json_file(pj)
             except Exception:
                 old_project = None
 
@@ -2880,8 +2876,7 @@ class Handler(BaseHTTPRequestHandler):
                          "Use Copy text this once."),
             })
         try:
-            with open(baseline_path, "r", encoding="utf-8") as fh:
-                baseline = json.load(fh)
+            baseline = _load_json_file(baseline_path)
         except Exception as exc:
             return self._send_error_json("baseline unreadable: %s" % exc)
 
@@ -3263,8 +3258,7 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isfile(pj):
             return None
         try:
-            with open(pj, encoding="utf-8") as fh:
-                d = json.load(fh)
+            d = _load_json_file(pj)
             d.setdefault("meta", {})["title"] = title
             atomic_write(pj, json.dumps(d, ensure_ascii=False,
                                         indent=2).encode("utf-8"))

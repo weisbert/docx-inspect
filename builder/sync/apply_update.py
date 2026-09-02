@@ -174,7 +174,7 @@ def project_sha(path):
     make_text_diff fingerprints the state a package was cut from, so the two are
     directly comparable. None when the file is absent or unreadable."""
     try:
-        return _sha(_canon(json.loads(_read(path).decode("utf-8"))))
+        return _sha(_canon(json.loads(_read(path).decode("utf-8-sig"))))
     except Exception:
         return None
 
@@ -288,7 +288,7 @@ def _safe_rel(name):
 
 def _load_state(root):
     try:
-        with open(_state_path(root), encoding="utf-8") as fh:
+        with open(_state_path(root), encoding="utf-8-sig") as fh:
             return json.load(fh)
     except Exception:
         return {}
@@ -625,7 +625,7 @@ def apply_text_diff(root, diff, dir_name=None, backup=True):
     tgt = os.path.join(root, rel)
     if not os.path.isfile(tgt):
         raise FileNotFoundError("no project.json at %s" % tgt)
-    project = json.loads(_read(tgt).decode("utf-8"))
+    project = json.loads(_read(tgt).decode("utf-8-sig"))
     local_sha = _sha(_canon(project))
     base_match = None
     if diff.get("base_sha"):
@@ -750,7 +750,7 @@ def run_plan(root, plan, state, on_log=None):
                 final_bytes = it["payload"]
             else:
                 base = _read(it["tgt"]) if it["exists"] else b"{}"
-                proj = json.loads(base.decode("utf-8"))
+                proj = json.loads(base.decode("utf-8-sig"))
                 for line in _apply_ops(proj, it["payload"]):
                     logs.append(line)
                     if on_log:
@@ -871,7 +871,7 @@ def cmd_apply_diff(root, path, dir_name, yes):
     diff is a make_text_diff() object; the work machine pastes it to the assistant
     who saves it to a file and runs this."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             diff = json.load(fh)
     except Exception as ex:
         print("error: could not read diff %s: %s" % (path, ex))
