@@ -360,6 +360,23 @@ async function staticChecks() {
   check('prose is refused', !!editor.sectionFromPayload('just some words').error, '');
   check('nothing at all is refused', !!editor.sectionFromPayload('').error, '');
 
+  /* ---- 4b. what a typed query names ---- */
+
+  section('jumping to a section');
+  if (typeof editor.jumpMatches === 'function') {
+    const all = editor.flattenOutline(sampleOutline());
+    check('an empty query names everything',
+      editor.jumpMatches(all, '').length === all.length, '');
+    check('a title matches', editor.jumpMatches(all, 'measured')
+      .map((r) => r.node.title).join('|') === RESULTS, '');
+    check('a section number matches too',
+      editor.jumpMatches(all, '2.2.1').map((r) => r.node.title).join('|') === DEEP, '');
+    check('a query that names nothing returns nothing',
+      editor.jumpMatches(all, 'zzzz').length === 0, '');
+  } else {
+    check('editor.js exports jumpMatches', false, 'there is no jump palette');
+  }
+
   /* ---- 5. the header's own address ---- */
 
   section('the home header');
@@ -855,6 +872,33 @@ async function browserChecks() {
       copied0.type === 'datatable' && copied0.caption === 'Bench settings'
       && copied0.id !== ((originalBench.blocks || [])[0] || {}).id,
       JSON.stringify({ type: copied0.type, caption: copied0.caption }));
+
+    /* ---- 12b. jumping straight to a section ---- */
+
+    section('the jump palette');
+    await selectRow(page, CH_ONE);
+    await page.keyboard.press('Control+k');
+    await settle(page, 400);
+    const palette = await page.$('.rw-jump');
+    check('Ctrl+K opens a list of every section', !!palette, 'no palette');
+    if (palette) {
+      const box = await page.$('input[aria-label="Jump to section"]');
+      check('the palette puts the caret in its own box',
+        !!box && await page.evaluate((el) => document.activeElement === el, box),
+        'the query box does not have focus');
+      if (box) await box.type('Measured');
+      await settle(page, 300);
+      const shown = await page.$$eval('.rw-jump .rw-tree__label',
+        (els) => els.map((el) => el.textContent.trim()));
+      check('typing narrows it to the sections that match',
+        shown.length === 1 && shown[0] === RESULTS, shown.join(' | '));
+      await page.keyboard.press('Enter');
+      await settle(page, 500);
+      const landed = await page.$eval('.rw-sectionbar__title',
+        (el) => el.getAttribute('title') || '');
+      check('Enter lands on it', landed === RESULTS, landed);
+      check('and the palette is gone', !(await page.$('.rw-jump')), 'still open');
+    }
 
     /* ---- 13. a clean console ---- */
 

@@ -443,6 +443,11 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 }
 .rw-tree__count { flex: 0 0 auto; color: var(--fg-dim); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
 .rw-tree__group { margin-top: var(--sp-9); }
+/* The jump palette's result list: the rail's own rows, in a box that scrolls. */
+.rw-jump {
+  margin-top: var(--sp-6); max-height: 320px; overflow: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
 /* A row's kind, two letters wide: template text, a table inside, added here.
    Muted on purpose - it is an aside to the title, never competition for it. */
 .rw-tree__badge {

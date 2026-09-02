@@ -129,6 +129,9 @@ const S = {
   badgeUserTitle: 'Added to this report',
   expandAll: 'Expand all',
   collapseAll: 'Collapse all',
+  jumpToSection: 'Jump to section',
+  jumpHint: 'Type a section name or number',
+  noSectionsMatch: 'No sections match',
   // section bar
   copyWholeSection: 'Copy whole section',
   previousSection: 'Previous section',
@@ -1321,6 +1324,86 @@ function OutlineRail(props) {
       </div>
       ${menu.node}
     </aside>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Jump to section
+ * ------------------------------------------------------------------ */
+
+// Which sections a typed query names. The rail's search FILTERS the tree in
+// place, which is the right thing when you are looking around; this is the other
+// need -- you know where you are going and want to be there, without hunting for
+// the row. Same matching rule as the rail, so the two never disagree about what
+// a query means.
+export function jumpMatches(rows, query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter((row) => (row.number + ' ' + text(row.node.title))
+    .toLowerCase().indexOf(needle) !== -1);
+}
+
+function JumpPalette(props) {
+  const [query, setQuery] = useState('');
+  const [at, setAt] = useState(0);
+  const matches = useMemo(() => jumpMatches(props.rows, query), [props.rows, query]);
+  const listRef = useRef(null);
+  const boxRef = useRef(null);
+
+  // The palette is a query box with a list under it, so the caret belongs in the
+  // box: the whole gesture is Ctrl+K then type. Dialog traps focus and puts it
+  // on the first thing it can find when it opens, which is its own close
+  // control, and a child's effects run before its parent's -- so this one waits
+  // a turn rather than being overruled by it.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (boxRef.current && boxRef.current.focus) boxRef.current.focus();
+    }, 0);
+    return () => clearTimeout(id);
+  }, []);
+
+  const index = matches.length ? Math.max(0, Math.min(at, matches.length - 1)) : 0;
+
+  // The highlighted row is kept in view, because the keyboard is the only way
+  // this list is driven and a selection below the fold is a selection nobody
+  // can see.
+  useEffect(() => {
+    const box = listRef.current;
+    const row = box ? box.children[index] : null;
+    if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+  }, [index, matches.length]);
+
+  const go = (row) => {
+    if (!row) return;
+    props.onGo(row.node.id);
+    props.onClose();
+  };
+
+  return html`
+    <${Dialog} title=${S.jumpToSection} width=${520} onClose=${props.onClose}>
+      <div class="rw-field">
+        <input class="rw-input" type="text" ref=${boxRef} value=${query}
+               placeholder=${S.jumpHint} aria-label=${S.jumpToSection}
+               onInput=${(ev) => { setQuery(ev.currentTarget.value); setAt(0); }}
+               onKeyDown=${(ev) => {
+                 if (ev.key === 'ArrowDown') { ev.preventDefault(); setAt(index + 1); }
+                 else if (ev.key === 'ArrowUp') { ev.preventDefault(); setAt(index - 1); }
+                 else if (ev.key === 'Enter') { ev.preventDefault(); go(matches[index]); }
+               }} />
+      </div>
+      <div class="rw-jump" ref=${listRef}>
+        ${matches.length
+          ? matches.map((row, i) => html`
+            <div class=${cx('rw-tree__row', i === index && 'rw-tree__row--on')}
+                 key=${row.node.id} role="button" tabIndex="-1"
+                 onMouseEnter=${() => setAt(i)}
+                 onClick=${() => go(row)}>
+              <span class="rw-tree__count">${row.number}</span>
+              <span class="rw-tree__label" title=${text(row.node.title) || S.untitledSection}
+              >${text(row.node.title) || S.untitledSection}</span>
+            </div>`)
+          : html`<div class="rw-meta">${S.noSectionsMatch}</div>`}
+      </div>
+    <//>`;
 }
 
 /* ------------------------------------------------------------------ *
@@ -2523,6 +2606,7 @@ export function Editor(props) {
   const [expanded, setExpanded] = useState({});
   // {row, where, draft, error} while the paste dialog is asking for the text.
   const [pasteInto, setPasteInto] = useState(null);
+  const [jumping, setJumping] = useState(false);
   // Editing marks live on store.ui.marks -- the key views/blocks.js reads when it
   // draws the pilcrows -- so the toolbar's toggle, the overflow menu's entry and
   // a card's own toggle are all one switch.
@@ -2707,6 +2791,14 @@ export function Editor(props) {
         store.saveNow();
         return;
       }
+      // Ctrl+K opens the jump palette. It carries a modifier and does exactly
+      // one thing, so -- like Ctrl+S -- it is taken wherever the user is: asking
+      // for it from inside a paragraph is asking to leave that paragraph.
+      if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'k' || ev.key === 'K')) {
+        ev.preventDefault();
+        setJumping(true);
+        return;
+      }
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'f' || ev.key === 'F')) {
         // Moving the caret to the outline search is the FRAME's shortcut, so
         // it is only the frame's to take while nothing inside a card is
@@ -2759,6 +2851,7 @@ export function Editor(props) {
           target.blur();
           return;
         }
+        if (jumping) { setJumping(false); return; }
         if (newReport) { setNewReport(false); return; }
         if (drawer) { setDrawer(null); return; }
         if (ui && ui.rightOpen === false) return;
@@ -2791,7 +2884,8 @@ export function Editor(props) {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [rows, rowIndex, selectedBlock, selectedStart, currentRow, drawer, newReport, ui]);
+  }, [rows, rowIndex, selectedBlock, selectedStart, currentRow, drawer, newReport,
+      jumping, ui]);
 
   /* ---- header actions ---- */
 
@@ -2982,6 +3076,10 @@ export function Editor(props) {
         : null}
       ${newReport
         ? html`<${NewReportDialog} here=${here} dir=${dir} onClose=${() => setNewReport(false)} />`
+        : null}
+      ${jumping
+        ? html`<${JumpPalette} rows=${rows} onGo=${select}
+                               onClose=${() => setJumping(false)} />`
         : null}
       ${pasteInto
         ? html`
