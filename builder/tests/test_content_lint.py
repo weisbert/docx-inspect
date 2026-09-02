@@ -678,6 +678,73 @@ def test_inherited_report_full_of_empty_frames_is_not_broken():
 
 
 # ---------------------------------------------------------------------------
+# 4a. A cross-reference whose target was deleted.
+#
+# Deleting a figure leaves every sentence that pointed at it holding an id that
+# resolves to nothing. The renderer writes a red "[ref: <id>]" marker into that
+# sentence, so the exported report says something the author never wrote -- and
+# the only place that was ever said was a render manifest nobody reads before
+# exporting. It is an error, for the same reason image_path is one: the output
+# is wrong in a way the editor does not show.
+# ---------------------------------------------------------------------------
+
+
+def _ref_project(blocks, extra=None):
+    outline = [{"id": "n1", "title": "Results", "blocks": blocks, "children": []}]
+    if extra:
+        outline.append(extra)
+    return {"schema_version": 1, "outline": outline}
+
+
+def test_dangling_reference_is_an_error():
+    para = {"type": "para", "id": "p1",
+            "runs": [{"t": "The spread is shown in "}, {"ref": "fig-1"}, {"t": "."}]}
+    figure = {"type": "image", "id": "fig-1", "file": "images/spread.png",
+              "caption": "Corner spread"}
+
+    live = _lint_codes(_ref_project([para, figure]), _FULL_CFG)
+    check("dangling_ref" not in live,
+          "a reference to a figure that is there stays silent", "codes=%r" % live)
+
+    gone = cl.lint_project(_ref_project([para]), _FULL_CFG)
+    codes = [f["code"] for f in gone.flat]
+    check("dangling_ref" in codes,
+          "deleting the figure reports the sentence that pointed at it",
+          "codes=%r" % codes)
+    hits = [f for f in gone.flat if f["code"] == "dangling_ref"]
+    check(len(hits) == 1, "once, for the one broken run", "%d hits" % len(hits))
+    check(hits and hits[0]["level"] == "error", "as an error, not a warning",
+          "%r" % (hits and hits[0].get("level")))
+    check(gone.has_errors, "so it stands in the way of a package / fill workflow")
+    check(hits and hits[0]["blockId"] == "p1" and hits[0]["nodeId"] == "n1",
+          "and the Check tab can jump to the paragraph holding it", "%r" % hits)
+    check(cl.LEVELS["dangling_ref"] == "error",
+          "the renderer's own manifest warning is classified the same way")
+
+    # A reference is resolved against the WHOLE document, so pointing forward or
+    # into another section is not a mistake.
+    later = _ref_project([para], extra={"id": "n2", "title": "Appendix",
+                                        "blocks": [figure], "children": []})
+    check("dangling_ref" not in _lint_codes(later, _FULL_CFG),
+          "a reference into a later section still resolves")
+
+    # What the engine bookmarks is what resolves (engine._collect_ref_targets):
+    # an uncaptioned FIGURE is a target, an uncaptioned TABLE is not.
+    check("dangling_ref" not in _lint_codes(
+        _ref_project([para, dict(figure, caption="")]), _FULL_CFG),
+        "an uncaptioned figure is still a target")
+    table = {"type": "table", "id": "fig-1", "rows": [["a"]], "caption": ""}
+    check("dangling_ref" in _lint_codes(_ref_project([para, table]), _FULL_CFG),
+          "an uncaptioned table is not one")
+
+    # A fixed template body contributes none of its own blocks.
+    fixed = {"id": "n2", "title": "Boilerplate", "fixed_body": True,
+             "blocks": [figure], "children": []}
+    check("dangling_ref" in _lint_codes(_ref_project([para], extra=fixed), _FULL_CFG),
+          "a figure inside a fixed template body is not a target either")
+
+
+# ---------------------------------------------------------------------------
 # 4b. A reference column is not this stage's work.
 #
 # An inherited report keeps the previous stage's numbers in a read-only
@@ -936,6 +1003,7 @@ def main():
     test_sim_span_mirrors_the_real_renderer()
     test_each_rule_fires_and_stays_silent()
     test_inherited_report_full_of_empty_frames_is_not_broken()
+    test_dangling_reference_is_an_error()
     test_reference_column_is_not_this_stage_work()
     test_missing_image_needs_a_folder()
     test_cli_exit_codes()

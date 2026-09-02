@@ -596,6 +596,9 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-prose p { margin: 0 0 var(--sp-6); }
 .rw-prose--marks p::after { content: "\00B6"; margin-left: var(--sp-2); color: var(--accent-line); }
 .rw-ref { display: inline-flex; align-items: center; padding: 0 var(--sp-4); border-radius: var(--r-grid); background: var(--accent-wash); color: var(--accent); cursor: pointer; }
+/* A reference whose target is gone. It reads as broken because it IS broken:
+ * the export prints a red marker where this sits. */
+.rw-ref--bad { background: var(--bad-wash); color: var(--bad); font-weight: var(--fw-strong); }
 .rw-figure { display: flex; flex-direction: column; align-items: center; gap: var(--sp-9); }
 /* The picture and the control that removes it are one object: the button is
  * positioned against the frame, not against the card, so it stays on the

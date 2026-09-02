@@ -82,6 +82,13 @@ const T = {
   storedIn: 'Stored in images/',
   crossReference: 'Cross-reference',
   pickTarget: 'Pick a figure or table to point at',
+  /* A reference whose target is gone. The chip NEVER shows the internal id: it
+     would be read as report text and typed into the exported document. */
+  refMissing: 'Reference missing',
+  refMissingTitle: (id) => 'The figure or table this points at no longer exists (' + id + ')',
+  /* One entry of the picker: the number, then the caption it belongs to, so a
+     document with thirty figures can be read instead of counted. */
+  refTarget: (label, caption) => (caption ? label + ' · ' + caption : label),
   exportXlsx: 'Export .xlsx',
   editingMarks: 'Editing marks',
   more: 'More',
@@ -422,7 +429,17 @@ function runsToHtml(runs, numbers) {
     if (!run) continue;
     if (run.ref) {
       const entry = numbers && numbers.get ? numbers.get(run.ref) : null;
-      const label = entry && entry.label ? entry.label : String(run.ref);
+      const label = entry && entry.label ? entry.label : '';
+      if (!label) {
+        // The target was deleted. Showing the internal id here is how it ends
+        // up READ AS TEXT -- 'The spread is shown in n-mtk7n0w6-v88sc' -- and
+        // saved that way; the export prints a red marker instead, and the
+        // checklist reports it as an error. Say so where it is written.
+        out.push('<span class="rw-ref rw-ref--bad" contenteditable="false" data-ref="'
+          + escapeHtml(run.ref) + '" title="' + escapeHtml(T.refMissingTitle(run.ref)) + '">'
+          + escapeHtml(T.refMissing) + '</span>');
+        continue;
+      }
       out.push('<span class="rw-ref" contenteditable="false" data-ref="'
         + escapeHtml(run.ref) + '">' + escapeHtml(label) + '</span>');
       continue;
@@ -568,6 +585,175 @@ export function readProseDom(root, blocks) {
   // The card keeps its boundary: the first paragraph of an edited card carries
   // cardStart from now on, which preserves exactly the grouping on screen.
   out[0].cardStart = true;
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * prose: the caret, in a form that survives a repaint
+ *
+ * A DOM Range dies the moment the card's innerHTML is rewritten -- and every
+ * commit can rewrite it -- so nothing here holds one. The caret is recorded in
+ * the SAME terms the model uses: which paragraph of the card, and how many
+ * characters into it, a reference chip counting as one character exactly as it
+ * counts as one run. That mark stays true across a repaint, which is what lets
+ * a reference be inserted where the writer left the caret rather than at
+ * character 0.
+ * ------------------------------------------------------------------ */
+
+// The paragraph elements of a card, in the order readProseDom reads them: the
+// <p> children, and the <li> of a list in place of their <ul>/<ol>. An index
+// into this list is therefore an index into the card's blocks.
+function proseParagraphs(box) {
+  const out = [];
+  const children = box ? box.childNodes : [];
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (!child || child.nodeType !== 1) continue;
+    const tag = child.tagName.toLowerCase();
+    if (tag === 'ul' || tag === 'ol') {
+      const items = child.children;
+      for (let j = 0; j < items.length; j++) out.push(items[j]);
+      continue;
+    }
+    if (tag === 'br') continue;
+    out.push(child);
+  }
+  return out;
+}
+
+// Characters of `para` before (container, offset): a reference chip and a <br>
+// count as one each, which is what runsToHtml wrote and what the run list
+// counts. A position that cannot be found reads as the end of the paragraph.
+function proseOffset(para, container, offset) {
+  let count = 0;
+  let found = false;
+
+  const visit = (node) => {
+    if (found) return;
+    if (node.nodeType === 3) {
+      if (node === container) {
+        count += Math.min(offset, String(node.nodeValue || '').length);
+        found = true;
+      } else {
+        count += String(node.nodeValue || '').length;
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (node.getAttribute && node.getAttribute('data-ref')) {
+      // A chip is atomic: a caret anywhere in it counts as being before it.
+      if (node === container) found = true;
+      else count += 1;
+      return;
+    }
+    if (node.tagName.toLowerCase() === 'br') { count += 1; return; }
+    const kids = node.childNodes;
+    if (node === container) {
+      for (let i = 0; i < offset && i < kids.length; i++) visit(kids[i]);
+      found = true;
+      return;
+    }
+    for (let i = 0; i < kids.length && !found; i++) visit(kids[i]);
+  };
+
+  visit(para);
+  return count;
+}
+
+// Where the caret is inside this card, as {para, offset}, or null when it is
+// somewhere else entirely.
+function proseCaret(box) {
+  const selection = window.getSelection();
+  if (!box || !selection || !selection.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  const node = range.startContainer;
+  if (!node || !box.contains(node)) return null;
+  const paragraphs = proseParagraphs(box);
+  for (let i = 0; i < paragraphs.length; i++) {
+    if (paragraphs[i] === node || paragraphs[i].contains(node)) {
+      return { para: i, offset: proseOffset(paragraphs[i], node, range.startOffset) };
+    }
+  }
+  return null;
+}
+
+// runs[] with `chip` (a {ref} run) put in `offset` characters along. A
+// reference run is ATOMIC -- it is one character long and never splits -- so an
+// insertion lands before or after an existing chip and can never nest inside
+// one. An offset past the end appends, which is where a reference goes when the
+// card was never clicked in; character 0 would be the middle of a sentence.
+function runsWithRef(runs, offset, chip) {
+  const list = Array.isArray(runs) ? runs : [];
+  const out = [];
+  const at = Math.max(0, offset);
+  let pos = 0;
+  let placed = false;
+  for (let i = 0; i < list.length; i++) {
+    const run = list[i] || {};
+    const text = run.ref ? '' : String(run.t || '');
+    const length = run.ref ? 1 : text.length;
+    if (!placed && at <= pos) {
+      out.push(chip);
+      placed = true;
+      out.push(run);
+    } else if (!placed && !run.ref && at < pos + length) {
+      const cut = at - pos;
+      out.push(Object.assign({}, run, { t: text.slice(0, cut) }));
+      out.push(chip);
+      out.push(Object.assign({}, run, { t: text.slice(cut) }));
+      placed = true;
+    } else {
+      out.push(run);
+    }
+    pos += length;
+  }
+  if (!placed) out.push(chip);
+  return out.filter((run) => run.ref || run.t !== '');
+}
+
+// Characters of `runs` before `chip`, counted the way proseOffset counts them.
+function runOffsetOf(runs, chip) {
+  const list = Array.isArray(runs) ? runs : [];
+  let pos = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === chip) return pos;
+    pos += list[i].ref ? 1 : String(list[i].t || '').length;
+  }
+  return pos;
+}
+
+// How many reference chips come before `chip` in these paragraphs -- its index
+// among the card's '.rw-ref' elements once the card has been repainted, which
+// is how the caret finds it again.
+function refOrdinal(blocks, chip) {
+  let n = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const runs = (blocks[i] && blocks[i].runs) || [];
+    for (let j = 0; j < runs.length; j++) {
+      if (runs[j] === chip) return n;
+      if (runs[j] && runs[j].ref) n += 1;
+    }
+  }
+  return -1;
+}
+
+// blockId -> its caption text, for the whole document. computeCaptionNumbers
+// carries numbers only -- it is mirrored in the engine and in the legacy UI, so
+// it is not widened for a picker -- and the text is read from the outline here.
+function captionTexts(outline) {
+  const out = Object.create(null);
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    const blocks = node.blocks || [];
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      if (block && block.id) out[block.id] = String(block.caption == null ? '' : block.caption).trim();
+    }
+    const children = node.children || [];
+    for (let i = 0; i < children.length; i++) walk(children[i]);
+  };
+  const roots = outline || [];
+  for (let i = 0; i < roots.length; i++) walk(roots[i]);
   return out;
 }
 
@@ -809,6 +995,8 @@ export function ProseCard(props) {
   const { blocks, numbers, index, first, last, acts, selected, marks } = props;
   const boxRef = useRef(null);
   const focusedRef = useRef(false);
+  const caretRef = useRef(null);       // last caret seen in this card, in model terms
+  const caretChipRef = useRef(-1);     // the chip the caret must follow after a repaint
   const [assetOver, setAssetOver] = useState(false);
   const wanted = useMemo(() => proseToHtml(blocks, numbers), [blocks, numbers]);
   const [markup, setMarkup] = useState(wanted);
@@ -827,38 +1015,77 @@ export function ProseCard(props) {
     acts.replaceProse(index, readProseDom(box, blocks));
   };
 
+  // The caret, as the model counts it, kept up to date while the card is being
+  // typed in. Opening the cross-reference picker takes the focus away, so by
+  // the time a target is chosen there is no live selection to read -- reading
+  // one then is what used to drop the chip and send the next keystrokes to
+  // character 0. This mark is what the insertion uses instead.
+  const rememberCaret = () => {
+    const mark = proseCaret(boxRef.current);
+    if (mark) caretRef.current = mark;
+  };
+
+  // Put the chip where the caret was, in the MODEL, then repaint the card from
+  // what was committed and leave the caret just after the chip so typing
+  // continues. Working in the model is also what keeps a chip from nesting
+  // inside another: a reference run is atomic there.
   const insertRef = (targetId) => {
+    const list = blocks || [];
+    if (!list.length) return;
+    const mark = caretRef.current;
+    const at = mark && mark.para >= 0 && mark.para < list.length ? mark.para : list.length - 1;
+    const offset = mark && mark.para === at ? mark.offset : Infinity;
+    const chip = { ref: targetId };
+    const next = list.map((block, i) => (i === at
+      ? Object.assign({}, block, { runs: runsWithRef(block.runs, offset, chip) })
+      : block));
+    // Where the caret now is, so a second reference picked without touching the
+    // card in between lands AFTER this one instead of in front of it.
+    caretRef.current = { para: at, offset: runOffsetOf(next[at].runs, chip) + 1 };
+    caretChipRef.current = refOrdinal(next, chip);
+    acts.replaceProse(index, next);
+    setMarkup(proseToHtml(next, numbers));
+  };
+
+  // The repaint above replaced the card's whole innerHTML, so the caret has to
+  // be put back on the new nodes. A chip at the very end of a paragraph gets an
+  // empty text node to sit in front of, which is where the next character goes;
+  // an empty run is dropped when the card is read back, so it changes nothing.
+  useLayoutEffect(() => {
+    const ordinal = caretChipRef.current;
+    if (ordinal < 0) return;
+    caretChipRef.current = -1;
     const box = boxRef.current;
     if (!box) return;
-    const selection = window.getSelection();
-    const entry = numbers && numbers.get ? numbers.get(targetId) : null;
-    const chip = document.createElement('span');
-    chip.className = 'rw-ref';
-    chip.setAttribute('contenteditable', 'false');
-    chip.setAttribute('data-ref', targetId);
-    chip.textContent = entry && entry.label ? entry.label : targetId;
-    if (selection && selection.rangeCount && box.contains(selection.anchorNode)) {
-      const range = selection.getRangeAt(0);
-      range.deleteContents();
-      range.insertNode(chip);
-      range.setStartAfter(chip);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    } else {
-      const last = box.lastElementChild || box;
-      last.appendChild(chip);
+    const chip = box.querySelectorAll('.rw-ref')[ordinal];
+    if (!chip || !chip.parentNode) return;
+    const doc = box.ownerDocument || document;
+    let after = chip.nextSibling;
+    if (!after || after.nodeType !== 3) {
+      after = doc.createTextNode('');
+      chip.parentNode.insertBefore(after, chip.nextSibling);
     }
-    commit();
-    setMarkup(proseToHtml(blocks, numbers));
-  };
+    box.focus();
+    focusedRef.current = true;
+    const range = doc.createRange();
+    range.setStart(after, 0);
+    range.collapse(true);
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, [markup]);
 
   return html`
     <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}>
       <${CardHead} marker="rw-card__marker--prose" type=${T.prose}
                    meta=${T.paragraphs(blocks.length)} index=${index} first=${first} last=${last} api=${acts}
                    menuItems=${[
-                     { label: T.crossReference, onClick: () => setPicker(true) },
+                     // The caret is read HERE, on the way to the picker, as a
+                     // last chance: the click that opened the menu has already
+                     // taken the focus, so this usually finds nothing and the
+                     // mark taken while typing is what stands.
+                     { label: T.crossReference, onClick: () => { rememberCaret(); setPicker(true); } },
                      { label: T.editingMarks, onClick: () => acts.toggleMarks() },
                    ]} />
       <div class="rw-card__body">
@@ -906,8 +1133,11 @@ export function ProseCard(props) {
             commit();
             acts.changed();
           }}
-          onInput=${commit}
+          onInput=${() => { commit(); rememberCaret(); }}
+          onKeyUp=${rememberCaret}
+          onMouseUp=${rememberCaret}
           onClick=${(event) => {
+            rememberCaret();
             const chip = event.target && event.target.closest ? event.target.closest('.rw-ref') : null;
             if (chip) acts.selectBlockId(chip.getAttribute('data-ref'));
           }}
@@ -920,11 +1150,30 @@ export function ProseCard(props) {
     </div>`;
 }
 
+// How much of a caption an entry shows. Long enough to tell two figures of the
+// same section apart, short enough that the chips stay one line each.
+const REF_CAPTION_MAX = 52;
+
+function shortCaption(text) {
+  const caption = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (caption.length <= REF_CAPTION_MAX) return caption;
+  return caption.slice(0, REF_CAPTION_MAX - 1).replace(/\s+$/, '') + '…';
+}
+
 function RefPicker(props) {
   const { numbers, onPick, onClose } = props;
+  // The numbers know WHICH block; only the document knows what it is a picture
+  // of. A bare list of numbers is a list the writer has to count through.
+  const project = useStore((state) => state.project);
+  const captions = useMemo(
+    () => captionTexts((project && project.outline) || []),
+    [project]
+  );
   const entries = [];
   if (numbers && numbers.forEach) {
-    numbers.forEach((value, key) => entries.push({ id: key, label: value.label }));
+    numbers.forEach((value, key) => entries.push({
+      id: key, label: value.label, caption: shortCaption(captions[key]),
+    }));
   }
   return html`
     <${Dialog} title=${T.crossReference} subtitle=${T.pickTarget} width=${420} onClose=${onClose}
@@ -933,7 +1182,7 @@ function RefPicker(props) {
         <div class="rw-chips">
           ${entries.map((entry) => html`
             <button type="button" class="rw-chip rw-chip--add" key=${entry.id}
-                    onClick=${() => onPick(entry.id)}>${entry.label}</button>`)}
+                    onClick=${() => onPick(entry.id)}>${T.refTarget(entry.label, entry.caption)}</button>`)}
         </div>` : html`<div class="rw-meta">${T.nothingHere}</div>`}
     <//>`;
 }
@@ -989,6 +1238,18 @@ export function FigureCard(props) {
     ? block.file.slice('images/'.length) + (size ? '  ' + size.w + ' × ' + size.h : '')
     : '';
 
+  // WHAT THE FIGURE IS ACTUALLY SET TO is always one of the choices. The five
+  // offered are the ones worth a click, but a report imported from Word, or one
+  // hand-set to fit a page, carries widths that are not among them -- and a
+  // select with no matching option renders EMPTY, so the width was invisible
+  // and the first click on the control silently replaced it. The stored value
+  // joins the list, in order, and is the one selected.
+  const storedWidth = block.width_cm == null ? 15.5 : block.width_cm;
+  const storedText = String(storedWidth);
+  const widths = WIDTH_OPTIONS.some((w) => String(w) === storedText)
+    ? WIDTH_OPTIONS
+    : WIDTH_OPTIONS.concat([storedWidth]).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0));
+
   return html`
     <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}>
       <${CardHead} marker="rw-card__marker--figure" type=${T.figure} numberLabel=${label}
@@ -997,10 +1258,15 @@ export function FigureCard(props) {
                    extra=${html`
         <${Fragment}>
           <select class="rw-select rw-select--bar" style=${{ width: '128px', marginLeft: '6px' }}
-                  aria-label=${T.width(block.width_cm || 15.5)}
-                  value=${String(block.width_cm == null ? 15.5 : block.width_cm)}
-                  onChange=${(event) => { block.width_cm = parseFloat(event.currentTarget.value); acts.changed(); }}>
-            ${WIDTH_OPTIONS.map((w) => html`<option value=${String(w)} key=${w}>${T.width(w)}</option>`)}
+                  aria-label=${T.width(storedWidth)}
+                  value=${storedText}
+                  onChange=${(event) => {
+                    const picked = parseFloat(event.currentTarget.value);
+                    if (!(picked > 0)) return;
+                    block.width_cm = picked;
+                    acts.changed();
+                  }}>
+            ${widths.map((w) => html`<option value=${String(w)} key=${String(w)}>${T.width(w)}</option>`)}
           </select>
           <${Button} level="tertiary" onClick=${() => fileRef.current && fileRef.current.click()}>${T.replace}<//>
         <//>`} />

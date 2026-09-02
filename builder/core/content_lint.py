@@ -62,7 +62,11 @@ LEVELS = {
     "missing_logo": "warn",
     "no_caption": "warn",
     "row_clip_risk": "warn",
-    "dangling_ref": "warn",
+    # A cross-reference whose target is gone does not merely look odd: the
+    # renderer writes a red "[ref: <id>]" marker into the sentence, so the
+    # exported document says something the author never wrote. That is wrong
+    # output the author cannot see from the editor -- an error.
+    "dangling_ref": "error",
     "table_warning": "warn",
     # tables.py sim_span guard (same code the renderer emits)
     "sim_span_unmergeable": "error",
@@ -144,6 +148,9 @@ MESSAGES = {
         "fewer than two columns - there is nothing to merge",
     "empty_section.none":
         "Section is empty - no text, no figures, no tables",
+    "dangling_ref.missing":
+        "A cross-reference in this paragraph points at a figure or table that no "
+        "longer exists - the export prints a red marker there",
 }
 
 _REQUIRED_ROW_KEYS = ("cat", "item", "kind", "unit")
@@ -311,6 +318,51 @@ def _lint_image_file(fname, add, project_dir=None):
             add("missing_image", "missing_image.not_found", file=fname)
 
 
+def _ref_targets(outline):
+    """The block ids a cross-reference can resolve to.
+
+    Mirrors ``engine._collect_ref_targets``: an image / image grid is a target
+    whether or not it carries a caption (the render bookmarks it either way), a
+    table only once it has one, a block with no id never is, and a section with a
+    ``fixed_body`` contributes none of its own blocks. A reference to anything
+    else is what the renderer calls dangling."""
+    ids = set()
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        if not node.get("fixed_body"):
+            for block in node.get("blocks") or []:
+                if not isinstance(block, dict):
+                    continue
+                bid = block.get("id")
+                if not bid:
+                    continue
+                btype = block.get("type")
+                if btype in ("image", "imagegrid"):
+                    ids.add(bid)
+                elif btype in ("table", "datatable") and block.get("caption"):
+                    ids.add(bid)
+        for child in node.get("children") or []:
+            walk(child)
+
+    for node in outline or []:
+        walk(node)
+    return ids
+
+
+def _lint_para_refs(block, add, targets):
+    """A run carrying ``ref`` must point at a live target -- see _ref_targets."""
+    if targets is None:
+        return
+    for run in block.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        ref = run.get("ref")
+        if ref and ref not in targets:
+            add("dangling_ref", "dangling_ref.missing")
+
+
 def _lint_free_table(block, rows, add):
     if not isinstance(rows, list):
         add("table_no_rows", "table_no_rows.not_list")
@@ -402,9 +454,11 @@ def _lint_datatable(data, add, default_axes, setting_kinds):
                 keys=", ".join(thin))
 
 
-def _lint_block(block, add, default_axes, setting_kinds, project_dir=None):
+def _lint_block(block, add, default_axes, setting_kinds, project_dir=None, targets=None):
     bt = block.get("type")
-    if bt == "image":
+    if bt == "para":
+        _lint_para_refs(block, add, targets)
+    elif bt == "image":
         _lint_image_file(block.get("file"), add, project_dir)
         if not (block.get("caption") or "").strip():
             add("no_caption", "no_caption.image")
@@ -451,6 +505,9 @@ def lint_project(project, cfg=None, project_dir=None):
     comp = cfg.get("compliance", {}) if isinstance(cfg.get("compliance"), dict) else {}
     default_axes = comp.get("axis_labels", _DEFAULT_AXES)
     setting_kinds = set(comp.get("setting_kinds", _DEFAULT_SETTING_KINDS))
+    # Whole-document, so a reference that points FORWARD (or into another
+    # section) is not reported as broken -- collected once, before the walk.
+    targets = _ref_targets(project.get("outline") or [])
 
     def emit(code, mid, location, loc, node_id, block_id, kw):
         text = message(mid, **kw)
@@ -481,7 +538,7 @@ def lint_project(project, cfg=None, project_dir=None):
             def add(code, mid, _location=location, _bid=block_id, **kw):
                 emit(code, mid, _location, path, node_id, _bid, kw)
 
-            _lint_block(block, add, default_axes, setting_kinds, project_dir)
+            _lint_block(block, add, default_axes, setting_kinds, project_dir, targets)
         for ci, c in enumerate(children):
             walk(c, "%s.%d" % (path, ci + 1))
 
