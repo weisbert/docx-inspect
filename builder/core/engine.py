@@ -1115,7 +1115,7 @@ def _collect_table_result(res, warn, location):
         warn(entry)
 
 
-def _collect_ref_targets(outline):
+def _collect_ref_targets(outline, fixed_bodies=None):
     """Pre-scan the outline for cross-reference targets BEFORE rendering.
 
     Returns a dict mapping each captioned block's stable id -> the "<chap>-<seq>"
@@ -1126,9 +1126,19 @@ def _collect_ref_targets(outline):
     sequences reset per Heading 1; a table only consumes a number when it has a
     caption), so forward AND backward references resolve to the right number.
 
+    ``fixed_bodies`` (the template config's map, or None/{} when the caller has
+    none) must be the SAME dict _build_outline resolves against: a node's
+    ``fixed_body`` key only replaces its blocks when that key actually resolves
+    there -- exactly _build_outline's own ``if fb_key and fb_key in
+    fixed_bodies`` test. A node naming an unresolvable key falls back to
+    rendering (and therefore numbering) its own blocks, same as one with no
+    ``fixed_body`` at all; treating it as always-empty here made a reference
+    into such a section wrongly dangling even though the render bookmarked it.
+
     Only blocks with a non-empty ``id`` AND a non-empty caption become targets --
     those are exactly the blocks _render_caption_with_seq bookmarks as
     ``bm_<id>_num``. References to anything else are treated as dangling."""
+    fixed_bodies = fixed_bodies or {}
     targets = {}
     state = {"chap": 0, "img": {}, "tbl": {}}
 
@@ -1138,8 +1148,9 @@ def _collect_ref_targets(outline):
             state["img"][state["chap"]] = 0
             state["tbl"][state["chap"]] = 0
         chap = state["chap"]
-        if node.get("fixed_body"):
-            # fixed bodies carry no captioned media blocks
+        fb_key = node.get("fixed_body")
+        if fb_key and fb_key in fixed_bodies:
+            # a RESOLVED fixed body carries no captioned media blocks of its own
             for child in node.get("children", []):
                 walk(child, depth + 1)
             return
@@ -1314,7 +1325,7 @@ def _build_outline(doc, cfg, outline, names, on_progress=None, section_only=None
     # a pre-pass so a paragraph may reference a figure/table that appears later.
     # ALWAYS over the whole outline, even for a section-only render: a reference
     # that points at a figure in another section must still resolve.
-    ref_targets = _collect_ref_targets(outline)
+    ref_targets = _collect_ref_targets(outline, fixed_bodies)
 
     # Section-only: locate the target, anchor the heading autonumber to its number
     # path and synthesise its (hidden) ancestor headings so the STYLEREF chapter

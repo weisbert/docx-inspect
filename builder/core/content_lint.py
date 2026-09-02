@@ -335,20 +335,25 @@ def _lint_image_file(fname, add, project_dir=None):
             add("missing_image", "missing_image.not_found", file=fname)
 
 
-def _ref_targets(outline):
+def _ref_targets(outline, fixed_bodies=None):
     """The block ids a cross-reference can resolve to.
 
     Mirrors ``engine._collect_ref_targets``: an image / image grid is a target
     whether or not it carries a caption (the render bookmarks it either way), a
-    table only once it has one, a block with no id never is, and a section with a
-    ``fixed_body`` contributes none of its own blocks. A reference to anything
-    else is what the renderer calls dangling."""
+    table only once it has one, a block with no id never is, and a section whose
+    ``fixed_body`` key actually RESOLVES in ``fixed_bodies`` contributes none of
+    its own blocks. A node naming a key the config does not have falls back to
+    its own blocks, same as the renderer -- otherwise a reference into it reads
+    as dangling even though the export bookmarked the block. A reference to
+    anything else is what the renderer calls dangling."""
+    fixed_bodies = fixed_bodies or {}
     ids = set()
 
     def walk(node):
         if not isinstance(node, dict):
             return
-        if not node.get("fixed_body"):
+        fb_key = node.get("fixed_body")
+        if not (fb_key and fb_key in fixed_bodies):
             for block in node.get("blocks") or []:
                 if not isinstance(block, dict):
                     continue
@@ -524,7 +529,7 @@ def lint_project(project, cfg=None, project_dir=None):
     setting_kinds = set(comp.get("setting_kinds", _DEFAULT_SETTING_KINDS))
     # Whole-document, so a reference that points FORWARD (or into another
     # section) is not reported as broken -- collected once, before the walk.
-    targets = _ref_targets(project.get("outline") or [])
+    targets = _ref_targets(project.get("outline") or [], cfg.get("fixed_bodies"))
 
     def emit(code, mid, location, loc, node_id, block_id, kw):
         text = message(mid, **kw)

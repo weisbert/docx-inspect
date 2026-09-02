@@ -805,11 +805,22 @@ def test_dangling_reference_is_an_error():
     check("dangling_ref" in _lint_codes(_ref_project([para, table]), _FULL_CFG),
           "an uncaptioned table is not one")
 
-    # A fixed template body contributes none of its own blocks.
-    fixed = {"id": "n2", "title": "Boilerplate", "fixed_body": True,
+    # A fixed template body whose key RESOLVES in the config contributes none
+    # of its own blocks.
+    cfg_with_fixed = dict(_FULL_CFG, fixed_bodies={"std": {"paragraphs": []}})
+    fixed = {"id": "n2", "title": "Boilerplate", "fixed_body": "std",
              "blocks": [figure], "children": []}
-    check("dangling_ref" in _lint_codes(_ref_project([para], extra=fixed), _FULL_CFG),
-          "a figure inside a fixed template body is not a target either")
+    check("dangling_ref" in _lint_codes(_ref_project([para], extra=fixed), cfg_with_fixed),
+          "a figure inside a RESOLVED fixed template body is not a target either")
+
+    # A fixed_body key the config does NOT declare falls back to the section's
+    # own blocks -- exactly what engine.py's render loop does (renders the
+    # blocks instead of the fixed body) -- so the figure inside it IS still a
+    # target, and a reference to it must NOT read as dangling.
+    unresolved = {"id": "n3", "title": "Boilerplate", "fixed_body": "no-such-key",
+                  "blocks": [figure], "children": []}
+    check("dangling_ref" not in _lint_codes(_ref_project([para], extra=unresolved), cfg_with_fixed),
+          "an UNRESOLVED fixed_body key falls back to its own blocks as targets")
 
 
 # ---------------------------------------------------------------------------

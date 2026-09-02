@@ -1838,8 +1838,8 @@ export function BlockCard(props) {
   const marks = editingMarks === undefined ? marksFromStore : editingMarks;
 
   const numbers = useMemo(
-    () => captions || computeCaptionNumbers((project && project.outline) || []),
-    [captions, project]
+    () => captions || computeCaptionNumbers((project && project.outline) || [], cfg && cfg.fixed_bodies),
+    [captions, project, cfg]
   );
 
   const own = block || (card && card.blocks && card.blocks[0]);

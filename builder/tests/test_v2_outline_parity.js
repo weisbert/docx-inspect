@@ -39,6 +39,10 @@
  *     6. computeCaptionNumbers agrees with engine.py: a whitespace-only table
  *        caption still consumes a number (no .trim() before the truthiness
  *        check, matching _collect_ref_targets exactly).
+ *     7. computeCaptionNumbers and preview.js's lintProject agree with the
+ *        render loop on fixed_body resolvability: an unresolved key falls
+ *        back to numbering / referencing the section's own blocks instead of
+ *        always treating it as empty.
  *   in a real browser, against a generated report on disk:
  *     6. the rail marks the template section, the table section and the added
  *        section, and marks nothing else;
@@ -416,6 +420,52 @@ async function staticChecks() {
       nums.has('t-real') ? JSON.stringify(nums.get('t-real')) : 'no entry');
   } else {
     check('util.js exports computeCaptionNumbers', false, '');
+  }
+
+  /* ---- 7. fixed_body resolvability matches the render loop's own fallback -- */
+
+  section('an unresolved fixed_body key falls back to numbering its own blocks');
+  if (typeof util.computeCaptionNumbers === 'function') {
+    // engine.py's render loop only treats a section as pinned when its
+    // fixed_body key actually resolves in the template config's fixed_bodies
+    // (`if fb_key and fb_key in fixed_bodies`); an unresolved key falls back to
+    // rendering (and therefore numbering) the section's own blocks. Both
+    // util.js and preview.js used to skip ANY truthy fixed_body unconditionally.
+    const fbOutline = (key) => [{
+      id: 'c1', title: 'Ch1', children: [], fixed_body: key,
+      blocks: [{ type: 'image', id: 'fb-img', caption: 'x' }],
+    }];
+    const fixedBodies = { std: { paragraphs: [] } };
+    const resolved = util.computeCaptionNumbers(fbOutline('std'), fixedBodies);
+    check('a RESOLVED fixed_body key contributes none of its own blocks',
+      !resolved.has('fb-img'),
+      resolved.has('fb-img') ? JSON.stringify(resolved.get('fb-img')) : 'no entry');
+    const unresolved = util.computeCaptionNumbers(fbOutline('no-such-key'), fixedBodies);
+    check('an UNRESOLVED fixed_body key still numbers its own blocks',
+      unresolved.has('fb-img') && unresolved.get('fb-img').label === 'Figure 1-1',
+      unresolved.has('fb-img') ? JSON.stringify(unresolved.get('fb-img')) : 'no entry');
+  }
+
+  const preview = await import(pathToFileURL(path.join(V2_JS, 'views', 'preview.js')).href);
+  if (typeof preview.lintProject === 'function') {
+    const refProject = (fbKey) => ({
+      outline: [
+        { id: 'n1', title: 'Results', children: [], blocks: [
+          { type: 'para', id: 'p1', runs: [{ t: 'see ' }, { ref: 'fig-1' }] },
+        ] },
+        { id: 'n2', title: 'Boilerplate', children: [], fixed_body: fbKey,
+          blocks: [{ type: 'image', id: 'fig-1', caption: 'x' }] },
+      ],
+    });
+    const cfg = { fixed_bodies: { std: { paragraphs: [] } } };
+    const resolvedCodes = preview.lintProject(refProject('std'), cfg).map((f) => f.code);
+    check('preview.js: a reference into a RESOLVED fixed body is dangling',
+      resolvedCodes.indexOf('dangling_ref') >= 0, JSON.stringify(resolvedCodes));
+    const unresolvedCodes = preview.lintProject(refProject('no-such-key'), cfg).map((f) => f.code);
+    check('preview.js: a reference into an UNRESOLVED fixed body still resolves',
+      unresolvedCodes.indexOf('dangling_ref') < 0, JSON.stringify(unresolvedCodes));
+  } else {
+    check('preview.js exports lintProject', false, '');
   }
 }
 

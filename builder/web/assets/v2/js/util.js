@@ -30,14 +30,22 @@
 //     carries a non-empty caption;
 //   * Figure and Table have SEPARATE counters and BOTH reset at each top-level
 //     section (the Word "\s 1" SEQ switch);
-//   * a section with a truthy `fixed_body` contributes none of its own blocks,
-//     but its children are still walked -- fixed bodies carry no captioned media
-//     of their own, their subsections may;
+//   * a section whose `fixed_body` key actually RESOLVES in the template
+//     config's `fixed_bodies` contributes none of its own blocks, but its
+//     children are still walked -- a resolved fixed body carries no captioned
+//     media of its own, its subsections may. A node naming a key the config
+//     does not have falls back to numbering its own blocks, exactly like one
+//     with no `fixed_body` at all -- engine.py's render loop does the same
+//     fallback, so treating the key as always-resolved here shifted every
+//     later number relative to the exported file. (app.html's own copy of
+//     this function takes no fixedBodies and does not yet make this check --
+//     a known, narrower gap between the legacy and v2 UIs on this one corner.)
 //   * only a block with a non-empty `id` becomes an entry in the map.
 //
 // Returns: Map<blockId, {kind:'Figure'|'Table', chapter:number, seq:number,
 //                        label:string}>  where label is `${kind} ${chapter}-${seq}`.
-export function computeCaptionNumbers(outline) {
+export function computeCaptionNumbers(outline, fixedBodies) {
+  const fb = fixedBodies || {};
   const map = new Map();
   const state = { chapter: 0, img: Object.create(null), tbl: Object.create(null) };
 
@@ -49,7 +57,8 @@ export function computeCaptionNumbers(outline) {
       state.tbl[state.chapter] = 0;
     }
     const chapter = state.chapter;
-    if (!node.fixed_body) {
+    const fbKey = node.fixed_body;
+    if (!(fbKey && Object.prototype.hasOwnProperty.call(fb, fbKey))) {
       const blocks = node.blocks || [];
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];

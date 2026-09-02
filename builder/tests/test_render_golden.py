@@ -862,6 +862,25 @@ def main():
     check("dangling_ref" not in wtypes,
           "no reference is reported as dangling", "warnings=%r" % wtypes)
 
+    # --- fixed_body resolvability: _collect_ref_targets must agree with the
+    # render loop's OWN "if fb_key and fb_key in fixed_bodies" test, not treat
+    # every truthy fixed_body as always-empty. An unresolved key falls back to
+    # the node's own blocks in both places -- otherwise a reference into such a
+    # section reads as dangling even though the render bookmarked the block.
+    def _fb_outline(key):
+        return [{"id": "c1", "title": "Ch1", "children": [], "fixed_body": key,
+                 "blocks": [{"type": "image", "id": "fb-img",
+                             "file": "images/x.png", "caption": "x"}]}]
+    fb_cfg = {"std": {"paragraphs": []}}
+    resolved = engine._collect_ref_targets(_fb_outline("std"), fb_cfg)
+    check("fb-img" not in resolved,
+          "a RESOLVED fixed_body key contributes none of its own blocks",
+          repr(resolved))
+    unresolved = engine._collect_ref_targets(_fb_outline("no-such-key"), fb_cfg)
+    check("fb-img" in unresolved,
+          "an UNRESOLVED fixed_body key falls back to its own blocks, "
+          "matching the render loop", repr(unresolved))
+
     # --- footer DATE / PAGE / NUMPAGES + TOC field ---
     check(footer_has_field(doc, "DATE"), "footer has a DATE field")
     check(footer_has_field(doc, "PAGE"), "footer has a PAGE field")

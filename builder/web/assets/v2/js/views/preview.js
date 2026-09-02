@@ -471,12 +471,17 @@ function lintDatatable(data, add, defaultAxes, settingKinds) {
 // _ref_targets, which mirrors engine._collect_ref_targets: an image or image
 // grid is a target whether or not it carries a caption (the render bookmarks it
 // either way), a table only once it has one, a block with no id never is, and a
-// section with a fixed_body contributes none of its own blocks.
-function refTargets(outline) {
+// section whose fixed_body key actually RESOLVES in fixedBodies contributes
+// none of its own blocks -- a key the config does not have falls back to its
+// own blocks, same as the renderer, so a reference into it does not read as
+// dangling when the export bookmarked the block anyway.
+function refTargets(outline, fixedBodies) {
+  const fb = fixedBodies || {};
   const ids = {};
   const walk = (node) => {
     if (!node || typeof node !== 'object') return;
-    if (!node.fixed_body) {
+    const fbKey = node.fixed_body;
+    if (!(fbKey && Object.prototype.hasOwnProperty.call(fb, fbKey))) {
       const blocks = node.blocks || [];
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
@@ -562,7 +567,7 @@ export function lintProject(project, cfg) {
   const settingKinds = Array.isArray(comp.setting_kinds) ? comp.setting_kinds : DEFAULT_SETTING_KINDS;
   // Whole-document, so a reference pointing FORWARD (or into another section)
   // is not reported as broken -- collected once, before the walk.
-  const targets = refTargets((project && project.outline) || []);
+  const targets = refTargets((project && project.outline) || [], conf.fixed_bodies);
 
   // Block ids and section (node) ids are each other's own namespace, shared
   // across the WHOLE project (not reset per section): the engine numbers
@@ -1144,8 +1149,8 @@ export function PreviewTab(props) {
     [project, stamp]
   );
   const captions = useMemo(
-    () => computeCaptionNumbers((project && project.outline) || []),
-    [project, stamp]
+    () => computeCaptionNumbers((project && project.outline) || [], cfg && cfg.fixed_bodies),
+    [project, stamp, cfg]
   );
   const comp = (cfg && cfg.compliance) || null;
 

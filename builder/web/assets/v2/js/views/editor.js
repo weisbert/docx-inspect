@@ -1794,8 +1794,8 @@ function Canvas(props) {
   const moveBySpan = pickExport(blocksMod, ['moveCardBySpan']);
 
   const captions = useMemo(
-    () => computeCaptionNumbers((project && project.outline) || []),
-    [project]
+    () => computeCaptionNumbers((project && project.outline) || [], cfg && cfg.fixed_bodies),
+    [project, cfg]
   );
 
   if (!node) return html`<div class="rw-canvas"></div>`;
