@@ -1000,6 +1000,13 @@ def check_real_config():
     Asserts the two engine-dependent guarantees that the minimal config cannot:
       - validate-compliance over the demo's real datatable yields exactly 4 flags;
       - export?fmt=docx through the server actually renders a docx file.
+
+    The documents on this machine are READ-ONLY to the test suite: the config,
+    the demo report and the picture the config points at are COPIED into a
+    temporary root and the server is booted against THAT. Rooting it at the
+    documents folder itself made the export write a real .docx back into the
+    folder it read -- a test that leaves files behind in the material it was
+    only supposed to look at.
     """
     import glob
 
@@ -1022,10 +1029,30 @@ def check_real_config():
         record("real-config e2e (validate + export)", "SKIP (no local config)")
         return 0
 
+    sandbox = tempfile.mkdtemp(prefix="rw-smoke-e2e-")
+    shutil.copytree(os.path.join(local_dir, *demo_dir.split("/")),
+                    os.path.join(sandbox, *demo_dir.split("/")))
+    config_path = os.path.join(sandbox, os.path.basename(cfgs[0]))
+    shutil.copy2(cfgs[0], config_path)
+    # The engine resolves the logo relative to the config file's own folder, so
+    # the copy needs it too -- otherwise the export still succeeds but on a
+    # different document than the one this machine actually produces.
+    try:
+        with open(cfgs[0], "r", encoding="utf-8-sig") as fh:
+            logo = str((json.load(fh) or {}).get("logo") or "")
+    except Exception:
+        logo = ""
+    if logo:
+        logo_src = os.path.join(os.path.dirname(cfgs[0]), *logo.replace("\\", "/").split("/"))
+        logo_dst = os.path.join(sandbox, *logo.replace("\\", "/").split("/"))
+        if os.path.isfile(logo_src):
+            os.makedirs(os.path.dirname(logo_dst), exist_ok=True)
+            shutil.copy2(logo_src, logo_dst)
+
     port = PORT + 1
     base = "http://127.0.0.1:%d" % port
     httpd = server.make_server(
-        port=port, root=local_dir, config_path=cfgs[0], bind="127.0.0.1"
+        port=port, root=sandbox, config_path=config_path, bind="127.0.0.1"
     )
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
@@ -1088,9 +1115,19 @@ def check_real_config():
             and os.path.isfile(ex.get("abs", "").replace("/", os.sep))
         )
         f += expect(ok, "real export docx (server->engine)", "body=%r" % ex)
+        def _cmp(p):
+            return os.path.normcase(os.path.abspath(p))
+
+        written = _cmp(str(ex.get("abs") or "").replace("/", os.sep))
+        f += expect(
+            bool(ex.get("abs")) and written.startswith(_cmp(sandbox) + os.sep),
+            "the export landed in the sandbox, not in the documents folder",
+            "it was written to %r" % written,
+        )
     finally:
         httpd.shutdown()
         httpd.server_close()
+        shutil.rmtree(sandbox, ignore_errors=True)
     return f
 
 
