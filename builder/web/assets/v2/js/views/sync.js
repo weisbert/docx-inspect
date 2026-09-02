@@ -825,13 +825,25 @@ function hasProject() {
   return !!(state && state.project);
 }
 
+// The same report, whatever spelling of its path came back. A report is a
+// FOLDER: on Windows its path is compared without regard to case, and the
+// separator and the edge slashes are not part of its identity either. Compared
+// raw, a rollback that had done exactly what was asked reported that it had
+// touched somebody else's report -- which is the one sentence on this screen
+// nobody can check for themselves.
+function samePath(a, b) {
+  const flat = (p) => String(p == null ? '' : p)
+    .replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLowerCase();
+  return flat(a) === flat(b);
+}
+
 async function rollBackAndReread(dir) {
   const answer = await api.rollback(dir);
   const named = String((answer && (answer.dir || answer.report)) || '');
   await refreshReport(dir);
   if (!hasProject()) await refreshReport(dir);
   if (!hasProject()) return TEXT.rollbackNoRead;
-  if (named && dir && named !== dir) return TEXT.rollbackOther(named);
+  if (named && dir && !samePath(named, dir)) return TEXT.rollbackOther(named);
   return '';
 }
 

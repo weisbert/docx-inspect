@@ -169,6 +169,32 @@ def test_rollback_created():
           "rollback reports the deleted create", str(res.get("deleted")))
 
 
+def test_rollback_scope_case():
+    # A scoped rollback is asked for by path, and on Windows the path that comes
+    # back from the address bar, from a saved link or from a hand-typed --dir
+    # need not carry the folder's own capitals. The scope test has to answer the
+    # same for all of them, or a rollback that had nothing wrong with it is
+    # refused with "the changes on record belong to other reports".
+    root = tempfile.mkdtemp(prefix="au_rbcase_")
+    rel = os.path.join("Proj", "Mod", "CDR", "project.json")
+    au.record_replace(root, rel, b'{"schema_version":1,"outline":[]}')
+    au.record_replace(root, rel, b'{"schema_version":1,"outline":[{"id":"s"}]}')
+    pj = os.path.join(root, rel)
+    check(json.load(open(pj, encoding="utf-8"))["outline"] == [{"id": "s"}],
+          "the second write is what is on disk")
+
+    res = au.rollback_last(root, dir_name="proj/mod/cdr")
+    check(res.get("ok"), "a scope spelled in another case still finds its backup",
+          str(res))
+    check(json.load(open(pj, encoding="utf-8"))["outline"] == [],
+          "and it is the one that was rolled back")
+
+    # ... and the guard it must not lose: a scope that names nobody is refused.
+    other = au.rollback_last(root, dir_name="Proj/Mod/FDR")
+    check(not other.get("ok") and other.get("reason") == "out_of_scope",
+          "a scope with no backup of its own is still refused", str(other))
+
+
 def test_snapshot_finds_nested_reports():
     # Reports live three levels down (<project>/<module>/<stage>), and the
     # packager used to look one level down only: under a real reports root it
@@ -234,6 +260,7 @@ def main():
     test_run_plan_and_bundle()
     test_partial_failure()
     test_rollback_created()
+    test_rollback_scope_case()
     test_snapshot_finds_nested_reports()
     print("\n%d test failure(s)" % fails)
     return 1 if fails else 0
