@@ -67,8 +67,21 @@ def check(name, cond, detail=""):
 
 
 def post(path, body):
-    req = Request(BASE + path, data=json.dumps(body).encode("utf-8"),
-                  headers={"Content-Type": "application/json"}, method="POST")
+    return _send("POST", path, body)
+
+
+def put(path, body):
+    return _send("PUT", path, body)
+
+
+def get(path):
+    return _send("GET", path, None)
+
+
+def _send(method, path, body):
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    req = Request(BASE + path, data=data,
+                  headers={"Content-Type": "application/json"}, method=method)
     try:
         with urlopen(req) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -449,6 +462,80 @@ def test_rollback_without_a_dir_still_undoes_the_newest(root):
           "-> %s %s" % (status, body))
     check("which is exactly the file it backed up",
           digest(os.path.join(pdir, "project.json")) == before)
+# A save never brings a report back.
+# ---------------------------------------------------------------------------
+
+
+def test_save_after_delete_is_refused(root):
+    """A PUT that carries the optimistic token is a save of a report the client
+    has read. If that report was moved to the trash meanwhile, the save must
+    answer 410 and write NOTHING -- against the old behaviour the folder came
+    back holding only project.json (no images, no baseline, no history) and
+    then blocked its own restore, which refuses an occupied path."""
+    name = "unit_c/deleted_while_open"
+    pdir = make_report(root, name)
+    os.makedirs(os.path.join(pdir, "images"), exist_ok=True)
+    with open(os.path.join(pdir, "images", "plot.png"), "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")
+    enc = name.replace("/", "%2F")
+
+    status, body = get("/api/project?dir=" + enc)
+    token = body["meta_info"]["mtime"]
+    doc = body["project"]
+    doc["outline"][0]["blocks"][0]["runs"][0]["t"] = "Typed while the report was open."
+    status, saved = put("/api/project?dir=%s&saved_at=%r" % (enc, token), doc)
+    check("a save with the current token still lands", status == 200 and saved.get("ok"),
+          "-> %s %s" % (status, saved))
+    token = saved["saved_at"]
+
+    status, gone = post("/api/project-delete", {"dir": name})
+    check("the report goes to the trash", status == 200 and gone.get("id"),
+          "-> %s %s" % (status, gone))
+    check("and its folder is gone", not os.path.exists(pdir))
+
+    doc["outline"][0]["blocks"][0]["runs"][0]["t"] = "The save that was still owed."
+    status, refused = put("/api/project?dir=%s&saved_at=%r" % (enc, token), doc)
+    check("the save that lands after the delete answers 410",
+          status == 410 and refused.get("gone") is True, "-> %s %s" % (status, refused))
+    check("and the folder is NOT recreated", not os.path.exists(pdir))
+
+    status, refused = put("/api/project?dir=%s&overwrite=1" % enc, doc)
+    check("an explicit overwrite of a deleted report is refused the same way",
+          status == 410 and refused.get("gone") is True, "-> %s %s" % (status, refused))
+    check("and still nothing was created", not os.path.exists(pdir))
+
+    status, back = post("/api/trash-restore", {"id": gone["id"]})
+    check("so the trashed copy can be put back", status == 200 and back.get("ok"),
+          "-> %s %s" % (status, back))
+    check("with its figure and its baseline intact",
+          os.path.isfile(os.path.join(pdir, "images", "plot.png"))
+          and os.path.isfile(os.path.join(pdir, "_baseline.json")))
+    with open(os.path.join(pdir, "project.json"), encoding="utf-8") as fh:
+        restored = json.load(fh)
+    check("holding the last save that landed before the delete",
+          restored["outline"][0]["blocks"][0]["runs"][0]["t"]
+          == "Typed while the report was open.")
+
+    # The explicit overwrite keeps what it replaces.
+    status, body = get("/api/project?dir=" + enc)
+    other = copy.deepcopy(body["project"])
+    other["outline"][1]["blocks"][0]["runs"][0]["t"] = "Written by the other window."
+    write_json(os.path.join(pdir, "project.json"), other)
+    status, refused = put("/api/project?dir=%s&saved_at=%r" % (enc, body["meta_info"]["mtime"]),
+                          doc)
+    check("a stale token is still refused with 409",
+          status == 409 and refused.get("conflict") is True, "-> %s" % status)
+    status, kept = put("/api/project?dir=%s&overwrite=1" % enc, doc)
+    check("the explicit overwrite writes without the token", status == 200 and kept.get("ok"),
+          "-> %s %s" % (status, kept))
+    snaps = snapshots(pdir)
+    held = []
+    for snap in snaps:
+        with open(os.path.join(pdir, "_autosave", snap), encoding="utf-8") as fh:
+            if "Written by the other window." in fh.read():
+                held.append(snap)
+    check("and the version it replaced is in a snapshot first",
+          any("__overwrite" in s for s in held), "-> %s" % snaps)
 
 
 def run():
@@ -484,6 +571,8 @@ def run():
         test_rollback_is_scoped_to_the_open_report(root)
         test_rollback_refuses_when_nothing_of_ours_is_on_record(root)
         test_rollback_without_a_dir_still_undoes_the_newest(root)
+        print("a save never brings a report back")
+        test_save_after_delete_is_refused(root)
     finally:
         httpd.shutdown()
         httpd.server_close()

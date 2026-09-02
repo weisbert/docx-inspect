@@ -1294,11 +1294,33 @@ def over_spec_count(project_dir, project=None):
     return n
 
 
+def _json_read_error(path):
+    """Why a JSON file does not parse, in the parser's words, or "" when it does
+    (or does not exist). Only called for a file _read_json_quiet gave up on, so
+    the second parse is of a broken file and fails fast."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            json.load(fh)
+        return ""
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
 def _report_entry(root, parts, stage=""):
-    """One report row of the tree. ``parts`` is its path under the reports root."""
+    """One report row of the tree. ``parts`` is its path under the reports root.
+
+    ``unreadable`` is true when project.json is there but will not parse, with
+    ``error`` carrying the parser's reason -- so the shelf can say so before
+    the report is opened. Both keys are additive; every field that was here
+    before is unchanged.
+    """
     project_dir = os.path.join(root, *parts)
     pj = os.path.join(project_dir, "project.json")
-    project = _read_json_quiet(pj) or {}
+    parsed = _read_json_quiet(pj)
+    unreadable = parsed is None and os.path.isfile(pj)
+    project = parsed if isinstance(parsed, dict) else {}
     title = str((project.get("meta") or {}).get("title") or "")
     stage = stage or _stage_from_text(title)
     try:
@@ -1313,6 +1335,8 @@ def _report_entry(root, parts, stage=""):
         "name": stage or parts[-1],
         "title": title,
         "mtime": mtime,
+        "unreadable": unreadable,
+        "error": _json_read_error(pj) if unreadable else "",
         "overSpec": over_spec_count(project_dir, project),
         # exchange.sectionsSince is a documented STUB, always 0: counting the
         # sections changed since the last exchange needs the baseline op-diff,
@@ -2047,17 +2071,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(
                 {"project": None, "meta_info": {"exists": False, "mtime": None}}
             )
-        with open(pj, "r", encoding="utf-8") as fh:
-            project = json.load(fh)
+        # A file that will not parse is a fact about the FILE, not about the
+        # request. Left to _handle_exc it came back as "invalid JSON body", the
+        # wording meant for a malformed request, with the parser's own text as
+        # the whole message. Say what it is, flag it, and keep the parser's
+        # words as a detail somebody debugging the file can use.
+        try:
+            with open(pj, "r", encoding="utf-8") as fh:
+                project = json.load(fh)
+        except (ValueError, UnicodeDecodeError) as exc:
+            return self._send_json(
+                {"error": "this report's project.json is not valid JSON",
+                 "unreadable": True, "detail": str(exc),
+                 "dir": self._rel_dir(project_dir)}, status=422)
         mtime = os.path.getmtime(pj)
         return self._send_json(
             {"project": project, "meta_info": {"exists": True, "mtime": mtime}}
         )
 
     def _api_project_put(self, qs):
+        """Write project.json. Query: dir, saved_at (the mtime the client last
+        saw), overwrite (the explicit way past a conflict).
+
+        A SAVE NEVER BRINGS A REPORT BACK. A PUT that carries a token, or asks
+        to overwrite, is by definition a save of a report the client has read;
+        if that report is not on disk any more it was deleted meanwhile (moved
+        to the trash from the shelf), and writing it would recreate the folder
+        with none of its images, baseline or history -- and then block the
+        trash restore, which refuses an occupied path. That answers 410 with
+        {"gone": true} and writes nothing.
+
+        A PUT with neither token nor overwrite flag to a folder that does not
+        exist is the create path the previous interface and the smoke test use
+        to seed a new report, and it still creates. /api/report-new is the
+        proper door for that; this one stays open only because callers depend
+        on it.
+        """
         dir_arg = (qs.get("dir") or [None])[0]
         saved_at = (qs.get("saved_at") or [None])[0]
-        project_dir = resolve_project_dir(dir_arg, create=True)
+        overwrite = (qs.get("overwrite") or [None])[0] in ("1", "true", "yes")
+        project_dir = resolve_project_dir(dir_arg, create=False)
         project = self._read_json()
         if not isinstance(project, dict):
             return self._send_error_json("body must be a JSON object")
@@ -2065,11 +2118,19 @@ class Handler(BaseHTTPRequestHandler):
         if sv is not None and sv != 1:
             return self._send_error_json("unsupported schema_version: %r" % sv)
         pj = os.path.join(project_dir, "project.json")
+        if not os.path.isfile(pj):
+            if saved_at or overwrite:
+                return self._send_json(
+                    {"error": "this report is no longer on disk; nothing was written",
+                     "gone": True, "dir": self._rel_dir(project_dir)},
+                    status=410)
+            os.makedirs(project_dir, exist_ok=True)
+            os.makedirs(os.path.join(project_dir, "images"), exist_ok=True)
         # A4 optimistic concurrency: if the client last saw mtime `saved_at` but the
         # file changed on disk since (a second tab, or an applied update bundle),
         # refuse with 409 so a stale autosave cannot clobber / revert it. The client
         # then reloads or explicitly overwrites (by re-PUTting without saved_at).
-        if saved_at and os.path.isfile(pj):
+        if saved_at and not overwrite and os.path.isfile(pj):
             try:
                 if abs(os.path.getmtime(pj) - float(saved_at)) > 1e-6:
                     return self._send_json(
@@ -2078,6 +2139,11 @@ class Handler(BaseHTTPRequestHandler):
                         status=409)
             except (ValueError, OSError):
                 pass
+        # The explicit overwrite replaces a version this client has never seen,
+        # so that version is kept first: the snapshot is what makes "keep my
+        # version" a choice rather than a loss.
+        if overwrite and os.path.isfile(pj):
+            autosave_snapshot(project_dir, "overwrite")
         body = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
         atomic_write(pj, body)
         autosave_snapshot(project_dir, "save")  # capture every saved state
