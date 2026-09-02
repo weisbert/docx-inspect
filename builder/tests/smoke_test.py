@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -190,6 +191,8 @@ def run():
     try:
         failures += check_app_html()
         failures += check_assets()
+        failures += check_health()
+        failures += check_default_config_pick()
         failures += check_config()
         failures += check_project_roundtrip(root)
         failures += check_image(root)
@@ -233,6 +236,61 @@ def check_app_html():
     s2, _ = call("GET", "/")
     f += expect(s2 == 200, "GET / (app.html)", "status=%s" % s2)
     return f
+
+
+def check_health():
+    """/api/health also says WHICH template config the server picked up. The
+    launcher passes no --config, so that answer is not a given."""
+    s, body = call("GET", "/api/health")
+    ok = (s == 200 and isinstance(body, dict) and body.get("ok") is True
+          and str(body.get("config") or "").endswith("template_config_test.json"))
+    return expect(ok, "GET /api/health names the active config",
+                  "status=%s body=%r" % (s, body))
+
+
+def check_default_config_pick():
+    """Auto-detect must not choose in silence.
+
+    start.bat passes no --config, so default_config_path() decides which
+    template config the whole session renders against. One match is a fact and
+    stays quiet; several are a guess, and against the old code (a bare
+    sorted(glob)[0]) nothing at all was said -- the three ambiguity checks below
+    fail on it while the return value stays what it always was.
+    """
+    tmp = tempfile.mkdtemp(prefix="builder_cfgpick_")
+    try:
+        said = []
+        f = expect(server.default_config_path(tmp, said.append) is None and not said,
+                   "default config: no match -> None, and nothing said",
+                   "said=%r" % said)
+
+        first = os.path.join(tmp, "template_config_alpha.json")
+        with open(first, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        said = []
+        f += expect(server.default_config_path(tmp, said.append) == first and not said,
+                    "default config: a single match is taken in silence",
+                    "said=%r" % said)
+
+        second = os.path.join(tmp, "template_config_omega.json")
+        with open(second, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        said = []
+        got = server.default_config_path(tmp, said.append)
+        msg = "".join(said)
+        f += expect(got == first,
+                    "default config: the pick itself is unchanged", "got=%r" % got)
+        f += expect("WARNING" in msg and first in msg and second in msg,
+                    "default config: an ambiguous pick names every candidate",
+                    "msg=%r" % msg)
+        f += expect("chosen ->" in msg and first in msg.split("chosen ->")[1],
+                    "default config: it marks the one that was chosen",
+                    "msg=%r" % msg)
+        f += expect("--config" in msg and "BUILDER_TEMPLATE_CONFIG" in msg,
+                    "default config: it says how to pick another", "msg=%r" % msg)
+        return f
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def check_assets():

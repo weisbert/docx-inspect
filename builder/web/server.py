@@ -1768,7 +1768,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/version":
                 return self._api_version()
             if path == "/api/health":
-                return self._send_json({"ok": True})
+                # `config` says WHICH template config this server was started
+                # against -- the launcher can auto-detect it, so the answer is
+                # not always the one the reader assumes.
+                return self._send_json({"ok": True,
+                                        "config": CFG.template_config_path})
 
             return self._send_error_json("not found: %s" % path, status=404)
         except Exception as exc:
@@ -3220,19 +3224,42 @@ def make_server(port=None, root=None, config_path=None, bind="127.0.0.1"):
     return httpd
 
 
-def default_config_path():
+def default_config_path(local_dir=None, warn=None):
     """Best-effort default template config path.
 
     Prefer an explicit --config / BUILDER_TEMPLATE_CONFIG. Otherwise look in a
-    sibling `local/` folder for a single `template_config_*.json` and use it.
+    sibling `local/` folder for a `template_config_*.json` and use it.
     Returns None if nothing is found (the server still starts; endpoints that
     need the config then report a clean error).
+
+    A SINGLE match is a fact; several are a guess, and a silent guess is the
+    one that costs an afternoon -- the launcher passes no --config, so every
+    page would be styled and captioned by whichever file happens to sort first
+    with nothing on screen to say so. When there is more than one, name them
+    all, say which was taken, and say how to take another.
+
+    ``local_dir`` and ``warn`` exist so this is testable without a real local
+    folder; the defaults are the shipped behaviour.
     """
     import glob
 
-    local_dir = os.path.abspath(os.path.join(HERE, "..", "..", "local"))
-    matches = sorted(glob.glob(os.path.join(local_dir, "template_config_*.json")))
-    return matches[0] if matches else None
+    if local_dir is None:
+        local_dir = os.path.join(HERE, "..", "..", "local")
+    local_dir = os.path.abspath(local_dir)
+    pattern = os.path.join(local_dir, "template_config_*.json")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        return None
+    chosen = matches[0]
+    if len(matches) > 1:
+        say = warn if warn is not None else sys.stderr.write
+        say("WARNING: %d template configs match %s; one had to be picked.\n"
+            % (len(matches), pattern))
+        for m in matches:
+            say("  %s %s\n" % ("chosen ->" if m == chosen else "         ", m))
+        say("Pass --config <path> or set BUILDER_TEMPLATE_CONFIG to pick "
+            "another one.\n")
+    return chosen
 
 
 def default_reports_root():
