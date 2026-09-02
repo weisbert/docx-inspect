@@ -1349,13 +1349,20 @@ def _build_outline(doc, cfg, outline, names, on_progress=None, section_only=None
     def warn(entry):
         state["warnings"].append(entry)
 
-    # Progress: one step per heading + one per rendered block (a fixed_body counts
-    # as one). Total is pre-counted so the callback reports a real fraction. A
-    # progress sink must NEVER break a render, so its exceptions are swallowed.
+    # Progress: one step per heading + one per rendered block. A fixed_body
+    # counts as one -- but only when its key RESOLVES, because that is the only
+    # case in which the render loop below reports once for the whole section;
+    # a key this template does not have falls back to the section's own blocks
+    # and reports once per block, which counted as one step here and walked the
+    # progress bar past its own total. Same test as the loop, from the same map.
+    # Total is pre-counted so the callback reports a real fraction. A progress
+    # sink must NEVER break a render, so its exceptions are swallowed.
     def _steps(nodes):
         n = 0
         for nd in nodes or []:
-            n += 1 + (1 if nd.get("fixed_body") else len(nd.get("blocks") or []))
+            fb_key = nd.get("fixed_body")
+            resolved = bool(fb_key) and fb_key in fixed_bodies
+            n += 1 + (1 if resolved else len(nd.get("blocks") or []))
             n += _steps(nd.get("children"))
         return n
     total_steps = _steps([chain[-1][0]] if chain else outline) or 1

@@ -275,6 +275,26 @@ def main():
         check("with the key still there the blocks are ignored",
               body_paragraphs(f4) == before,
               "the engine no longer lets a fixed body win over blocks")
+
+        # 5. A KEY THIS TEMPLATE DOES NOT HAVE. The render falls back to the
+        # section's own blocks -- one step reported per block -- but the step
+        # COUNT gave such a section one step for the whole thing, so the export
+        # progress ran past its own total and the bar sat full while the render
+        # was still going. It is a report bound to another template, which is
+        # exactly when an export is being watched.
+        stray = project_with({"id": "n-1", "title": "Preface",
+                              "fixed_body": "a-key-this-template-does-not-have",
+                              "blocks": lossy, "children": []})
+        d5 = tempfile.mkdtemp(prefix="rw-fixed-body-stray-")
+        dirs.append(d5)
+        prog = []
+        engine.render_report(stray, cfg, d5, os.path.join(d5, "out.docx"),
+                             on_progress=lambda d, t, _l: prog.append((d, t)))
+        totals = sorted({t for _d, t in prog})
+        dones = [d for d, _t in prog]
+        check("an unresolvable key does not walk the progress past its own total",
+              bool(prog) and len(totals) == 1 and dones == list(range(1, totals[0] + 1)),
+              "%d steps reported against a total of %r" % (len(dones), totals))
     finally:
         for d in dirs:
             shutil.rmtree(d, ignore_errors=True)
