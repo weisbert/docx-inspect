@@ -61,6 +61,28 @@ def _vbottom(cell):
     tcPr.append(va)
 
 
+def _cell_grid(table):
+    """All cells of ``table`` as a row-major 2D list, fetched ONCE.
+
+    python-docx's ``Table.cell(r, c)`` rebuilds the table's ENTIRE cell list
+    (walking every ``w:tc`` and expanding merges) on every single call, so
+    calling it inside a loop over rows x cols is O(rows^2 * cols^2) instead of
+    O(rows * cols) -- exactly the pattern that made the compliance/free-table
+    renderers quadratic in row count. Call this once right after
+    ``doc.add_table(...)`` (before any merge/width/shading calls) and index
+    ``grid[r][c]`` instead of calling ``table.cell(r, c)`` again.
+
+    A later ``.merge()`` on two cells taken from this cache still lands
+    correctly: python-docx keeps the TOP-LEFT ``w:tc`` element as the single
+    surviving element of a merge (the other cells' content is moved into it
+    and their elements are dropped), so a reference to the top-left cell taken
+    before the merge stays valid for writing into afterward -- which is
+    exactly how every merge in this module is used (merge first, then write
+    into the top-left cell via the same reference).
+    """
+    return [list(row.cells) for row in table.rows]
+
+
 def _table_fixed_layout(table):
     tblPr = table._tbl.tblPr
     layout = OxmlElement("w:tblLayout")
@@ -368,11 +390,14 @@ def render_datatable(doc, data, cfg):
                    color=bd.get("color", "000000"))
     _cell_margins(table, top=0, bottom=0, left=28, right=28)
 
+    rows_list = list(table.rows)
+    grid = _cell_grid(table)
+
     # column widths (per-kind), applied to every row so the fixed layout sticks
     for idx, p in enumerate(plan):
         cw = Cm(p["w"])
         for r in range(nrows):
-            table.cell(r, idx).width = cw
+            grid[r][idx].width = cw
 
     col_of = {}
     group_axis_cols = {g["key"]: [] for g in groups}
@@ -386,27 +411,27 @@ def render_datatable(doc, data, cfg):
     # ---- header band: 3 rows ----
     for r in range(3):
         for c in range(ncols):
-            _shade(table.cell(r, c), fills["header"])
+            _shade(grid[r][c], fills["header"])
     for key, label in (("cat", "Category"), ("item", "Item"),
                        ("spec", "Spec"), ("unit", "Unit")):
         if key in col_of:
             c = col_of[key]
-            table.cell(0, c).merge(table.cell(2, c))
-            _set_cell_text(table.cell(0, c), label, font_pt, bold=True)
+            grid[0][c].merge(grid[2][c])
+            _set_cell_text(grid[0][c], label, font_pt, bold=True)
     for g in groups:
         cc = group_axis_cols[g["key"]]
-        table.cell(0, cc[0]).merge(table.cell(0, cc[-1]))
-        _set_cell_text(table.cell(0, cc[0]), g["title"], font_pt, bold=True)
+        grid[0][cc[0]].merge(grid[0][cc[-1]])
+        _set_cell_text(grid[0][cc[0]], g["title"], font_pt, bold=True)
         if g.get("stage"):
-            table.cell(1, cc[0]).merge(table.cell(1, cc[-1]))
-            _set_cell_text(table.cell(1, cc[0]), g["stage"], font_pt, bold=True)
+            grid[1][cc[0]].merge(grid[1][cc[-1]])
+            _set_cell_text(grid[1][cc[0]], g["stage"], font_pt, bold=True)
         for ai, ax in enumerate(g["axes"]):
-            _set_cell_text(table.cell(2, col_of[("axis", g["key"], ai)]), ax,
+            _set_cell_text(grid[2][col_of[("axis", g["key"], ai)]], ax,
                            font_pt, bold=True)
 
     # repeat the 3 header rows on page breaks
     for hr in range(3):
-        trPr = table.rows[hr]._tr.get_or_add_trPr()
+        trPr = rows_list[hr]._tr.get_or_add_trPr()
         th = OxmlElement("w:tblHeader")
         th.set(qn("w:val"), "true")
         trPr.append(th)
@@ -486,15 +511,15 @@ def render_datatable(doc, data, cfg):
             for idx, p in enumerate(plan):
                 if p["kind"] == "cat":
                     continue
-                _shade(table.cell(r, idx), band)
+                _shade(grid[r][idx], band)
                 if p["kind"] == "item":
-                    _set_cell_text(table.cell(r, idx), row.get("item", ""), font_pt)
+                    _set_cell_text(grid[r][idx], row.get("item", ""), font_pt)
                     _clip_check(row.get("item"), p["w"], "item", row_label)
                 elif p["kind"] == "unit":
-                    _set_cell_text(table.cell(r, idx), row.get("unit", ""), font_pt)
+                    _set_cell_text(grid[r][idx], row.get("unit", ""), font_pt)
                     _clip_check(row.get("unit"), p["w"], "unit", row_label)
                 elif p["kind"] == "spec":
-                    _set_cell_text(table.cell(r, idx), row.get("spec"), font_pt)
+                    _set_cell_text(grid[r][idx], row.get("spec"), font_pt)
                     _clip_check(row.get("spec"), p["w"], "spec", row_label)
                 elif p["kind"] == "axis":
                     if span and p["role"] == "sim" and p["group"] in group_span:
@@ -502,7 +527,7 @@ def render_datatable(doc, data, cfg):
                         # cell; the rest blanked so the merge does not duplicate.
                         first_col, gval = group_span[p["group"]]
                         txt = _fmt_val(gval) if idx == first_col else ""
-                        _set_cell_text(table.cell(r, idx), txt, font_pt)
+                        _set_cell_text(grid[r][idx], txt, font_pt)
                         continue
                     v = _axis_value(row, p["group"], p["axis"])
                     red = (p["role"] == "sim"
@@ -511,7 +536,7 @@ def render_datatable(doc, data, cfg):
                     # flag survives a grayscale print. Bold adds no measurable
                     # width here (fixed column layout) so it cannot push a cell to
                     # wrap/clip -- the EXACTLY row-height no-spill guarantee holds.
-                    _set_cell_text(table.cell(r, idx), _fmt_val(v), font_pt,
+                    _set_cell_text(grid[r][idx], _fmt_val(v), font_pt,
                                    bold=red, color=(flag_color if red else None))
                     _clip_check(_fmt_val(v), p["w"],
                                 "%s.%s" % (p["group"], p["label"]), row_label)
@@ -520,14 +545,14 @@ def render_datatable(doc, data, cfg):
                 for g in sim_groups:
                     cc = group_axis_cols[g["key"]]
                     if len(cc) >= 2:
-                        table.cell(r, cc[0]).merge(table.cell(r, cc[-1]))
+                        grid[r][cc[0]].merge(grid[r][cc[-1]])
         # vertical merge of the category column
         cc = col_of["cat"]
         r0, r1 = start + g0, start + g1
         band = fills["setting"] if rows[g0].get("kind") in setting_kinds else fills["result"]
-        table.cell(r0, cc).merge(table.cell(r1, cc))
-        _shade(table.cell(r0, cc), band)
-        _set_cell_text(table.cell(r0, cc), rows[g0].get("cat", ""), font_pt, bold=True)
+        grid[r0][cc].merge(grid[r1][cc])
+        _shade(grid[r0][cc], band)
+        _set_cell_text(grid[r0][cc], rows[g0].get("cat", ""), font_pt, bold=True)
 
     # sim_span diagnostics (emitted once per table, not per row). Each sim group
     # merges independently, so a group needs >=2 axis columns to merge at all.
@@ -542,8 +567,8 @@ def render_datatable(doc, data, cfg):
 
     # ---- exact fixed row heights: shrink inline, never spill / rotate ----
     for r in range(nrows):
-        table.rows[r].height = Pt(row_h["header"] if r < 3 else row_h["data"])
-        table.rows[r].height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+        rows_list[r].height = Pt(row_h["header"] if r < 3 else row_h["data"])
+        rows_list[r].height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
 
     # RETURN SHAPE (CONTRACT): a result dict. ``table`` is the python-docx Table
     # object (same one previously returned bare); the rest is render metadata the
@@ -695,11 +720,14 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     _table_borders(table, val=bd.get("val", "single"), sz=bd.get("sz", 4),
                    color=bd.get("color", "000000"))
 
+    rows_list = list(table.rows)
+    grid = _cell_grid(table)
+
     if col_w:
         for idx, cw in enumerate(col_w):
             for r in range(nrows):
                 if idx < ncols:
-                    table.cell(r, idx).width = Cm(cw)
+                    grid[r][idx].width = Cm(cw)
 
     for r, rowvals in enumerate(rows):
         cells = _row_cells(rowvals)
@@ -715,7 +743,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
         is_head = r < header_rows or kind == "header"
         for c in range(ncols):
             val = cells[c] if c < len(cells) else ""
-            cell = table.cell(r, c)
+            cell = grid[r][c]
             if fill:
                 _shade(cell, fill)
             runs = val.get("runs") if isinstance(val, dict) else None
@@ -738,7 +766,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
         for r in range(nrows):
             h = (row_h.get(str(r), row_h.get(r)) if isinstance(row_h, dict) else row_h)
             if h is not None:
-                table.rows[r].height = Cm(float(h))
-                table.rows[r].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+                rows_list[r].height = Cm(float(h))
+                rows_list[r].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
 
     return {"table": table, "total_rows": nrows, "flagged_rows": 0, "warnings": []}

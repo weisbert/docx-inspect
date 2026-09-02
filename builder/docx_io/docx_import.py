@@ -379,6 +379,38 @@ def classify_table(tbl):
     return "table"
 
 
+def _tc_grid(tbl):
+    """All cells of ``tbl`` as a row-major list of lists of python-docx ``_Cell``
+    (``None`` for a layout-grid position no ``w:tc`` covers in that row -- Word
+    allows a row to start late / end early; see ``_Row.cells`` / ``grid_cols_before``).
+
+    Built from each row's ``.cells`` (one call per row) instead of
+    ``tbl.cell(r, c)`` per cell: python-docx's ``Table.cell()`` rebuilds the
+    WHOLE table's cell list (a full walk of every ``w:tc``, expanding merges)
+    on every single call, so calling it inside a nested row x col loop turns a
+    linear read into O(rows^2 * cols^2). Every grid/fill reader below used to
+    do exactly that.
+    """
+    try:
+        n_cols = len(tbl.columns)
+    except Exception:
+        return []
+    grid = []
+    for row in tbl.rows:
+        try:
+            cells = list(row.cells)
+            before = row.grid_cols_before
+        except Exception:
+            cells, before = [], 0
+        aligned = [None] * n_cols
+        for i, cell in enumerate(cells):
+            pos = before + i
+            if 0 <= pos < n_cols:
+                aligned[pos] = cell
+        grid.append(aligned)
+    return grid
+
+
 def _docx_table_to_grid(tbl):
     """Convert a docx table to an xlsx-style grid (list[list[str|None]]).
 
@@ -387,21 +419,15 @@ def _docx_table_to_grid(tbl):
     across its columns, like a merged xlsx cell). Whitespace-only cells -> None.
     """
     grid = []
-    try:
-        n_rows = len(tbl.rows)
-        n_cols = len(tbl.columns)
-    except Exception:
-        return grid
-    for r in range(n_rows):
-        row = []
-        for c in range(n_cols):
+    for row in _tc_grid(tbl):
+        out_row = []
+        for cell in row:
             try:
-                txt = tbl.cell(r, c).text
+                txt = (cell.text or "").strip() if cell is not None else ""
             except Exception:
                 txt = ""
-            txt = (txt or "").strip()
-            row.append(txt if txt else None)
-        grid.append(row)
+            out_row.append(txt if txt else None)
+        grid.append(out_row)
     return grid
 
 
@@ -409,15 +435,13 @@ def _docx_table_row_fills(tbl):
     """Per-row dominant cell shading hex (upper-case) or None -> lets fills survive
     the round-trip (plain-table row_fills; datatable setting-row detection)."""
     out = []
-    try:
-        n_rows, n_cols = len(tbl.rows), len(tbl.columns)
-    except Exception:
-        return out
-    for r in range(n_rows):
+    for row in _tc_grid(tbl):
         hexes = []
-        for c in range(n_cols):
+        for cell in row:
+            if cell is None:
+                continue
             try:
-                h = _cell_fill_hex(tbl.cell(r, c)._tc)
+                h = _cell_fill_hex(cell._tc)
             except Exception:
                 h = None
             if h:
@@ -646,8 +670,8 @@ def _free_table_model(tbl, warn):
     rows = []
     merges = []
     try:
-        n_rows = len(tbl.rows)
-        n_cols = len(tbl.columns)
+        len(tbl.rows)
+        len(tbl.columns)
     except Exception:
         return {"rows": [], "header_rows": 1, "merges": [], "col_w": []}
 
@@ -657,13 +681,20 @@ def _free_table_model(tbl, warn):
     # CPython recycles its id() and a later DISTINCT cell can collide with an
     # earlier one -> it is misread as a merge continuation and BLANKED (the
     # value silently disappears on import). Holding all tc elements at once makes
-    # id() a stable per-element identity again.
+    # id() a stable per-element identity again. Fetched via _tc_grid() (one
+    # .cells call per row) rather than tbl.cell(r, c) per cell -- the latter
+    # rebuilds the whole table's cell list on every call (see _tc_grid's
+    # docstring), which made this O(rows^2 * cols^2) for no reason: nothing
+    # here needs the per-call rebuild, only the stable references.
     tc_grid, txt_grid = [], []
-    for r in range(n_rows):
+    for row in _tc_grid(tbl):
         tc_row, txt_row = [], []
-        for c in range(n_cols):
+        for cell in row:
+            if cell is None:
+                tc_row.append(None)
+                txt_row.append("")
+                continue
             try:
-                cell = tbl.cell(r, c)
                 tc_row.append(cell._tc)
                 txt_row.append((cell.text or "").strip())
             except Exception:
@@ -671,6 +702,8 @@ def _free_table_model(tbl, warn):
                 txt_row.append("")
         tc_grid.append(tc_row)
         txt_grid.append(txt_row)
+    n_rows = len(tc_grid)
+    n_cols = len(tc_grid[0]) if tc_grid else 0
 
     # tc id -> top-left (r, c) and accumulated span coverage
     seen = {}
@@ -729,16 +762,14 @@ def _imagegrid_from_table(tbl, document, docx_path, images_dir, img_seq, warn):
     cell's image in reading order so nothing is lost. sub_captions=True when a cell
     also carries caption text beneath its picture (the (a)(b) sub-labels)."""
     try:
-        n_rows, n_cols = len(tbl.rows), len(tbl.columns)
+        n_cols = len(tbl.columns)
     except Exception:
-        n_rows, n_cols = 0, 0
+        n_cols = 0
     items = []
     has_sub = False
-    for r in range(n_rows):
-        for c in range(n_cols):
-            try:
-                cell = tbl.cell(r, c)
-            except Exception:
+    for row in _tc_grid(tbl):
+        for cell in row:
+            if cell is None:
                 continue
             cell_imgs = []
             for para in cell.paragraphs:
