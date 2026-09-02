@@ -2668,13 +2668,42 @@ export function Editor(props) {
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, []);
 
-  /* ---- a jump requested by the preview or the checklist ---- */
+  /* ---- a jump requested by the preview or the checklist ----
+   *
+   * Two things kept a jump from landing ON the block it names.
+   *
+   * The card is often not in the document yet: a jump from the preview names a
+   * block in ANOTHER section, so the navigation switches sections and this
+   * effect runs before that section's cards are mounted. One querySelector then
+   * found nothing and the canvas simply stayed at the top of the new section,
+   * with the block that was asked for somewhere below the fold. So the landing
+   * is retried for a short while and gives up quietly.
+   *
+   * And the canvas marks the SELECTED CARD by the block index that card starts
+   * at, not by a block id -- a prose card holds several blocks and only some of
+   * them carry ids. Setting the id alone therefore scrolled to a card that was
+   * never marked; the index the card wrapper already publishes is what draws it.
+   */
   useEffect(() => {
     const target = ui && ui.focusBlock;
     if (!target) return;
     setSelectedBlock(target);
-    const el = document.querySelector('[data-block-id="' + target + '"]');
-    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+    let timer = null;
+    let tries = 0;
+    const land = () => {
+      timer = null;
+      const el = document.querySelector('[data-block-id="' + target + '"]');
+      if (el) {
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        const start = parseInt(el.getAttribute('data-card-start'), 10);
+        if (!isNaN(start)) setSelectedStart(start);
+        return;
+      }
+      tries += 1;
+      if (tries < 20) timer = window.setTimeout(land, 50);
+    };
+    land();
+    return () => { if (timer) window.clearTimeout(timer); };
   }, [ui && ui.focusBlock, ui && ui.focusAt]);
 
   /* ---- deleting, with an undo ---- */

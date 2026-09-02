@@ -52,6 +52,12 @@
  *   3. With saves working, no such notice appears.
  *   4. Every panel of an image grid carries its label, and a panel with no
  *      label of its own gets the engine's (c). (before the fix: none of them)
+ *   5. Jump to editor lands ON the block: the editor goes to its section, the
+ *      card is scrolled into view and it is marked. (before the fix: the
+ *      section switched, the canvas stayed at its top with the block below the
+ *      fold, and nothing was marked -- the jump ran before the new section's
+ *      cards existed, and the mark is keyed on the card's start index, which
+ *      nothing set)
  *
  * The section render itself is answered by the test, not by Word: this file is
  * about which bytes the render is asked to work from, and a machine without
@@ -99,6 +105,10 @@ const LATER_TEXT = 'First section, typed while the disk was refusing writes.';
 const BS = String.fromCharCode(92);
 
 const GRID_FILES = ['corner_tt.png', 'corner_ff.png', 'corner_ss.png'];
+const GRID_BLOCK = 'b-grid';
+const FILLER_IDS = ['b-f1', 'b-f2', 'b-f3', 'b-f4', 'b-f5', 'b-f6'];
+const FILLER = ('The divider is characterised across supply and temperature, and the '
+  + 'measured figures are collected here. ').repeat(6);
 const SUB_ONE = 'Typical corner';
 const SUB_TWO = 'Fast corner';
 
@@ -134,8 +144,15 @@ function sampleReport() {
         id: 'n-2',
         title: 'Design description',
         blocks: [
+          // Enough text above the grid that a canvas sitting at the top of this
+          // section does NOT have the grid on screen: a jump that only switched
+          // sections would leave the block it names below the fold.
+          ...FILLER_IDS.map((id, i) => ({
+            id: id, type: 'para', cardStart: true,
+            runs: [{ t: 'Filler paragraph ' + (i + 1) + '. ' + FILLER }],
+          })),
           {
-            id: 'b-2',
+            id: GRID_BLOCK,
             type: 'imagegrid',
             cols: 3,
             rows: 1,
@@ -542,6 +559,53 @@ const subCaptions = (page) => page.evaluate(() => Array.from(
       subs[0] === SUB_ONE && subs[1] === SUB_TWO, JSON.stringify(subs));
     check('a panel with no label of its own gets the engine fallback',
       subs[2] === '(c)', JSON.stringify(subs));
+
+    /* ============================================================ *
+     * 5 - Jump to editor lands ON the block
+     * ============================================================ */
+
+    console.log('\njump to editor  (PIN: fails before the fix)');
+
+    // The editor is on section 1; the grid is the last card of section 2,
+    // under six paragraphs, so a jump that only switched sections leaves it
+    // off screen and marks nothing.
+    const before = await page.evaluate(async () => {
+      const { store } = await import('/assets/v2/js/store.js');
+      return store.get().route.node;
+    });
+    check('the editor starts on another section', before !== 'n-2', String(before));
+
+    const jumped = await page.evaluate((id) => {
+      const wrap = document.querySelector('[data-block="' + id + '"]');
+      if (!wrap) return 'the block is not in the preview';
+      const btn = wrap.querySelector('.rw-paper__jump button');
+      if (!btn) return 'no jump control on the block';
+      btn.click();
+      return 'ok';
+    }, GRID_BLOCK);
+    check('the preview offers Jump to editor on that block', jumped === 'ok', String(jumped));
+    await wait(2500);
+
+    const landing = await page.evaluate(async (id) => {
+      const { store } = await import('/assets/v2/js/store.js');
+      const card = document.querySelector('[data-block-id="' + id + '"]');
+      const canvas = document.querySelector('.rw-canvas');
+      if (!card || !canvas) return { node: store.get().route.node, card: !!card };
+      const c = card.getBoundingClientRect();
+      const v = canvas.getBoundingClientRect();
+      return {
+        node: store.get().route.node,
+        card: true,
+        marked: !!card.querySelector('.rw-card--selected'),
+        onScreen: c.top < v.bottom && c.bottom > v.top,
+      };
+    }, GRID_BLOCK);
+    check('the editor went to the section that holds it',
+      landing.node === 'n-2', JSON.stringify(landing));
+    check('the block is scrolled into view rather than left below the fold',
+      landing.onScreen === true, JSON.stringify(landing));
+    check('and the card it lands on is marked',
+      landing.marked === true, JSON.stringify(landing));
   } catch (err) {
     check('the test ran to the end', false, err && err.stack ? err.stack : String(err));
   } finally {
