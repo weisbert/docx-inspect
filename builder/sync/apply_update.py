@@ -227,10 +227,13 @@ def check_baseline(root, rel, package_base, dir_name=None):
 def snapshot_project(project_dir, reason="save"):
     """Copy a report's project.json into ``<report>/_autosave/<ts>__<reason>.json``
     before something overwrites it -- the same rolling snapshot layout the
-    history timeline reads. Deduplicates against the newest snapshot (returning
-    its path either way, so the caller always has something to point at) and
-    prunes to AUTOSAVE_KEEP. Best-effort: a snapshot must never be able to break
-    the write it protects."""
+    history timeline reads. An untagged snapshot (reason ``save``) deduplicates
+    against the newest one, returning its path either way so the caller always
+    has something to point at. A TAGGED one is always written: it is the
+    timeline's only record that the event happened, and the bytes it holds are
+    by definition the ones the ordinary save snapshot already stored. Prunes to
+    AUTOSAVE_KEEP. Best-effort: a snapshot must never be able to break the write
+    it protects."""
     try:
         pj = os.path.join(project_dir, "project.json")
         if not os.path.isfile(pj):
@@ -238,7 +241,8 @@ def snapshot_project(project_dir, reason="save"):
         data = _read(pj)
         adir = os.path.join(project_dir, AUTOSAVE_DIRNAME)
         existing = _snapshot_paths(adir)
-        if existing and _read(existing[-1]) == data:
+        if (existing and _sanitize_tag(reason) == "save"
+                and _read(existing[-1]) == data):
             return existing[-1].replace("\\", "/")
         os.makedirs(adir, exist_ok=True)
         stem = "%s__%s" % (_ts(), _sanitize_tag(reason))

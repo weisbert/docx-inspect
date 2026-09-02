@@ -52,9 +52,29 @@ def main():
         assert snaps[0]["mtime"] >= snaps[1]["mtime"], "newest first"
         assert snaps[0]["reason"] == "save", snaps[0]
 
-        # 4a) snapshot-all when nothing changed since last snapshot -> dedupe (empty),
-        #     but the current state is still captured in _autosave/ (that's the point).
-        assert server.autosave_all(root, "preapply") == [], "identical -> dedupe"
+        # 3b) a TAGGED snapshot is an EVENT, not a state: it is written even
+        #     when its bytes repeat the newest snapshot's. The save loop has
+        #     just stored those very bytes, so deduping by content deleted the
+        #     record of the apply / paste / restore itself and left the timeline
+        #     an unbroken row of automatic snapshots.
+        before_tagged = len(server.list_autosaves(pdir))
+        n_pre = server.autosave_snapshot(pdir, "preapply")
+        assert n_pre and "__preapply" in n_pre, \
+            "a tagged snapshot must be recorded even when the bytes repeat"
+        n_res = server.autosave_snapshot(pdir, "prerestore")
+        assert n_res and "__prerestore" in n_res, \
+            "two events in a row are two entries, whatever the bytes say"
+        listed = server.list_autosaves(pdir)
+        assert len(listed) == before_tagged + 2, listed
+        assert [s["reason"] for s in listed[:2]] == ["prerestore", "preapply"], listed
+        # and the untagged snapshot still dedupes against the newest one
+        assert server.autosave_snapshot(pdir, "save") is None, \
+            "an unchanged save must not create a snapshot"
+
+        # 4a) snapshot-all takes the preapply snapshot for every project, again
+        #     whether or not the content moved since the last one.
+        made = server.autosave_all(root, "preapply")
+        assert any(m.startswith("PROJ/") and "__preapply" in m for m in made), made
         # 4b) after an edit, snapshot-all captures it with a preapply tag
         server.atomic_write(pj, _proj(pdir, "v3"))
         made = server.autosave_all(root, "preapply")

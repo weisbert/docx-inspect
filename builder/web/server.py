@@ -212,6 +212,16 @@ _RESERVED_ROOT_DIRS = {"_backups", "_updates", "_outbox", "_trash",
                        "_autosave", "__pycache__", "assets"}
 
 
+# The one reason that names no event: the periodic capture of a saved file.
+# Everything else is something that happened to the report, and the timeline is
+# the only place it is recorded.
+AUTOSAVE_PLAIN_REASON = "save"
+
+
+def _is_untagged_reason(reason):
+    return (_sanitize_name(reason) or AUTOSAVE_PLAIN_REASON) == AUTOSAVE_PLAIN_REASON
+
+
 def _autosave_dir(project_dir):
     return os.path.join(project_dir, AUTOSAVE_DIRNAME)
 
@@ -239,9 +249,20 @@ def _autosave_paths(project_dir):
 def autosave_snapshot(project_dir, reason="save"):
     """Copy the current project.json into _autosave/<ts>__<reason>.json.
 
-    Skips if identical to the newest snapshot (dedupe). Prunes to the newest
-    AUTOSAVE_KEEP. Best-effort: never raises -- a snapshot must never break a
-    save. Returns the snapshot filename or None.
+    An UNTAGGED snapshot -- the ordinary per-save one -- is skipped when its
+    bytes repeat the newest snapshot's, because a save that changed nothing is
+    not a state worth keeping.
+
+    A TAGGED one is always written. It is taken immediately before an apply, a
+    paste, a restore or a rename, so the per-save snapshot that precedes it
+    holds exactly the same bytes, and deduping by content therefore threw away
+    the only record that the event happened at all: the timeline read back as an
+    unbroken row of automatic snapshots, `Roll back` was never offered, and the
+    Restores filter was permanently empty. The bytes may repeat; the event does
+    not.
+
+    Prunes to the newest AUTOSAVE_KEEP. Best-effort: never raises -- a snapshot
+    must never break a save. Returns the snapshot filename or None.
     """
     try:
         pj = os.path.join(project_dir, "project.json")
@@ -250,7 +271,7 @@ def autosave_snapshot(project_dir, reason="save"):
         with open(pj, "rb") as fh:
             data = fh.read()
         existing = _autosave_paths(project_dir)
-        if existing:
+        if existing and _is_untagged_reason(reason):
             try:
                 with open(existing[-1], "rb") as fh:
                     if fh.read() == data:
