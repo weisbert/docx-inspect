@@ -967,15 +967,46 @@ export function TableBlock(props) {
 
     // The control pins the frozen columns by offsetting each cell from the
     // scroll position, but its offset assumes its own row-number gutter, which
-    // this grid replaces with a '#' column of its own. Correcting it is one
-    // line: a frozen cell is pinned exactly when it is shifted right by the
-    // distance the body has been scrolled.
+    // this grid replaces with a '#' column of its own -- and it does not start
+    // pinning until the body has moved more than FIFTY pixels. Those first
+    // fifty are the ones the eye is actually following: the row's number, its
+    // category and its name slid off the left edge and then snapped back, so
+    // for the whole first half-inch of every sideways scroll the value under
+    // the cursor belonged to a row with nothing naming it.
+    //
+    // So the marking is done here, from the first pixel, exactly as the control
+    // does it above fifty: a body cell is `position: relative`, so it is pinned
+    // by being shifted right by the distance the body has scrolled; a header
+    // cell is `position: sticky`, so it is pinned by being given the left edge
+    // it should stop at, which is the sum of the widths in front of it. The
+    // control's own pass still runs first and agrees with this one; below its
+    // threshold it clears the marks and this puts them back.
     const content = host.querySelector('.jss_content');
+    const frozenCount = Math.max(0, Number(options.freezeColumns) || 0);
+    const frozenStops = [];
+    let frozenRun = 0;
+    for (let i = 0; i < frozenCount; i++) {
+      frozenStops.push(frozenRun);
+      frozenRun += Number((model.plan[i] || {}).width) || 0;
+    }
     const pinFrozen = () => {
       if (!content) return;
-      const left = content.scrollLeft + 'px';
-      const cells = host.querySelectorAll('.jss_worksheet > tbody > tr > td.jss_freezed');
-      for (let i = 0; i < cells.length; i++) cells[i].style.left = left;
+      const scrolled = content.scrollLeft;
+      const pinned = scrolled > 0;
+      const heads = (ws && ws.headers) || [];
+      for (let i = 0; i < frozenCount; i++) {
+        const head = heads[i];
+        if (head && head.classList) {
+          head.classList.toggle('jss_freezed', pinned);
+          head.style.left = pinned ? frozenStops[i] + 'px' : '';
+        }
+        const cells = host.querySelectorAll(
+          '.jss_worksheet > tbody > tr > td[data-x="' + i + '"]');
+        for (let c = 0; c < cells.length; c++) {
+          cells[c].classList.toggle('jss_freezed', pinned);
+          cells[c].style.left = pinned ? scrolled + 'px' : '';
+        }
+      }
     };
     // A two-group table does not fit at 1440 even with the right panel folded
     // away, and the control draws no scrollbar of its own: the second group was
