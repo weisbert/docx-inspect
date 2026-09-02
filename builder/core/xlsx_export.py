@@ -5,10 +5,14 @@ table (yellow header band, category vertical merge, sim_span horizontal merge,
 condition-row shading, RED+bold out-of-spec cells).
 
 The compliance layout REUSES tables.py's structural helpers (make_groups,
-_plan_columns, _axis_value, flag_positions, _fmt_val) so the spreadsheet can never
-drift from the docx renderer -- the column plan, per-axis values and flag logic
-are computed by exactly the same code the engine uses. Only the cell painting
-differs (openpyxl instead of python-docx). ASCII-only / no company data.
+_plan_columns, _axis_value, _flags_from, _sim_axis_vals, _fmt_val) so the
+spreadsheet can never drift from the docx renderer -- the column plan,
+per-axis values and per-sim-group flag logic are computed by exactly the
+same code the engine uses (flags are computed per sim group, same as
+render_datatable; the flat-schema-only tables.flag_positions is NOT used
+here since it cannot see v2's per-group row["sims"] values). Only the cell
+painting differs (openpyxl instead of python-docx). ASCII-only / no company
+data.
 """
 import io
 
@@ -167,7 +171,12 @@ def build_datatable_xlsx(data, comp_cfg):
             row = rows[gi]
             xr = start + gi + 1                 # openpyxl row (1-based)
             band = _fill(fills["setting"] if row.get("kind") in setting_kinds else fills["result"])
-            flags = tables.flag_positions(row)
+            # Flag each sim group against ITS OWN values (per-sim), mirroring
+            # render_datatable -- NOT tables.flag_positions, which only reads the
+            # flat legacy sim_mtm and misjudges (or misses) v2 rows that carry
+            # per-group values under row["sims"][group_key].
+            flags_by_group = {g["key"]: tables._flags_from(row, *tables._sim_axis_vals(row, g["key"]))
+                              for g in sim_groups}
             # per-group span: each sim group merges its OWN axis cells (CDR 3->1,
             # PDR 3->1, separately) -- mirror render_datatable's per-group merge.
             span = bool(row.get("sim_span"))
@@ -202,7 +211,8 @@ def build_datatable_xlsx(data, comp_cfg):
                             _text(cell, tables._fmt_val(gval))
                         continue                # covered cells blanked; merged below
                     v = tables._axis_value(row, p["group"], p["axis"])
-                    red = (p["role"] == "sim" and p["axis"] in flags)
+                    red = (p["role"] == "sim"
+                           and p["axis"] in flags_by_group.get(p["group"], ()))
                     _text(cell, tables._fmt_val(v), bold=red, color=(flag_color if red else None))
                 # spacer: painted, left blank
             if span:

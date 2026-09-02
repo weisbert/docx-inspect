@@ -88,6 +88,53 @@ def main():
              if m.max_col > m.min_col and m.min_row == m.max_row and m.min_row > 3]
     check(len(horiz) >= 1, "sim_span merges the sim MIN/TYP/MAX cells horizontally")
 
+    print("== multi-sim-group flags (per-group, not the flat-schema helper) ==")
+    # row_a: two sim groups, ONLY the second violates its own limit. A stale flat
+    # sim_mtm also sits on the row (real rows can carry one left over) with a
+    # value that WOULD flag under the flat-schema helper (tables.flag_positions) --
+    # the fix must ignore it and flag purely from each group's own
+    # row["sims"][key] values, so it can never bleed into the other group.
+    # row_b: filled ONLY via row["sims"] (no flat sim_mtm key at all) and
+    # violates -- the flat-schema helper sees no sim_mtm and would flag nothing.
+    multi_data = {
+        "spec_name": "Spec", "show_spec": True,
+        "sims": [{"key": "g1", "title": "G1", "stage": "Pre"},
+                 {"key": "g2", "title": "G2", "stage": "Post"}],
+        "rows": [
+            {"cat": "X", "item": "row_a", "unit": "mV", "kind": "result",
+             "spec": 100, "spec_mtm": [None, 100, None],
+             "sim_mtm": [150, 20, 30],                  # stale flat: flags index 0
+             "sims": {"g1": {"mtm": [11, 21, 31]},       # in spec for g1
+                      "g2": {"mtm": [41, 51, 121]}},     # MAX 121 > 100 -> only g2
+             "limit": "le", "sim_span": False},
+            {"cat": "X", "item": "row_b", "unit": "mV", "kind": "result",
+             "spec": 60, "spec_mtm": [None, 60, None],
+             "sims": {"g1": {"mtm": [5, 6, 777]},        # MAX 777 > 60 -> violates
+                      "g2": {"mtm": [1, 2, 3]}},
+             "limit": "le", "sim_span": False},
+        ],
+    }
+    wm = _load(X.build_datatable_xlsx(multi_data, comp))
+
+    c121 = _find(wm, 121)
+    check(c121 is not None and _is_red(c121) and c121.font.bold,
+          "row_a: g2 MAX 121 (over its own spec) is RED + bold")
+    c41 = _find(wm, 41)
+    check(c41 is not None and not _is_red(c41), "row_a: g2 MIN 41 (in spec) is not red")
+    c51 = _find(wm, 51)
+    check(c51 is not None and not _is_red(c51), "row_a: g2 TYP 51 (in spec) is not red")
+    c11 = _find(wm, 11)
+    check(c11 is not None and not _is_red(c11),
+          "row_a: g1 MIN 11 is not red (stale flat sim_mtm[0]=150 must not leak into g1)")
+    c31 = _find(wm, 31)
+    check(c31 is not None and not _is_red(c31), "row_a: g1 MAX 31 (in spec for g1) is not red")
+
+    c777 = _find(wm, 777)
+    check(c777 is not None and _is_red(c777) and c777.font.bold,
+          "row_b: g1 MAX 777 (over spec, row has NO flat sim_mtm at all) is RED + bold")
+    c3 = _find(wm, 3)
+    check(c3 is not None and not _is_red(c3), "row_b: g2 MAX 3 (in spec) is not red")
+
     print("== free table ==")
     rows = [["Style", "Example"],
             ["bold+red", {"runs": [{"t": "Bold", "b": True}, {"t": " red", "color": "FF0000"}]}],
