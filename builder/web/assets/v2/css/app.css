@@ -420,7 +420,7 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-tree { display: flex; flex-direction: column; gap: 1px; }
 .rw-tree__row {
   display: flex; align-items: center; gap: var(--sp-6);
-  width: 100%; min-height: 24px; padding: 0 var(--sp-6);
+  width: 100%; min-width: 0; min-height: 24px; padding: 0 var(--sp-6);
   border: 0; border-radius: var(--r-ctl); background: transparent;
   color: var(--fg-strong); font-size: var(--fs-body); text-align: left; cursor: pointer;
 }
@@ -429,7 +429,18 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-tree__row--l2 { padding-left: var(--sp-22); }
 .rw-tree__row--l3 { padding-left: var(--sp-30); font-size: var(--fs-meta); color: var(--fg-muted); }
 .rw-tree__twisty { flex: 0 0 auto; width: 12px; color: var(--fg-dim); font-size: var(--fs-micro); }
-.rw-tree__label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* min-width:0 is what makes the ellipsis above it real. A flex item's automatic
+   minimum size is its MIN-CONTENT width, and for a title with no space to break
+   at -- a long identifier, a run of emoji, a right-to-left phrase -- that is the
+   whole string. So the row grew, the rail grew with it (it is a flex item too,
+   with the same default), and the canvas was pushed past the right edge of a
+   1440px window: the section was on screen in the DOM and nowhere on the glass.
+   The declared overflow never got a chance to clip anything, because nothing was
+   ever narrower than its content. */
+.rw-tree__label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .rw-tree__count { flex: 0 0 auto; color: var(--fg-dim); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
 .rw-tree__group { margin-top: var(--sp-9); }
 /* A row's kind, two letters wide: template text, a table inside, added here.
@@ -493,7 +504,11 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
  * 272 rail / centre / 432 right panel, the right panel collapsing to 38px. */
 .rw-editor { display: flex; flex: 1 1 auto; min-height: 0; }
 .rw-editor__rail {
-  flex: 0 0 var(--lay-rail-w); display: flex; flex-direction: column; min-height: 0;
+  /* min-width:0 for the same reason the rows carry it: a fixed flex-basis is
+     still overridden by a wider min-content, so the rail is only 272px wide as
+     long as nothing inside it refuses to be narrower. */
+  flex: 0 0 var(--lay-rail-w); display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
   background: var(--bg-sunken); border-right: 1px solid var(--line);
 }
 .rw-editor__railtop { flex: 0 0 auto; display: flex; flex-direction: column; gap: var(--sp-6); padding: var(--sp-9); }
@@ -534,8 +549,19 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
   height: var(--lay-section-bar-h); padding: 0 var(--sp-16);
   background: var(--bg-panel); border-bottom: 1px solid var(--line);
 }
-.rw-sectionbar__crumb { font-size: var(--fs-meta); color: var(--fg-dim); }
-.rw-sectionbar__title { font-size: var(--fs-panel-title); font-weight: var(--fw-title); }
+/* The bar names the section, and the actions on its right have to stay reachable
+   whatever the section is called -- so the two text parts shrink and clip, and
+   the full title is on the element's tooltip. */
+.rw-sectionbar__crumb {
+  font-size: var(--fs-meta); color: var(--fg-dim);
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.rw-sectionbar__title {
+  font-size: var(--fs-panel-title); font-weight: var(--fw-title);
+  flex: 0 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .rw-sectionbar__actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-4); }
 
 /* The format toolbar is disabled, never hidden, so the canvas does not jump. */
