@@ -67,6 +67,18 @@ CFG = Config()
 # ---------------------------------------------------------------------------
 
 
+def _load_json_file(path):
+    """Read a JSON file tolerating a leading UTF-8 BOM (a common artefact from
+    Windows editors / Excel / Notepad). ``utf-8-sig`` strips the BOM if present
+    and decodes identically to ``utf-8`` otherwise, so this is a safe drop-in
+    for every project.json / template config read in this module. Raises
+    ``ValueError`` (``json.JSONDecodeError`` is one) or ``OSError`` on
+    failure; callers turn that into a clean error naming ``path`` instead of a
+    raw 500 / uncaught traceback."""
+    with open(path, "r", encoding="utf-8-sig") as fh:
+        return json.load(fh)
+
+
 def load_template_config(path=None):
     """Load and cache the template config JSON. Returns a dict or raises."""
     p = path or CFG.template_config_path
@@ -79,8 +91,7 @@ def load_template_config(path=None):
     cache = CFG._template_cache
     if cache and cache[0] == p and cache[1] == mtime:
         return cache[2]
-    with open(p, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    data = _load_json_file(p)
     CFG._template_cache = (p, mtime, data)
     return data
 
@@ -1218,8 +1229,7 @@ def _read_json_quiet(path):
     """Parse a JSON file, or None. Never raises: the tree walk must not die on
     one unreadable report."""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+        return _load_json_file(path)
     except Exception:
         return None
 
@@ -2110,8 +2120,7 @@ class Handler(BaseHTTPRequestHandler):
         # the whole message. Say what it is, flag it, and keep the parser's
         # words as a detail somebody debugging the file can use.
         try:
-            with open(pj, "r", encoding="utf-8") as fh:
-                project = json.load(fh)
+            project = _load_json_file(pj)
         except (ValueError, UnicodeDecodeError) as exc:
             return self._send_json(
                 {"error": "this report's project.json is not valid JSON",

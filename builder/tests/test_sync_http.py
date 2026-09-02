@@ -536,6 +536,29 @@ def test_save_after_delete_is_refused(root):
                 held.append(snap)
     check("and the version it replaced is in a snapshot first",
           any("__overwrite" in s for s in held), "-> %s" % snaps)
+# Loader robustness: a UTF-8 BOM must not break the project.json read path.
+# ---------------------------------------------------------------------------
+
+
+def test_bom_project_loads(root):
+    """A project.json saved with a leading UTF-8 BOM (a common artefact from
+    Windows editors / Excel / Notepad) must still open in the editor instead of
+    answering a 400 that exposes a raw JSONDecodeError."""
+    name = "bom_project"
+    pdir = os.path.join(root, name)
+    os.makedirs(pdir, exist_ok=True)
+    body_text = json.dumps(sample_report(), ensure_ascii=False)
+    with open(os.path.join(pdir, "project.json"), "wb") as fh:
+        fh.write(b"\xef\xbb\xbf" + body_text.encode("utf-8"))
+
+    with urlopen(BASE + "/api/project?dir=" + name) as resp:
+        status = resp.status
+        got = json.loads(resp.read().decode("utf-8"))
+    check("a BOM'd project.json still answers 200 (was 400)", status == 200,
+          "-> %s %s" % (status, got))
+    check("the project content came through intact",
+          (got.get("project") or {}).get("meta", {}).get("title")
+          == "Sample Report", "-> %s" % got)
 
 
 def run():
@@ -573,6 +596,8 @@ def run():
         test_rollback_without_a_dir_still_undoes_the_newest(root)
         print("a save never brings a report back")
         test_save_after_delete_is_refused(root)
+        print("loader robustness")
+        test_bom_project_loads(root)
     finally:
         httpd.shutdown()
         httpd.server_close()

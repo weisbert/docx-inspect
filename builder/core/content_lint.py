@@ -53,6 +53,17 @@ import json
 import os
 import sys
 
+
+def _load_json_file(path):
+    """Read a JSON file tolerating a leading UTF-8 BOM (a common artefact from
+    Windows editors / Excel / Notepad). ``utf-8-sig`` strips the BOM if present
+    and is otherwise identical to ``utf-8``, so this is a safe drop-in for every
+    project.json / template config read. Raises ``ValueError`` (JSONDecodeError
+    is one) or ``OSError`` on failure -- callers turn that into a clean message
+    naming ``path`` instead of letting an uncaught traceback out."""
+    with open(path, "r", encoding="utf-8-sig") as fh:
+        return json.load(fh)
+
 # Canonical level for every warning type -- engine render-manifest types AND the
 # content_lint codes below. Anything not listed defaults to "warn" (classify).
 LEVELS = {
@@ -578,12 +589,18 @@ def main(argv=None):
     if not os.path.isfile(proj_path):
         sys.stderr.write("error: %s not found\n" % proj_path)
         return 2
-    with open(proj_path, encoding="utf-8") as fh:
-        project = json.load(fh)
+    try:
+        project = _load_json_file(proj_path)
+    except Exception as exc:
+        sys.stderr.write("error: could not parse %s: %s\n" % (proj_path, exc))
+        return 2
     cfg = {}
     if a.config:
-        with open(a.config, encoding="utf-8") as fh:
-            cfg = json.load(fh)
+        try:
+            cfg = _load_json_file(a.config)
+        except Exception as exc:
+            sys.stderr.write("error: could not parse %s: %s\n" % (a.config, exc))
+            return 2
 
     report = lint_project(project, cfg, a.project_dir if a.files else None)
     findings = sorted(report.flat, key=lambda f: LEVEL_ORDER.get(f.get("level"), 1))

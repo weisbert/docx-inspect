@@ -917,6 +917,52 @@ def _run_cli(argv):
     return rc, out.getvalue()
 
 
+def _run_cli_full(argv):
+    """Return (exit_code, stdout, stderr) -- for cases that check the error text."""
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = cl.main(argv)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_bom_project_loads():
+    """A project.json (or template config) saved with a leading UTF-8 BOM -- a
+    common artefact from Windows editors / Excel / Notepad -- must lint cleanly
+    instead of crashing with an uncaught json.decoder.JSONDecodeError."""
+    tmp = tempfile.mkdtemp(prefix="lint_bom_")
+    try:
+        clean_dir = os.path.join(tmp, "clean")
+        os.makedirs(clean_dir, exist_ok=True)
+        project = {"schema_version": 1, "outline": [
+            {"id": "n", "title": "MODULE_A", "blocks": [
+                {"type": "para", "runs": [{"t": "text"}]},
+                _dt(_clean_table_rows())], "children": []}]}
+        with open(os.path.join(clean_dir, "project.json"), "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + json.dumps(project).encode("utf-8"))
+        cfg_path = os.path.join(tmp, "cfg.json")
+        with open(cfg_path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf" + json.dumps(_FULL_CFG).encode("utf-8"))
+
+        rc, out = _run_cli([clean_dir, "--config", cfg_path])
+        check(rc == 0, "a BOM'd project.json + config lints clean (was a crash)",
+              "rc=%r out=%r" % (rc, out))
+        check("0 error" in out, "the BOM did not stop the findings from coming through",
+              out)
+
+        broken_dir = os.path.join(tmp, "broken")
+        os.makedirs(broken_dir, exist_ok=True)
+        with open(os.path.join(broken_dir, "project.json"), "wb") as fh:
+            fh.write(b"\xef\xbb\xbf{not valid json")
+        rc, out, err = _run_cli_full([broken_dir])
+        check(rc == 2, "genuinely invalid JSON still exits 2, not a traceback",
+              "rc=%r" % rc)
+        check("project.json" in err and "Traceback" not in err,
+              "the error names the file instead of dumping a traceback", err)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cli_exit_codes():
     """0 = nothing to fix, 1 = at least one error (this is what gates a package),
     2 = there is no project.json to lint. Unchanged by the v2 rules: the new
@@ -1007,6 +1053,7 @@ def main():
     test_reference_column_is_not_this_stage_work()
     test_missing_image_needs_a_folder()
     test_cli_exit_codes()
+    test_bom_project_loads()
     test_helpers_and_edge_cases()
 
     print("\n%d finding(s) from fixture; %d test failure(s)%s"
