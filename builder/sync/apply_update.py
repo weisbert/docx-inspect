@@ -944,13 +944,40 @@ def _print_baseline_refusal(mismatch):
 # ---------------------------------------------------------------------------
 
 
-def cmd_snapshot(root):
-    proj_dirs = []
-    for name in sorted(os.listdir(root)):
-        if name in RESERVED or name == "templates":
+def find_report_dirs(root):
+    """Every report under ``root``, as the path the app addresses it by.
+
+    Reports used to sit one level down (``<root>/<name>/project.json``) and now
+    sit three (``<root>/<project>/<module>/<stage>``), so this walks the tree
+    instead of listing one level: a scan that only looked at the top level found
+    nothing at all under a three-level root, and pointing --root at the module
+    directory instead produced members named ``CDR/project.json`` -- an address
+    no import manifest and no endpoint on this machine understands.
+
+    Bookkeeping and payload folders are skipped (``_backups``, ``_updates``,
+    ``_outbox``, ``_autosave``, ``_trash``, ``templates``, ``images``, ``out``),
+    as is anything beginning with ``_`` or ``.``. Paths come back relative to
+    ``root`` with forward slashes, sorted, and a ``project.json`` sitting at the
+    root itself is left out: it has no path to be addressed by.
+    """
+    skip = set(RESERVED) | {"templates", "images", "out", "data",
+                            AUTOSAVE_DIRNAME, "_trash"}
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in skip and not d.startswith(("_", ".")))
+        if "project.json" not in filenames:
             continue
-        if os.path.isfile(os.path.join(root, name, "project.json")):
-            proj_dirs.append(name)
+        rel = os.path.relpath(dirpath, root).replace("\\", "/")
+        if rel in (".", ""):
+            continue
+        out.append(rel)
+    out.sort()
+    return out
+
+
+def cmd_snapshot(root):
+    proj_dirs = find_report_dirs(root)
     if not proj_dirs:
         print("no project.json found under %s" % root)
         return 1

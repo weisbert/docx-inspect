@@ -169,11 +169,52 @@ def test_rollback_created():
           "rollback reports the deleted create", str(res.get("deleted")))
 
 
+def test_snapshot_finds_nested_reports():
+    # Reports live three levels down (<project>/<module>/<stage>), and the
+    # packager used to look one level down only: under a real reports root it
+    # found nothing at all, and aiming it at the module directory produced
+    # members named "CDR/project.json" -- an address nothing on the receiving
+    # side understands. Both layouts must be found, addressed by their path
+    # relative to the root.
+    root = tempfile.mkdtemp(prefix="au_snap_")
+    for rel in ("P1/MOD_A/CDR", "P1/MOD_A/FDR", "flat"):
+        d = os.path.join(root, *rel.split("/"))
+        os.makedirs(d)
+        with open(os.path.join(d, "project.json"), "w", encoding="utf-8") as fh:
+            json.dump({"schema_version": 1, "outline": []}, fh)
+    # noise that is not a report: bookkeeping, a template library, images
+    for junk in ("_backups/old", "templates/sample", "P1/MOD_A/CDR/images",
+                 "P1/MOD_A/CDR/_autosave"):
+        os.makedirs(os.path.join(root, *junk.split("/")), exist_ok=True)
+    with open(os.path.join(root, "_backups", "old", "project.json"),
+              "w", encoding="utf-8") as fh:
+        fh.write("{}")
+
+    check(au.cmd_snapshot(root) == 0, "cmd_snapshot packages a three-level root")
+    outbox = os.path.join(root, "_outbox")
+    zips = [os.path.join(outbox, n) for n in os.listdir(outbox)
+            if n.endswith(".zip")]
+    names = []
+    if zips:
+        with zipfile.ZipFile(zips[0]) as z:
+            names = sorted(z.namelist())
+    check(names == ["P1/MOD_A/CDR/project.json", "P1/MOD_A/FDR/project.json",
+                    "flat/project.json"],
+          "each member is addressed by its path under the reports root",
+          str(names))
+
+    found = au.find_report_dirs(root)
+    check(found == ["P1/MOD_A/CDR", "P1/MOD_A/FDR", "flat"],
+          "find_report_dirs walks the three-level layout and keeps the flat one",
+          str(found))
+
+
 def main():
     test_find_and_ops()
     test_run_plan_and_bundle()
     test_partial_failure()
     test_rollback_created()
+    test_snapshot_finds_nested_reports()
     print("\n%d test failure(s)" % fails)
     return 1 if fails else 0
 
