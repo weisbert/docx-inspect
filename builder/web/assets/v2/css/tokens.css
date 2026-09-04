@@ -204,4 +204,10 @@
   --tbl-sel-bw:     1px;   /* selection, inset outline over --sel-fill */
   --tbl-active-bw:  2px;   /* active cell border, in --accent */
   --tbl-handle-sz:  6px;   /* fill handle at the active cell bottom-right */
+
+  /* The cue at the right-hand edge, for a table wider than its pane. A shadow
+   * ON the edge, not a wash OVER the columns: the last column of a compliance
+   * table is Unit, and a reader looking at it is entitled to read it. */
+  --tbl-edge-w:    12px;
+  --tbl-edge-ink:  rgba(20,24,28,.11);
 }

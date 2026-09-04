@@ -321,9 +321,15 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 }
 .rw-dashrow:hover { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent); }
 
-/* == 11 - menus ============================================================= */
+/* == 11 - menus =============================================================
+ * `fixed`, not `absolute`, and the reason is the coordinates: Menu.js places
+ * this box at the VIEWPORT point the gesture happened at. An absolutely
+ * positioned box means that only while no ancestor is positioned -- the moment
+ * one is (the full-screen table panel is `position: fixed`) every menu opened
+ * inside it is offset by that ancestor's corner. The page itself never scrolls,
+ * so the two agree everywhere else. */
 .rw-menu {
-  position: absolute; z-index: 60; min-width: 176px; padding: var(--sp-4);
+  position: fixed; z-index: 60; min-width: 176px; padding: var(--sp-4);
   border: 1px solid var(--line-strong); border-radius: var(--r-ctl);
   background: var(--bg-panel); box-shadow: var(--sh-overlay);
 }
@@ -634,9 +640,32 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-formatstatus__right--match { color: var(--good); }
 .rw-formatstatus__right--differs { color: var(--warn-strong); }
 
-/* == 16 - block canvas and cards ============================================ */
+/* == 16 - block canvas and cards ============================================
+ * THE MEASURE BELONGS TO THE CARD, NOT TO THE LANE.
+ *
+ * --lay-canvas-max is a reading measure: a line of prose much past 900px is
+ * tiring to read, so a prose card stops there. A compliance table is not prose.
+ * It is as wide as its columns add up to, and while the lane itself was capped
+ * at the measure that width had nowhere to go: a table 1011px wide was shown
+ * through an 848px window with the rest of it off the right-hand edge -- inside
+ * a pane 1336px wide that was half empty.
+ *
+ * So the lane fills the pane and each child centres in it AT the measure, which
+ * leaves a card that is not prose free to ask for more (--tbl-natural, set by
+ * views/blocks.js from the column plan) up to the pane's own width and no
+ * further. A card that asks for nothing stays at the measure -- which is now
+ * the CARD's width, where it used to be the lane's box including its 18px of
+ * padding, so a prose card is 36px wider than it was and nothing else moves. */
 .rw-canvas { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.rw-canvas__inner { max-width: var(--lay-canvas-max); margin: 0 auto; padding: var(--sp-16) 18px var(--sp-30); }
+.rw-canvas__inner { max-width: none; margin: 0 auto; padding: var(--sp-16) 18px var(--sp-30); }
+.rw-canvas__inner > * { max-width: var(--lay-canvas-max); margin-inline: auto; }
+/* The slot holding a wide card may spend the whole pane; the card inside takes
+   what it asked for and centres in what is left. */
+.rw-canvas__inner > *:has(> .rw-card--wide) { max-width: 100%; }
+.rw-card--wide {
+  width: min(max(var(--lay-canvas-max), var(--tbl-natural, 0px)), 100%);
+  margin-inline: auto;
+}
 .rw-card { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--bg-panel); box-shadow: var(--sh-card); }
 .rw-card--selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-wash), var(--sh-card); }
 .rw-card--dragging { opacity: .55; }
@@ -1073,27 +1102,71 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 }
 .rw-tblnote--warn { background: var(--warn-wash); border-bottom-color: var(--warn-line); color: var(--warn-ink); }
 
-/* The grid scrolls inside itself and the control draws no scrollbar, so a group
- * past the right-hand edge is simply not there. One gradient and the name of
- * the first hidden group, over the grid and never in the way of the pointer. */
+/* A group past the right-hand edge needs saying, but it was said with a 108px
+ * wash ending in the solid panel colour -- over the column the reader is
+ * closest to reading. And it was drawn whenever the table was wider than its
+ * pane, which includes the far right-hand END of the travel, where every column
+ * is on screen and nothing is hidden at all: the last column of a compliance
+ * table is Unit, and it sat under that wash for good.
+ *
+ * Now the edge carries a shadow the width of a border, and the SAYING is done
+ * in the footer, in words, on a chip that scrolls to the group it names. */
 .rw-gridwrap { position: relative; min-width: 0; }
 .rw-gridmore {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 108px;
+  position: absolute; top: 0; right: 0; bottom: 0; width: var(--tbl-edge-w);
   /* above the control's sticky header band (20/21) and below its cell editor
    * (40), the menus (60) and the toast (80). */
   z-index: 22; pointer-events: none;
-  background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--bg-panel) 78%);
+  background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--tbl-edge-ink));
 }
-/* The label is wider than the fade it sits in, so it runs to the LEFT of it
- * rather than being clipped to an ellipsis -- the group's name is the whole
- * point of drawing it. */
-.rw-gridmore__tag {
-  position: absolute; top: var(--sp-4); right: var(--sp-4); padding: 0 var(--sp-4);
-  max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  border: 1px solid var(--line); border-radius: var(--r-pill, 3px);
-  background: var(--bg-subtle); color: var(--fg-dim);
-  font-size: var(--fs-micro); line-height: 16px;
+/* The chip lives in the footer, where it covers nothing and can be clicked. */
+.rw-gridmore__chip {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  height: 18px; padding: 0 var(--sp-6);
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  background: var(--bg-panel); color: var(--fg-muted);
+  font-size: var(--fs-micro); line-height: 1; white-space: nowrap; cursor: pointer;
 }
+.rw-gridmore__chip:hover { border-color: var(--accent); color: var(--accent); }
+
+/* The bottom edge of the grid is a handle: the table proposes a height, the
+ * reader has the last word, and a double-click hands it back. */
+.rw-gridgrip {
+  display: flex; align-items: center; justify-content: center;
+  height: 9px; cursor: ns-resize; touch-action: none;
+  background: var(--bg-subtle); border-bottom: 1px solid var(--line-soft);
+}
+.rw-gridgrip::after {
+  content: ""; width: 42px; height: 3px; border-radius: var(--r-pill); background: var(--line);
+}
+.rw-gridgrip:hover::after, .rw-gridgrip--live::after { background: var(--accent); }
+
+/* Full screen. The SAME element, moved: the control, its selection, its open
+ * editor and the undo stack are the ones that were in the card, because nothing
+ * was torn down to get here -- only repositioned. What is left behind holds the
+ * panel's place at the height it had, so the canvas underneath does not jump.
+ *
+ * z-index 50 puts the panel over the page, under a dialog's own scrim (40,
+ * which is inside this panel's stacking context and so paints above it) and
+ * under the toast (80). */
+.rw-tblplace { min-width: 0; }
+.rw-tblback { position: fixed; inset: 0; z-index: 49; background: var(--scrim-soft); }
+/* As wide as the table wants (--tbl-natural comes down from the card) and no
+   wider: a 1000px table stretched across a 2040px screen is a thousand pixels
+   of nothing next to the last column. Centred with auto margins against all
+   four insets rather than a transform -- a transform would make this box the
+   containing block for the `fixed` scrim of any dialog opened inside it, and
+   the reference-column dialog is opened inside it. */
+.rw-tbl--full {
+  position: fixed; inset: 2.5vh 2.5vw; z-index: 50; overflow: hidden;
+  width: min(95vw, max(var(--lay-canvas-max), calc(var(--tbl-natural, 0px) + 2px)));
+  margin-inline: auto;
+  border: 1px solid var(--line-strong); border-radius: var(--r-modal);
+  background: var(--bg-panel); box-shadow: var(--sh-overlay);
+}
+.rw-tbl--full .rw-gridwrap { flex: 1 1 auto; min-height: 0; }
+.rw-tbl--full .rw-grid { height: 100%; }
+.rw-tbl--full .rw-gridgrip { display: none; }
 
 /* --- the grid control ---------------------------------------------------- */
 .rw-grid { position: relative; }

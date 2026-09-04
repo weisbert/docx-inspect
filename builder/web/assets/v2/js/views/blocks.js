@@ -1534,17 +1534,36 @@ function pickTableRenderer(mod) {
   return null;
 }
 
+/* How wide the table inside this card wants to be, asked of the module that
+ * plans its columns -- so the answer cannot drift from the grid that is drawn
+ * or, through it, from core/tables.py. The card publishes it as --tbl-natural
+ * and css/app.css lets a card carrying one out of the prose measure, as far as
+ * the pane allows and no further.
+ *
+ * Answering 0 (an older module, one that failed to load) leaves the card
+ * exactly as wide as every other card, which is where it was before. */
+function askNaturalWidth(mod, block, cfg) {
+  if (!mod || typeof mod.naturalWidth !== 'function') return 0;
+  try {
+    const px = Number(mod.naturalWidth(block, cfg));
+    return px > 0 ? Math.round(px) : 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
 export function TableCard(props) {
   const { block, index, first, last, acts, numbers, selected, dir, cfg, node } = props;
-  const [renderer, setRenderer] = useState(null);
+  const [mod, setMod] = useState(null);
   const entry = numbers && numbers.get ? numbers.get(block.id) : null;
   const label = entry ? entry.label : '';
   const compliance = block.type === 'datatable';
+  const renderer = pickTableRenderer(mod);
 
   useEffect(() => {
     let live = true;
-    loadTableModule().then((mod) => {
-      if (live) setRenderer(() => pickTableRenderer(mod));
+    loadTableModule().then((found) => {
+      if (live) setMod(() => found);
     });
     return () => { live = false; };
   }, []);
@@ -1581,8 +1600,15 @@ export function TableCard(props) {
     }, pushError);
   };
 
+  // Recomputed when the shape changes -- which is what `cols` and `rows` are a
+  // reading of -- and not on every keystroke inside a cell.
+  const natural = useMemo(
+    () => askNaturalWidth(mod, block, cfg), [mod, block, cfg, cols, rows]);
+
   return html`
-    <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}>
+    <div class=${cx('rw-card', selected && 'rw-card--selected', natural > 0 && 'rw-card--wide')}
+         style=${natural > 0 ? '--tbl-natural: ' + natural + 'px' : null}
+         data-block=${index}>
       <${CardHead} marker="rw-card__marker--table" type=${compliance ? T.complianceTable : T.table}
                    numberLabel=${label} meta=${T.tableShape(cols, rows)}
                    index=${index} first=${first} last=${last} api=${acts}

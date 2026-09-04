@@ -167,6 +167,11 @@ export function makeGroups(data, cfg) {
  * editor-only columns on the left and minus the dead scalar Spec column. */
 const W = { num: 26, cat: 92, item: 176, limit: 60, axis: 62, sep: 10, unit: 54 };
 
+/* '#', Category and Item stay put while the groups scroll past them. Named
+ * once: the control is told this, and the footer chip has to scroll a group
+ * clear of exactly these columns. */
+const FROZEN_COLUMNS = 3;
+
 export function planColumns(groups) {
   const plan = [
     { kind: 'num', label: '', width: W.num },
@@ -646,31 +651,128 @@ function cellName(x, y) {
   return columnLetter(x) + (y + 1);
 }
 
-/* Which group, if any, is off the right-hand edge right now.
+/* Which group, if any, is still out of sight FROM WHERE THE READER IS NOW.
  *
- * Returns the group's title when a whole group is out of sight, '' when
- * something is hidden but no complete group, and null when everything fits.
- * The plan's own widths are the measure -- they are what the columns were built
- * with, and reading them needs no second pass over the DOM. */
+ * Returns the group's title when a whole group is off the right-hand edge, ''
+ * when something is hidden but no complete group, and null when there is
+ * nothing more to the right. The plan's own widths are the measure -- they are
+ * what the columns were built with, and reading them needs no second pass over
+ * the DOM.
+ *
+ * THE QUESTION USED TO BE 'is the table wider than its pane', which a
+ * compliance table almost always is. At the right-hand end of the travel, with
+ * every column on screen, that still answered yes -- so the cue that marks the
+ * edge was drawn over the last column permanently, and the last column is Unit.
+ * Asking how much is left BEYOND the scroll position ends the cue where the
+ * travel ends, which is exactly where the reader can see it has. */
+const EDGE_EPS = 2;   // a plan summing to 1010 against a box measuring 1009.6
+
 export function hiddenGroupName(model, content) {
   if (!model || !content) return null;
-  const overflow = content.scrollWidth - content.clientWidth;
-  if (!(overflow > 1)) return null;
+  const room = content.scrollWidth - content.clientWidth - content.scrollLeft;
+  if (!(room > EDGE_EPS)) return null;
   if (model.mode !== 'compliance') return '';
   const right = content.scrollLeft + content.clientWidth;
-  const ends = {};
-  let left = 0;
-  for (let x = 0; x < model.plan.length; x++) {
-    const col = model.plan[x];
-    left += col.width || 0;
-    if (col.kind === 'axis') ends[col.group] = left;
-  }
+  const ends = groupEnds(model);
   for (let g = 0; g < model.groups.length; g++) {
     const group = model.groups[g];
     const end = ends[group.key];
-    if (end !== undefined && end > right) return group.title || String(group.key);
+    if (end !== undefined && end > right + EDGE_EPS) return group.title || String(group.key);
   }
   return '';
+}
+
+/* Where each group's last axis ends, in plan pixels from the left edge. */
+function groupEnds(model) {
+  const ends = {};
+  let left = 0;
+  const plan = (model && model.plan) || [];
+  for (let x = 0; x < plan.length; x++) {
+    left += plan[x].width || 0;
+    if (plan[x].kind === 'axis') ends[plan[x].group] = left;
+  }
+  return ends;
+}
+
+/* Where a group starts, less the frozen block that would otherwise cover it.
+ * Naming a group the reader cannot see is half an answer; the footer chip uses
+ * this to take them to it. */
+export function groupScrollLeft(model, key) {
+  const plan = (model && model.plan) || [];
+  let frozen = 0;
+  for (let i = 0; i < FROZEN_COLUMNS && i < plan.length; i++) frozen += plan[i].width || 0;
+  let left = 0;
+  for (let x = 0; x < plan.length; x++) {
+    if (plan[x].kind === 'sep' && plan[x].group === key) return Math.max(0, left - frozen);
+    left += plan[x].width || 0;
+  }
+  return 0;
+}
+
+/* How wide this table WANTS to be: its columns, plus the frame the control
+ * draws around them. views/blocks.js hands the answer to the card as
+ * --tbl-natural, and the card takes that much of the canvas rather than the
+ * prose measure. A number no bigger than the pane is the card's business, not
+ * this one's: over-asking costs nothing, under-asking scrolls. */
+const GRID_FRAME = 22;   // borders, the control's own padding, and the width
+                         // the VERTICAL scrollbar takes out of the row: a long
+                         // table that fits horizontally on paper still did not
+                         // fit on screen without this, by about ten pixels.
+
+export function naturalWidth(block, cfg) {
+  const model = gridModel(block, cfg);
+  if (!model) return 0;
+  let sum = 0;
+  for (let x = 0; x < model.plan.length; x++) sum += model.plan[x].width || 0;
+  return Math.round(sum) + GRID_FRAME;
+}
+
+/* ---- how tall the grid is ---------------------------------------------
+ *
+ * It was 420px, always, whatever the table and whatever the window: a 50-row
+ * compliance table showed fifteen rows of itself through it in a pane 791px
+ * tall. The grid asks for the room the pane can spare instead, and a table
+ * shorter than that still only takes what it needs -- the control caps the box
+ * with max-height, so a short table stays short. The reader's own drag, when
+ * there has been one, outranks both. */
+const GRID_H_MIN = 240;
+const GRID_H_MAX = 900;
+const GRID_H_CHROME = 190;   // toolbar, footer, card head and foot, seams
+const GRID_H_FALLBACK = 460;
+
+function autoGridHeight(host) {
+  const pane = host && host.closest ? host.closest('.rw-canvas') : null;
+  const room = pane ? pane.clientHeight - GRID_H_CHROME : 0;
+  if (!(room > 0)) return GRID_H_FALLBACK;
+  return Math.max(GRID_H_MIN, Math.min(GRID_H_MAX, Math.round(room)));
+}
+
+/* A height the reader dragged is theirs, and it is a view preference: it stays
+ * in this browser and never reaches project.json, where it would show up as a
+ * change in every diff of a report nobody edited. */
+function heightKey(dir, node, block) {
+  const id = (block && block.id)
+    || ((node && node.id ? node.id : '?') + '#'
+        + (node && Array.isArray(node.blocks) ? node.blocks.indexOf(block) : '?'));
+  return 'rw.grid.h:' + (dir || '') + ':' + id;
+}
+
+function readHeight(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    const value = raw === null ? 0 : Number(raw);
+    if (!(value >= GRID_H_MIN && value <= GRID_H_MAX)) return 0;
+    return Math.round(value);
+  } catch (err) {
+    return 0;   // a private window, or storage turned off
+  }
+}
+
+function writeHeight(key, value) {
+  try {
+    if (value) window.localStorage.setItem(key, String(Math.round(value)));
+    else window.localStorage.removeItem(key);
+  } catch (err) { /* nothing here is worth failing an edit over */ }
 }
 
 /* Category runs merge vertically; a sim_span row merges across each group's
@@ -756,6 +858,20 @@ export function TableBlock(props) {
   const hostRef = useRef(null);
   const sheetRef = useRef(null);
   const modelRef = useRef(null);
+  // The panel itself and the box the grid scrolls in: full screen moves the
+  // first and re-measures the second, and neither is rebuilt to do it.
+  const tblRef = useRef(null);
+  const wrapRef = useRef(null);
+  // The control's scrolling box, kept from the build so the height handlers do
+  // not have to go looking for a vendor class name.
+  const contentRef = useRef(null);
+  // The height the reader dragged to, if they have; 0 means 'ask the pane'.
+  const hKey = heightKey(dir, props.node, block);
+  const heightRef = useRef(readHeight(hKey));
+  // The height the card had when it went full screen, held by the box left
+  // behind so the canvas does not close up and re-open.
+  const placeRef = useRef(0);
+  const measureRef = useRef(null);
   const undoRef = useRef({ past: [], future: [] });
   const catWarnRef = useRef(false);
   // Set while the cursor is being nudged off a separator column, so the
@@ -774,6 +890,7 @@ export function TableBlock(props) {
   const [refOpen, setRefOpen] = useState(false);
   const [catAsk, setCatAsk] = useState(null);
   const [staleSources, setStaleSources] = useState({});
+  const [full, setFull] = useState(false);
   // The name of the first group that is off the right-hand edge, '' when
   // something is hidden but no whole group, null when everything fits.
   const [hidden, setHidden] = useState(null);
@@ -923,8 +1040,10 @@ export function TableBlock(props) {
       minDimensions: [model.plan.length, Math.max(1, model.grid.length)],
       tableOverflow: true,
       tableWidth: '100%',
-      tableHeight: (props.height || 420) + 'px',
-      freezeColumns: 3,
+      // The control turns this into a max-height, so a table shorter than the
+      // figure still only takes the room it needs.
+      tableHeight: (props.height || heightRef.current || autoGridHeight(host)) + 'px',
+      freezeColumns: FROZEN_COLUMNS,
       defaultColAlign: 'center',
       allowInsertRow: true,
       allowManualInsertRow: false,
@@ -982,6 +1101,7 @@ export function TableBlock(props) {
     // control's own pass still runs first and agrees with this one; below its
     // threshold it clears the marks and this puts them back.
     const content = host.querySelector('.jss_content');
+    contentRef.current = content;
     const frozenCount = Math.max(0, Number(options.freezeColumns) || 0);
     const frozenStops = [];
     let frozenRun = 0;
@@ -1009,9 +1129,12 @@ export function TableBlock(props) {
       }
     };
     // A two-group table does not fit at 1440 even with the right panel folded
-    // away, and the control draws no scrollbar of its own: the second group was
-    // simply not there, and the only way to learn of it was the preview.
+    // away, and the control's own scrollbar is 8px of grey at the bottom of a
+    // 600px box: the second group was there to be found, and the only thing
+    // that said so was the preview. This is what the edge cue and the footer
+    // chip are told by, on every scroll and every resize.
     const measure = () => setHidden(hiddenGroupName(model, content));
+    measureRef.current = measure;
     const onScroll = () => { pinFrozen(); measure(); };
     if (content) content.addEventListener('scroll', onScroll);
     window.addEventListener('resize', measure);
@@ -1024,6 +1147,8 @@ export function TableBlock(props) {
       clearTimeout(remeasure);
       if (content) content.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', measure);
+      if (measureRef.current === measure) measureRef.current = null;
+      if (contentRef.current === content) contentRef.current = null;
       // BEFORE anything else, and before buildingRef closes the door on
       // onchange: a cell being edited when this host goes away (a section
       // change, a route change, a rebuild) would otherwise be wiped with the
@@ -1157,6 +1282,46 @@ export function TableBlock(props) {
       document.removeEventListener('paste', onPaste, true);
     };
   }, []);
+
+  /* ---- the height of the box, and full screen ---------------------- *
+   *
+   * FULL SCREEN IS A MOVE, NOT A REMOUNT. The same element is repositioned, so
+   * the control keeps its selection, the cell that is open for editing and the
+   * undo stack -- there is no state to hand over because none of it goes
+   * anywhere. What does have to be redone is the height: the control holds the
+   * box as a max-height in pixels and cannot work one out for itself. */
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return undefined;
+    const fit = () => {
+      if (full) {
+        const wrap = wrapRef.current;
+        const room = wrap ? wrap.clientHeight - 2 : 0;
+        content.style.maxHeight = Math.max(GRID_H_MIN, room) + 'px';
+      } else {
+        content.style.maxHeight =
+          (props.height || heightRef.current || autoGridHeight(hostRef.current)) + 'px';
+      }
+      if (measureRef.current) measureRef.current();
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [full, revision, props.height]);
+
+  // Escape leaves full screen -- unless something inside it is already holding
+  // Escape: a cell being edited (where it cancels the edit), a menu, a dialog.
+  useEffect(() => {
+    if (!full) return undefined;
+    const onKey = (ev) => {
+      if (ev.key !== 'Escape' || ev.defaultPrevented) return;
+      if (editing() || menu || refOpen || catAsk) return;
+      ev.preventDefault();
+      setFull(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [full, menu, refOpen, catAsk, editing]);
 
   /* ---- actions ---------------------------------------------------- */
 
@@ -1640,6 +1805,70 @@ export function TableBlock(props) {
     setMenu({ x: ev.clientX, y: ev.clientY, items: items });
   };
 
+  /* ---- the height handle, the edge chip, full screen ---------------- */
+
+  const applyHeight = (px) => {
+    const content = contentRef.current;
+    if (!content) return;
+    content.style.maxHeight = Math.round(px) + 'px';
+    if (measureRef.current) measureRef.current();
+  };
+
+  const onGripDown = (ev) => {
+    const content = contentRef.current;
+    if (!content || ev.button) return;
+    ev.preventDefault();
+    const grip = ev.currentTarget;
+    const startY = ev.clientY;
+    const startH = content.getBoundingClientRect().height;
+    const move = (e) => {
+      const h = Math.max(GRID_H_MIN, Math.min(GRID_H_MAX, startH + (e.clientY - startY)));
+      heightRef.current = Math.round(h);
+      applyHeight(h);
+    };
+    const up = () => {
+      grip.classList.remove('rw-gridgrip--live');
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      try { grip.releasePointerCapture(ev.pointerId); } catch (err) { /* already gone */ }
+      writeHeight(hKey, heightRef.current);
+    };
+    grip.classList.add('rw-gridgrip--live');
+    // Captured, so the drag survives the pointer running off the handle and
+    // over the cells -- which is most of a drag.
+    try { grip.setPointerCapture(ev.pointerId); } catch (err) { /* not capturable */ }
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  };
+
+  // A double-click hands the height back to the pane.
+  const onGripReset = () => {
+    heightRef.current = 0;
+    writeHeight(hKey, 0);
+    applyHeight(autoGridHeight(hostRef.current));
+  };
+
+  const goToHidden = () => {
+    const content = contentRef.current;
+    const m = modelRef.current;
+    if (!content) return;
+    const group = hidden && m
+      ? (m.groups || []).filter((g) => (g.title || String(g.key)) === hidden)[0]
+      : null;
+    // Set, not animated: `behavior: 'smooth'` is silently ignored on this box,
+    // and a jump is what the chip promises anyway.
+    content.scrollLeft = group ? groupScrollLeft(m, group.key) : content.scrollWidth;
+    if (measureRef.current) measureRef.current();
+  };
+
+  const toggleFull = () => {
+    const el = tblRef.current;
+    if (!full && el) placeRef.current = Math.round(el.getBoundingClientRect().height);
+    setFull(!full);
+  };
+
   /* ---- render ------------------------------------------------------ */
 
   if (!block) return null;
@@ -1659,8 +1888,8 @@ export function TableBlock(props) {
   const presets = tablePresets(cfg);
   const staleKeys = Object.keys(staleSources);
 
-  return html`
-    <div class="rw-tbl">
+  const panel = html`
+    <div class=${cx('rw-tbl', full && 'rw-tbl--full')} ref=${tblRef}>
       <div class="rw-tblbar" role="toolbar">
         <span class="rw-micro rw-tblbar__label">Row kind</span>
         <${SegmentedControl}
@@ -1705,6 +1934,9 @@ export function TableBlock(props) {
             ]}
             onChange=${setDensity}
             ariaLabel="Density" />
+          <${IconButton} glyph=${full ? '⤡' : '⤢'}
+                         title=${full ? 'Leave full screen (Esc)' : 'Full screen'}
+                         onClick=${toggleFull} />
           <${IconButton} glyph="⬇" title="Export .xlsx" onClick=${doExportXlsx} />
           <${IconButton} glyph="⬆" title="Import .xlsx…"
                          onClick=${() => fileRef.current && fileRef.current.click()} />
@@ -1727,19 +1959,18 @@ export function TableBlock(props) {
             <//>`)}
         </div>` : null}
 
-      <div class="rw-gridwrap">
+      <div class="rw-gridwrap" ref=${wrapRef}>
         <div
           class=${cx('rw-grid', 'rw-grid__scroll', density === 'tight' && 'rw-grid--tight',
                      density === 'loose' && 'rw-grid--loose')}
           ref=${hostRef}
           onContextMenu=${onContextMenu}></div>
-        ${hidden === null ? null : html`
-          <div class="rw-gridmore" aria-hidden="true">
-            <span class="rw-gridmore__tag">
-              ${hidden ? 'More columns · ' + hidden : 'More columns'}
-            </span>
-          </div>`}
+        ${hidden === null ? null : html`<div class="rw-gridmore" aria-hidden="true"></div>`}
       </div>
+      <div class="rw-gridgrip" role="separator" aria-orientation="horizontal"
+           title="Drag to resize · double-click to fit the pane"
+           aria-label="Resize the table"
+           onPointerDown=${onGripDown} onDblClick=${onGripReset}></div>
 
       <div class="rw-grid__foot">
         ${compliance ? html`
@@ -1749,6 +1980,11 @@ export function TableBlock(props) {
           <span>This table has no spec columns, so nothing is checked against a spec</span>
         `}
         ${selectionSize ? html`<span>${selectionSize}</span>` : null}
+        ${hidden === null ? null : html`
+          <button class="rw-gridmore__chip" type="button" onClick=${goToHidden}
+                  title="Scroll to the columns past the right-hand edge">
+            ${hidden ? 'More columns · ' + hidden : 'More columns'} ›
+          </button>`}
         <span class="rw-spacer"></span>
         <span>Arrow keys move · Shift extends · double-click edits · Ctrl+D fills down · Ctrl+Z undoes</span>
       </div>
@@ -1784,6 +2020,16 @@ export function TableBlock(props) {
                   action=${toast.action ? 'Undo' : null}
                   onAction=${() => { undo(); setToast(null); }}
                   onDismiss=${() => setToast(null)} />` : null}
+    </div>`;
+
+  // What is left behind stays in the flow at the height the panel had, so the
+  // canvas behind does not close up when the panel leaves it and re-open when
+  // it comes back.
+  return html`
+    <div class="rw-tblplace"
+         style=${full ? 'min-height: ' + placeRef.current + 'px' : null}>
+      ${full ? html`<div class="rw-tblback" onClick=${() => setFull(false)}></div>` : null}
+      ${panel}
     </div>`;
 }
 
