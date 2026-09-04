@@ -11,7 +11,8 @@
  *   * the block canvas frame: the insert seams between cards, selection,
  *     keyboard, the delete-with-undo toast
  *   * the cover and metadata form
- *   * the three-pane layout, including collapsing the right panel to a strip
+ *   * the three-pane layout: collapsing the right panel to a strip, and the
+ *     drag handle on its seam that sets how wide it is
  *
  * What it deliberately does NOT own:
  *   * the block cards themselves        -> views/blocks.js
@@ -199,6 +200,8 @@ const S = {
   collapse: 'Collapse',
   expand: 'Expand',
   assets: 'Assets',
+  previewWidth: 'Preview width',
+  dragPreviewWidth: 'Drag to set the preview width — double-click to reset it',
 };
 
 /* The cover form is addressed like a section so it can live in the route. The
@@ -2256,14 +2259,151 @@ function CoverForm(props) {
  * Right panel
  * ------------------------------------------------------------------ */
 
+/* The column's width, in the three numbers a drag needs while it runs. Each one
+ * is the twin of a custom property in css/app.css -- --lay-right-w,
+ * --lay-right-min and --lay-centre-min -- because the stylesheet states the
+ * width at rest and the ceiling, and only JS can clamp a gesture in flight.
+ * MOVE ONE AND MOVE ITS TWIN, or the drag will stop somewhere the stylesheet
+ * does not agree with and the panel will snap on the next render. */
+const RIGHT_DEFAULT = 432;   // --lay-right-w:    what a reset goes back to
+const RIGHT_MIN = 320;       // --lay-right-min:  narrower and the paper stops
+                             //                   previewing anything
+const CENTRE_MIN = 420;      // --lay-centre-min: what the canvas always keeps
+
+// How far the panel may be dragged, in px, measured from the row it lives in
+// rather than from the window: the row is what the two minimums are carved out
+// of, and it is the row a narrow window shrinks.
+function widthBounds(aside) {
+  const row = aside && aside.parentElement;
+  const rowW = row ? row.getBoundingClientRect().width : 0;
+  const rail = row && row.querySelector ? row.querySelector('.rw-editor__rail') : null;
+  const railW = rail ? rail.getBoundingClientRect().width : 0;
+  return { lo: RIGHT_MIN, hi: Math.max(RIGHT_MIN, Math.round(rowW - railW - CENTRE_MIN)) };
+}
+
 // The panel's content belongs to views/preview.js, which publishes RightPanel
 // and renders the collapsed strip itself. This frame owns only the column's
 // width, so a missing module still leaves a usable three-pane layout.
+//
+// THE WIDTH IS THE READER'S. The 432px basis is where the column starts, not
+// where it has to stay: the seam on its left edge is a drag handle, the width
+// it is dragged to is remembered across reports and across sessions (store.js
+// persists ui.rightWidth), and Home or a double-click puts it back.
 function RightPane(props) {
   const ui = useStore((s) => s.ui);
   const open = !ui || ui.rightOpen !== false;
   const mod = useOptionalModule('./preview.js');
   const RightPanel = pickExport(mod, ['RightPanel']);
+
+  const asideRef = useRef(null);
+  const gripRef = useRef(null);
+  const drag = useRef(null);
+  const [live, setLive] = useState(false);
+
+  const stored = Number(ui && ui.rightWidth);
+  const width = open && isFinite(stored) && stored > 0 ? Math.round(stored) : 0;
+
+  // Ends a drag. `commit` tells the store the width the pointer left the panel
+  // at; abandoning restores the inline style exactly as it was when the gesture
+  // started, because the render that follows will not: preact diffs the style
+  // it rendered last time against the one it renders now, and neither of those
+  // is the width this drag wrote straight to the node.
+  const finish = (commit) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    const el = asideRef.current;
+    const grip = gripRef.current;
+    if (grip && grip.hasPointerCapture && grip.hasPointerCapture(d.id)) {
+      try { grip.releasePointerCapture(d.id); } catch (err) { /* already gone */ }
+    }
+    if (typeof document !== 'undefined') document.body.classList.remove('rw-resizing');
+    // A press that moved nothing is a click on a seam, not a resize: it must not
+    // turn the stylesheet's width into a width the user is now said to have
+    // chosen. Same branch as abandoning, and for the same reason.
+    if (commit && d.w !== d.from) store.setUi({ rightWidth: d.w });
+    else if (el) el.style.flexBasis = d.base;
+    setLive(false);
+  };
+
+  /* A live drag writes the width straight to the node. Routing every
+   * pointermove through the store would re-render the whole preview -- the
+   * paper, its tables, the check tab -- once per pixel of the gesture, and the
+   * panel would lag the pointer badly on a long report. The store hears about
+   * it once, on release.
+   *
+   * The panel re-renders for its OWN reasons while a drag runs: the save chip
+   * ticks, follow mode moves the paper, a section mounts. Each of those renders
+   * writes the stored width back onto the node. This effect deliberately has no
+   * dependency list -- it runs after every render and re-asserts the live width
+   * before the frame is painted, so an unrelated render cannot make the panel
+   * jump out from under the pointer. */
+  useLayoutEffect(() => {
+    const el = asideRef.current;
+    if (el && drag.current) el.style.flexBasis = drag.current.w + 'px';
+  });
+
+  // Escape abandons a drag, as it does everywhere else in this screen. The
+  // listener exists only while a drag is live, and it is taken on the capture
+  // phase so the frame's own Escape handling does not see it first.
+  useEffect(() => {
+    if (!live || typeof window === 'undefined') return undefined;
+    const onKey = (ev) => {
+      if (ev.key !== 'Escape' || !drag.current) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [live]);
+
+  const onGripDown = (ev) => {
+    if (ev.button !== 0) return;
+    const el = asideRef.current;
+    if (!el) return;
+    // Not focusing and not selecting: the gesture must not move the caret out
+    // of the sentence the user was writing.
+    ev.preventDefault();
+    const bounds = widthBounds(el);
+    const now = Math.round(el.getBoundingClientRect().width);
+    drag.current = {
+      id: ev.pointerId, x: ev.clientX, w: now, from: now,
+      lo: bounds.lo, hi: bounds.hi, base: el.style.flexBasis,
+    };
+    try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (err) { /* no capture */ }
+    document.body.classList.add('rw-resizing');
+    setLive(true);
+  };
+
+  const onGripMove = (ev) => {
+    const d = drag.current;
+    const el = asideRef.current;
+    if (!d || !el || ev.pointerId !== d.id) return;
+    // The seam is the panel's LEFT edge, so moving left widens it.
+    const want = d.from - (ev.clientX - d.x);
+    const w = Math.round(Math.min(d.hi, Math.max(d.lo, want)));
+    if (w === d.w) return;
+    d.w = w;
+    el.style.flexBasis = w + 'px';
+  };
+
+  const reset = () => store.setUi({ rightWidth: null });
+
+  // Arrows nudge, Shift+arrow strides, Home resets -- the window-splitter
+  // keyboard, so the width is not a mouse-only setting.
+  const onGripKey = (ev) => {
+    const el = asideRef.current;
+    if (!el || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (ev.key === 'Home') { ev.preventDefault(); reset(); return; }
+    const step = ev.shiftKey ? 64 : 16;
+    const delta = ev.key === 'ArrowLeft' ? step : ev.key === 'ArrowRight' ? -step : 0;
+    if (!delta) return;
+    ev.preventDefault();
+    const bounds = widthBounds(el);
+    const now = Math.round(el.getBoundingClientRect().width);
+    store.setUi({ rightWidth: Math.min(bounds.hi, Math.max(bounds.lo, now + delta)) });
+  };
 
   const body = RightPanel
     ? html`<${RightPanel} dir=${props.dir} />`
@@ -2290,10 +2430,35 @@ function RightPane(props) {
             : null}
         </div>`;
 
+  // The grip is its own flex item, zero pixels wide, sitting just before the
+  // column; css/app.css gives it a 9px hit area straddling the seam. It is not
+  // rendered over the collapsed strip: there is no width to set there, and the
+  // whole strip is already one big button that opens the panel again.
+  const grip = open ? html`
+    <div ref=${gripRef}
+         class=${cx('rw-editor__grip', live && 'rw-editor__grip--live')}
+         role="separator" aria-orientation="vertical"
+         aria-label=${S.previewWidth}
+         aria-valuenow=${String(width || RIGHT_DEFAULT)}
+         aria-valuemin=${String(RIGHT_MIN)}
+         tabIndex="0" title=${S.dragPreviewWidth}
+         onPointerDown=${onGripDown}
+         onPointerMove=${onGripMove}
+         onPointerUp=${() => finish(true)}
+         onPointerCancel=${() => finish(false)}
+         onLostPointerCapture=${() => finish(true)}
+         onDblClick=${reset}
+         onKeyDown=${onGripKey}></div>` : null;
+
   return html`
-    <aside class=${cx('rw-editor__right', !open && 'rw-editor__right--collapsed')}>
-      ${body}
-    </aside>`;
+    <${Fragment}>
+      ${grip}
+      <aside ref=${asideRef}
+             class=${cx('rw-editor__right', !open && 'rw-editor__right--collapsed')}
+             style=${{ flexBasis: width ? width + 'px' : '' }}>
+        ${body}
+      </aside>
+    <//>`;
 }
 
 /* ------------------------------------------------------------------ *

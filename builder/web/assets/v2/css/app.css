@@ -14,8 +14,10 @@
   --lay-topbar-h:      52px;   /* application header, both screens */
   --lay-home-rail-w:   300px;  /* home navigation tree */
   --lay-rail-w:        272px;  /* editor outline rail */
-  --lay-right-w:       432px;  /* editor right panel */
+  --lay-right-w:       432px;  /* editor right panel, at rest */
   --lay-right-cw:      38px;   /* right panel, collapsed strip */
+  --lay-right-min:     320px;  /* right panel, narrowest a drag may leave it */
+  --lay-centre-min:    420px;  /* what a drag must always leave the canvas */
   --lay-canvas-max:    900px;  /* block canvas measure */
   --lay-seam-h:        16px;   /* insert seam between two cards */
   --lay-card-head-h:   29px;
@@ -533,7 +535,52 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
   min-height: 0; min-width: 0;
   background: var(--bg-panel); border-left: 1px solid var(--line);
 }
+/* A width the user dragged is written to flex-basis as an INLINE style, and an
+   inline style survives a window the user later makes narrow. This ceiling is
+   the same arithmetic the drag clamps to, expressed against the row's own
+   width, so a panel widened on a large screen cannot squeeze the canvas away on
+   a small one -- with no resize listener to keep in step with it. The max()
+   keeps the value sane when the window is narrower than the two minimums put
+   together, and the child combinator keeps it off the copy of this class that
+   views/preview.js carries for the frame it may have to provide itself. */
+.rw-editor > .rw-editor__right {
+  max-width: max(var(--lay-right-cw),
+                 calc(100% - var(--lay-rail-w) - var(--lay-centre-min)));
+}
 .rw-editor__right--collapsed { flex-basis: var(--lay-right-cw); }
+
+/* The seam between the canvas and the preview, dragged to set the preview's
+ * width. It is its own flex item and takes NO room in the row -- the columns
+ * keep the geometry above -- and its hit area is a pseudo-element hanging over
+ * the seam, 9px wide so it can be caught without pixel-hunting.
+ *
+ * It is deliberately NOT an absolutely positioned child of .rw-editor__right.
+ * A menu in this app is one box placed at the VIEWPORT point the gesture
+ * happened at, and a column that is a containing block is a column every menu
+ * opened inside it is offset by. A zero-width sibling establishes nothing and
+ * has nothing inside it to displace, so the seam can be grabbed without the
+ * preview's menus having to care how it was built. */
+.rw-editor__grip {
+  flex: 0 0 0px; position: relative; z-index: 3;
+  align-self: stretch; padding: 0; border: 0; background: transparent;
+  cursor: col-resize; touch-action: none;
+}
+.rw-editor__grip::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -4px; width: 9px;
+}
+/* The line the eye follows. Quiet until the seam is pointed at, held while a
+   drag is live so the grip stays visible once the pointer has run off it. */
+.rw-editor__grip::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 3px;
+  background: transparent;
+}
+.rw-editor__grip:hover::after,
+.rw-editor__grip:focus-visible::after,
+.rw-editor__grip--live::after { background: var(--accent); }
+.rw-editor__grip:focus-visible { outline: none; }
+/* While a drag is live the pointer sweeps across paragraphs and table cells:
+   without this it turns into a text caret and the sweep selects text. */
+body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-select: none; }
 .rw-rightstrip {
   width: var(--lay-right-cw); height: 100%;
   display: flex; flex-direction: column; align-items: center; gap: var(--sp-12);

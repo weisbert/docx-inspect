@@ -98,6 +98,10 @@ function initialState() {
     ui: {
       rightTab: 'preview', // 'preview' | 'check' | 'exchange' | 'history'
       rightOpen: true,
+      // Width of the right panel in px, as the user last dragged it. null means
+      // "whatever the stylesheet says" (--lay-right-w); the editor writes an
+      // inline flex-basis only while a number is held here.
+      rightWidth: null,
       assetsOpen: false,
       previewFidelity: 'approximate', // 'approximate' | 'proof'
       follow: true,
@@ -111,7 +115,8 @@ function initialState() {
  * ------------------------------------------------------------------ */
 
 const STORAGE_KEY = 'rw.ui';
-const PERSISTED_UI = ['rightTab', 'rightOpen', 'assetsOpen', 'previewFidelity', 'lastNode'];
+const PERSISTED_UI = ['rightTab', 'rightOpen', 'rightWidth', 'assetsOpen',
+  'previewFidelity', 'lastNode'];
 
 // Every storage access is wrapped: a private window, a blocked third-party
 // context or a full quota must never stop the app from starting.
