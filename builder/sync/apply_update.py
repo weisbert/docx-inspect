@@ -333,6 +333,31 @@ def _new_backup_dir(root):
 # ---------------------------------------------------------------------------
 
 
+def _detach_node(nodes, node_id=None, title=None):
+    """Remove one section from the tree it lives in; return it, or None.
+
+    The other ops all edit a node in place, so they can address it with
+    ``_find_node`` and never need to know who holds it. Dropping a section is
+    the one edit that needs the holder, because the section has to come out of
+    somebody's child list -- the top-level ``outline`` for a chapter, a parent's
+    ``children`` for a sub-section.
+
+    Without this, a bundle could only drop a sub-section by sending
+    ``set_children`` for its parent, which replaces the parent's WHOLE sub-tree:
+    every sibling travels along and overwrites whatever the copy on the other
+    side had. One section is removed and a dozen unrelated ones are clobbered.
+    """
+    for i, n in enumerate(nodes):
+        if node_id and n.get("id") == node_id:
+            return nodes.pop(i)
+        if title and not node_id and n.get("title") == title:
+            return nodes.pop(i)
+        hit = _detach_node(n.get("children", []), node_id, title)
+        if hit is not None:
+            return hit
+    return None
+
+
 def _find_node(nodes, node_id=None, title=None):
     for n in nodes:
         if node_id and n.get("id") == node_id:
@@ -362,6 +387,19 @@ def _apply_ops(project, ops):
     log = []
     for op in ops or []:
         kind = op.get("op")
+        if kind == "delete_node":
+            # Addressed like every other op, but it detaches instead of editing,
+            # so it cannot go through the shared _find_node lookup below.
+            gone = _detach_node(project.get("outline", []),
+                                op.get("node_id"), op.get("title"))
+            if gone is None:
+                log.append("  = delete '%s': already absent"
+                           % (op.get("title") or op.get("node_id")))
+            else:
+                log.append("  - deleted section '%s' (%d block(s), %d child section(s))"
+                           % (gone.get("title", ""), len(gone.get("blocks") or []),
+                              len(gone.get("children") or [])))
+            continue
         node = _find_node(project.get("outline", []),
                           op.get("node_id"), op.get("title"))
         if node is None:

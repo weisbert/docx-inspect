@@ -255,8 +255,44 @@ def test_snapshot_finds_nested_reports():
           str(found))
 
 
+def test_delete_node():
+    """A section can be dropped without its siblings riding along.
+
+    Before delete_node the only way to remove a sub-section was set_children on
+    its parent, which ships every sibling too -- one removal, a dozen unrelated
+    sections overwritten. These check that the removal is surgical, that it
+    reaches a nested section as well as a top-level one, and that re-applying the
+    same bundle is a no-op rather than an error.
+    """
+    p = _proj()
+    au._find_node(p["outline"], node_id="a")["children"].append(
+        {"id": "b2", "title": "Keep me", "blocks": [], "children": []})
+
+    log = au._apply_ops(p, [{"op": "delete_node", "node_id": "b"}])
+    kept = au._find_node(p["outline"], node_id="a")["children"]
+    check(au._find_node(p["outline"], node_id="b") is None,
+          "delete_node removes the addressed section", str(log))
+    check([n["id"] for n in kept] == ["b2"],
+          "and leaves its siblings in place", str([n["id"] for n in kept]))
+    check(any("deleted section" in ln for ln in log), "and says so", str(log))
+
+    # Re-applying the same op is a no-op: a patch bundle is meant to be
+    # re-runnable, and the section it names is already gone.
+    log = au._apply_ops(p, [{"op": "delete_node", "node_id": "b"}])
+    check(any("already absent" in ln for ln in log),
+          "delete_node is idempotent", str(log))
+
+    # Top-level chapter, addressed by title.
+    log = au._apply_ops(p, [{"op": "delete_node", "title": "Intro"}])
+    check(au._find_node(p["outline"], node_id="a") is None,
+          "delete_node reaches a top-level chapter by title", str(log))
+    check(len(p["outline"]) == 1 and p["outline"][0]["id"] == "c",
+          "and the chapter's children go with it", str(p["outline"]))
+
+
 def main():
     test_find_and_ops()
+    test_delete_node()
     test_run_plan_and_bundle()
     test_partial_failure()
     test_rollback_created()
