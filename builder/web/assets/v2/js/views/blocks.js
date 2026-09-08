@@ -993,7 +993,7 @@ function CaptionRow(props) {
  * ------------------------------------------------------------------ */
 
 export function ProseCard(props) {
-  const { blocks, numbers, index, first, last, acts, selected, marks } = props;
+  const { blocks, numbers, index, first, last, acts, selected, marks, footer } = props;
   const boxRef = useRef(null);
   const focusedRef = useRef(false);
   const caretRef = useRef(null);       // last caret seen in this card, in model terms
@@ -1148,6 +1148,7 @@ export function ProseCard(props) {
       ${picker ? html`
         <${RefPicker} numbers=${numbers} onClose=${() => setPicker(false)}
                       onPick=${(id) => { setPicker(false); insertRef(id); }} />` : null}
+      ${footer || null}
     </div>`;
 }
 
@@ -1195,7 +1196,7 @@ function RefPicker(props) {
 const WIDTH_OPTIONS = [5, 7.5, 10, 12, 15.5];
 
 export function FigureCard(props) {
-  const { block, index, first, last, acts, numbers, selected, dir } = props;
+  const { block, index, first, last, acts, numbers, selected, dir, footer } = props;
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(null);
   const fileRef = useRef(null);
@@ -1414,6 +1415,7 @@ export function FigureCard(props) {
             <div class="rw-micro">${T.storedIn}</div>
           </div>`}
       </div>
+      ${footer || null}
     </div>`;
 }
 
@@ -1422,7 +1424,7 @@ export function FigureCard(props) {
  * ------------------------------------------------------------------ */
 
 export function FigureGridCard(props) {
-  const { block, index, first, last, acts, numbers, selected, dir } = props;
+  const { block, index, first, last, acts, numbers, selected, dir, footer } = props;
   const entry = numbers && numbers.get ? numbers.get(block.id) : null;
   const label = entry ? entry.label : '';
   const items = Array.isArray(block.items) ? block.items : (block.items = []);
@@ -1613,6 +1615,7 @@ export function FigureGridCard(props) {
         </div>
         <div class="rw-micro">${T.storedIn}</div>
       </div>
+      ${footer || null}
     </div>`;
 }
 
@@ -1668,7 +1671,7 @@ function askNaturalWidth(mod, block, cfg) {
 }
 
 export function TableCard(props) {
-  const { block, index, first, last, acts, numbers, selected, dir, cfg, node } = props;
+  const { block, index, first, last, acts, numbers, selected, dir, cfg, node, footer } = props;
   const [mod, setMod] = useState(null);
   const entry = numbers && numbers.get ? numbers.get(block.id) : null;
   const label = entry ? entry.label : '';
@@ -1742,6 +1745,7 @@ export function TableCard(props) {
         <${CaptionRow} numberLabel=${label} value=${block.caption}
                        onChange=${(value) => { block.caption = value; acts.changed(); }} />
       </div>
+      ${footer || null}
     </div>`;
 }
 
@@ -1974,6 +1978,7 @@ export function BlockCard(props) {
   const {
     block, card, index, node, dir, cfg, project, captions, selected,
     editingMarks, onChange, onSelect, onDelete, onDuplicate, onMoveUp, onMoveDown,
+    footer,
   } = props || {};
   const marksFromStore = useStore((state) => state.ui.marks);
   const marks = editingMarks === undefined ? marksFromStore : editingMarks;
@@ -2039,9 +2044,16 @@ export function BlockCard(props) {
 
   const first = at <= 0;
   const last = at + span >= siblings.length;
+
+/* A card's FOOTER, drawn by whoever owns the card's contents -- today the notes
+ * strip, from js/views/editor.js. It goes INSIDE the card, as the last thing in
+ * it, because a card is the only element on the canvas that knows how wide it
+ * is: a table card takes the width its columns add up to, so a strip that sat
+ * beside the card in the canvas slot spread across the whole pane and left its
+ * button at the far edge of the screen, an inch from what it annotates. */
   const shared = {
     block: own, index: at, first: first, last: last, acts: acts, numbers: numbers,
-    selected: !!selected, dir: dir, cfg: cfg, node: node,
+    selected: !!selected, dir: dir, cfg: cfg, node: node, footer: footer,
   };
 
   if (own.type === 'para') {
@@ -2050,7 +2062,7 @@ export function BlockCard(props) {
       : siblings.slice(at, at + span);
     return html`
       <${ProseCard} blocks=${run} numbers=${numbers} index=${at} first=${first} last=${last}
-                    acts=${acts} marks=${marks} selected=${!!selected} />`;
+                    acts=${acts} marks=${marks} selected=${!!selected} footer=${footer} />`;
   }
   if (own.type === 'image') return html`<${FigureCard} ...${shared} />`;
   if (own.type === 'imagegrid') return html`<${FigureGridCard} ...${shared} />`;

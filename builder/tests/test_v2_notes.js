@@ -30,7 +30,13 @@
  *   5. Claude's own replies are read-only, so authorship stays honest;
  *   6. the section note panel can be CLOSED again (it could not before);
  *   7. nothing about a note reaches the outline, the blocks or the export --
- *      the document keeps every field it had.
+ *      the document keeps every field it had;
+ *   8. the strip lines up with the card it belongs to -- including a TABLE
+ *      card, which is as wide as its columns add up to rather than as wide as
+ *      the text measure. The strip first lived beside the card in the canvas
+ *      slot, and that slot spends the whole pane when it holds a wide table:
+ *      the strip stretched across all of it and put its button at the far left
+ *      edge of the screen, an inch from the table it annotates.
  *
  * IT NEVER TOUCHES REAL REPORTS. The fixture is generated from scratch into the
  * OS temporary directory and the server is booted against THAT with an explicit
@@ -61,6 +67,7 @@ const REPORT_DIR = PROJECT_ID + '/' + MODULE_ID + '/CDR';
 const SECTION = 'Simulation results';
 
 const FIG_ID = 'b-fig-1';
+const TABLE_ID = 'b-table-1';
 const OLD_NOTE = 'Re-run this corner before the sign-off';
 const CLAUDE_NOTE = 'The slow corner is already in the table above';
 const TYPED_NOTE = 'Ask the layout owner for the updated pad ring';
@@ -107,6 +114,40 @@ function sampleReport() {
           ],
         },
         { type: 'image', id: FIG_ID, file: 'images/original.png', caption: 'Output', width_cm: 12 },
+        // Two simulation groups of three axes each: wider than the text
+        // measure, so this card breaks out of the lane and the strip under it
+        // has something to line up WITH.
+        {
+          type: 'datatable', id: TABLE_ID, kind: 'compliance',
+          caption: 'Divider performance',
+          data: {
+            spec_name: 'Spec',
+            sims: [
+              { key: 'pre', title: 'Schematic', stage: 'CDR', axes: ['MIN', 'TYP', 'MAX'] },
+              { key: 'post', title: 'Extracted', stage: 'CDR', axes: ['MIN', 'TYP', 'MAX'] },
+            ],
+            rows: [
+              {
+                cat: 'Conditions', item: 'Supply', unit: 'V', kind: 'common_setting',
+                limit: null, sim_span: false, spec: null,
+                spec_mtm: [null, '1.80', null], spec_ntwc: null,
+                sims: {
+                  pre: { mtm: [null, '1.80', null], ntwc: null },
+                  post: { mtm: [null, '1.80', null], ntwc: null },
+                },
+              },
+              {
+                cat: 'Performance', item: 'Divided frequency', unit: 'GHz', kind: 'result',
+                limit: 'le', sim_span: false, spec: null,
+                spec_mtm: ['4.8', '5.0', '5.2'], spec_ntwc: null,
+                sims: {
+                  pre: { mtm: ['4.85', '5.01', '5.14'], ntwc: null },
+                  post: { mtm: ['4.83', '5.00', '5.30'], ntwc: null },
+                },
+              },
+            ],
+          },
+        },
       ],
       children: [],
     }],
@@ -407,7 +448,47 @@ async function browserChecks() {
     check('and the panel has a way back',
       (await page.locator('.rw-formatstatus .rw-textarea').count()) === 0);
 
-    /* ---- 7: nothing leaked into the document ---- */
+    /* ---- 7: the strip lines up with the card it belongs to ---- */
+    section('where the strip sits');
+    await page.locator('.rw-topbar .rw-pill', { hasText: /note/i }).first().click();
+    await settle(page, 200);
+    await page.locator('.rw-tabs__item', { hasText: 'Preview' }).first().click();
+    await settle(page, 300);
+    // The right panel is folded away first: with it open the pane is narrower
+    // than the text measure, every card is capped at the pane and a table card
+    // that is too wide looks exactly like one that is not.
+    await page.locator('.rw-right__head .rw-iconbtn').last().click();
+    await settle(page, 500);
+    const boxes = await page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll('.rw-card').forEach((card) => {
+        const strip = card.querySelector(':scope > .rw-cardnotes');
+        if (!strip) return;
+        const c = card.getBoundingClientRect();
+        const s = strip.getBoundingClientRect();
+        out.push({
+          wide: /rw-card--wide/.test(String(card.className || '')),
+          type: (card.querySelector('.rw-card__type') || {}).textContent || '',
+          cardLeft: Math.round(c.left), cardWidth: Math.round(c.width),
+          stripLeft: Math.round(s.left), stripWidth: Math.round(s.width),
+        });
+      });
+      return out;
+    });
+    check('the strip is inside every card, not beside it',
+      boxes.length >= 3, JSON.stringify(boxes));
+    const wide = boxes.filter((b) => b.wide);
+    check('the table card really is wider than the text measure',
+      wide.length === 1 && wide[0].cardWidth > 900,
+      JSON.stringify(wide));
+    const offset = boxes.map((b) => Math.abs(b.cardLeft - b.stripLeft));
+    check('every strip starts at its own card\'s left edge',
+      offset.every((d) => d <= 2), JSON.stringify(boxes));
+    check('and is as wide as that card',
+      boxes.every((b) => Math.abs(b.cardWidth - b.stripWidth) <= 2), JSON.stringify(boxes));
+    await page.screenshot({ path: path.join(shots, '4-aligned.png') });
+
+    /* ---- 8: nothing leaked into the document ---- */
     section('the document itself');
     const doc = readDoc(reportsRoot);
     const node = (doc.outline || [])[0] || {};

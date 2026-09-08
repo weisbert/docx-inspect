@@ -753,7 +753,10 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
  * these: the strip under every card, the section bar's panel and the right
  * panel's Notes tab. One set of rules, so a note looks the same wherever it is
  * read. */
-.rw-cardnotes { margin: 2px 0 10px; }
+.rw-cardnotes {
+  border-top: 1px solid var(--line-soft); padding: var(--sp-4) var(--sp-9) var(--sp-6);
+  border-radius: 0 0 var(--r-card) var(--r-card);
+}
 .rw-cardnotes__toggle {
   display: flex; align-items: center; gap: var(--sp-6);
   padding: 2px var(--sp-6); border: 0; border-radius: var(--r-ctl);

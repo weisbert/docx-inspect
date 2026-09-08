@@ -2040,6 +2040,13 @@ function Canvas(props) {
                    if (claims) props.onSelectBlock(id, start);
                    else props.onCursorBlock(id);
                  }}>
+              ${/* A NOTE BELONGS TO THE CARD, and `footer` is how it gets there:
+                    named here, so every kind of card grows one from a single
+                    place, and drawn INSIDE the card by views/blocks.js, because
+                    the card is the only element that knows how wide it is. A
+                    table card is as wide as its columns add up to, and a strip
+                    that sat beside it in this slot spread across the whole pane
+                    with its button at the far edge of the screen. */ ''}
               ${BlockCard
                 ? html`<${BlockCard}
                     block=${block} blocks=${card.blocks || [block]} card=${card}
@@ -2051,7 +2058,8 @@ function Canvas(props) {
                     onDelete=${() => props.onDeleteCard(start, count)}
                     onDuplicate=${() => props.onDuplicateCard(start, count)}
                     onMoveUp=${() => moveCard(start, count, -1)}
-                    onMoveDown=${() => moveCard(start, count, 1)} />`
+                    onMoveDown=${() => moveCard(start, count, 1)}
+                    footer=${html`<${CardNotes} block=${block} />`} />`
                 : html`<${FallbackCard}
                     block=${block} blocks=${card.blocks} dir=${dir} selected=${selected}
                     number=${numbered ? numbered.label : null}
@@ -2059,13 +2067,6 @@ function Canvas(props) {
                     onUp=${() => moveCard(start, count, -1)}
                     onDown=${() => moveCard(start, count, 1)}
                     onDelete=${() => props.onDeleteCard(start, count)} />`}
-              ${/* A NOTE BELONGS TO THE CARD, and it is offered here rather
-                    than inside views/blocks.js so that every kind of card --
-                    text, figure, grid, table -- grows one from a single place.
-                    The owner is the card's FIRST block, which is the block this
-                    canvas already hands the card component, so the note stays
-                    with the card when it moves and travels with the report. */ ''}
-              <${CardNotes} block=${block} />
             </div>`;
           return html`<${Fragment} key=${'slot' + start}>${seam(start, i)}${slot}<//>`;
         })}
