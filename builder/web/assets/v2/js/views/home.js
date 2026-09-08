@@ -468,6 +468,9 @@ async function readRootPackage(file) {
     zipB64: await fileToBase64(file),
     note: String((manifest && manifest.note) || ''),
     declaredBase: (manifest && manifest.base_sha) ? String(manifest.base_sha) : null,
+    // Named, not carried: files whose bytes already live on this machine under
+    // another report. The apply copies them; the dialog lists them as rows.
+    copies: Array.isArray(manifest && manifest.copy) ? manifest.copy : [],
   };
 }
 

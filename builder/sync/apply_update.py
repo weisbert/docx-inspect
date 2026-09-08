@@ -31,10 +31,23 @@ Bundle formats (auto-detected):
   * plain zip -- every member is written under the reports root (full replace).
   * smart zip -- contains an ``update.json`` manifest:
         {"projects": {"<dir>": {"mode": "replace"}|{"mode":"patch","ops":[...]}},
-         "files": ["templates/.../config.json", ...], "note": "..."}
+         "files": ["templates/.../config.json", ...],
+         "copy": [{"from": "<dir>/images/x.png", "to": "<dir2>/images/x.png"}],
+         "note": "..."}
     'patch' mode merges ops into the LOCAL ``project.json`` by section id, leaving
     every other section (prose + image references) untouched -- so a single
     section can be updated without a full round-trip and without losing edits.
+
+    'copy' moves a file the package CANNOT carry: one that already exists on this
+    machine but under a different report. A patch that brings a section over from
+    an earlier report brings its image references too, and those files may live
+    only here -- the sender never had the bytes. Rather than asking a person to
+    copy files by hand after every apply, the package names the pair and the apply
+    does it. Both paths are root-relative and containment-checked; an existing
+    destination is KEPT (never clobbered) unless the entry says
+    ``"overwrite": true``, and a missing source is skipped with a line in the log
+    instead of failing the apply. Copied files are recorded like any other created
+    file, so --rollback removes them.
 
 Safety: never deletes an ``images/`` folder; only touches files it is told to;
 backs up before writing; warns if a target changed locally since the last apply.
@@ -713,7 +726,8 @@ def _pick_bundle(root, arg):
 
 def read_bundle(root, bundle_path):
     """Return (manifest_or_None, actions). Each action is (kind, rel, payload):
-    kind in {replace, patch}; payload is bytes for replace, an ops list for patch."""
+    kind in {replace, patch, copy}; payload is bytes for replace, an ops list for
+    patch, and {"src": <root-relative path>, "overwrite": bool} for copy."""
     zf = zipfile.ZipFile(bundle_path)
     names = zf.namelist()
     manifest = None
@@ -735,6 +749,12 @@ def read_bundle(root, bundle_path):
                 member = pdir + "/project.json"
                 if member in names:
                     actions.append(("replace", r, zf.read(member)))
+        for entry in manifest.get("copy") or []:
+            src = _safe_rel(entry.get("from") or "")
+            dst = _safe_rel(entry.get("to") or "")
+            if src and dst:
+                actions.append(("copy", dst, {"src": src,
+                                              "overwrite": bool(entry.get("overwrite"))}))
     else:
         for name in names:
             if name == "update.json":
@@ -753,13 +773,24 @@ def plan_actions(root, actions):
         tgt = os.path.join(root, rel)
         exists = os.path.isfile(tgt)
         warn = False
+        skip = None
         if kind == "replace" and exists:
             cur = _sha(_read(tgt))
             if state.get(rel) and state[rel] != cur and _sha(payload) != cur:
                 warn = True
-        verb = {"replace": "replace" if exists else "create", "patch": "patch"}[kind]
+        if kind == "copy":
+            # Resolve here so the dry-run tells the truth about what will happen.
+            src_abs = os.path.join(root, payload["src"])
+            if not os.path.isfile(src_abs):
+                skip = "source not on this machine: %s" % payload["src"].replace("\\", "/")
+            elif exists and not payload["overwrite"]:
+                skip = "already present"
+            verb = "skip" if skip else "copy"
+        else:
+            verb = {"replace": "replace" if exists else "create",
+                    "patch": "patch"}[kind]
         plan.append({"kind": kind, "rel": rel, "tgt": tgt, "payload": payload,
-                     "exists": exists, "verb": verb, "warn": warn})
+                     "exists": exists, "verb": verb, "warn": warn, "skip": skip})
     return plan, state
 
 
@@ -776,12 +807,29 @@ def run_plan(root, plan, state, on_log=None):
     created = []
     for it in plan:
         try:
+            if it.get("skip"):
+                msg = "  - skipped %s (%s)" % (it["rel"].replace("\\", "/"), it["skip"])
+                logs.append(msg)
+                if on_log:
+                    on_log(msg)
+                continue
             if it["exists"]:
                 dst = os.path.join(bdir, it["rel"])
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(it["tgt"], dst)
             else:
                 created.append(it["rel"].replace("\\", "/"))
+            if it["kind"] == "copy":
+                data = _read(os.path.join(root, it["payload"]["src"]))
+                _atomic_write(it["tgt"], data)
+                state[it["rel"]] = _sha(data)
+                _save_state(root, state)
+                msg = "  + copied %s <- %s" % (it["rel"].replace("\\", "/"),
+                                               it["payload"]["src"].replace("\\", "/"))
+                logs.append(msg)
+                if on_log:
+                    on_log(msg)
+                continue
             if it["kind"] == "replace":
                 _atomic_write(it["tgt"], it["payload"])
                 state[it["rel"]] = _sha(it["payload"])
@@ -855,12 +903,13 @@ def apply_bundle(root, bundle_path, dry=False, on_log=None):
     if not plan or dry:
         return {"note": note,
                 "actions": [{"verb": p["verb"], "rel": p["rel"].replace("\\", "/"),
-                             "warn": p["warn"]} for p in plan],
+                             "warn": p["warn"], "skip": p.get("skip")} for p in plan],
                 "backup": "", "logs": [], "failed": [], "refresh": _REFRESH_NOTE}
     bdir, logs = run_plan(root, plan, state, on_log)
     acts, failed = [], []
     for p in plan:
-        a = {"verb": p["verb"], "rel": p["rel"].replace("\\", "/"), "warn": p["warn"]}
+        a = {"verb": p["verb"], "rel": p["rel"].replace("\\", "/"), "warn": p["warn"],
+             "skip": p.get("skip")}
         if p.get("error"):
             a["error"] = p["error"]
             failed.append({"rel": a["rel"], "error": p["error"]})
@@ -885,6 +934,8 @@ def cmd_apply(root, arg, dry, yes):
         return 1
     for p in plan:
         tail = "  <-- changed locally since last apply (will be backed up)" if p["warn"] else ""
+        if p.get("skip"):
+            tail = "  (%s)" % p["skip"]
         print("  %-8s %s%s" % (p["verb"], p["rel"], tail))
     if dry:
         print("\n[dry-run] nothing written.")

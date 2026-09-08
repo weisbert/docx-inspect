@@ -2917,7 +2917,7 @@ class Handler(BaseHTTPRequestHandler):
         {"dir": <report>, "diff_text" | "diff": <op-diff>} for a returned text
         diff. A package is stored under reports_root/_updates/ and applied via
         the shared apply_update module (full backup of every overwritten file
-        first). Returns the apply summary {note, actions:[{verb,rel,warn}],
+        first). Returns the apply summary {note, actions:[{verb,rel,warn,skip}],
         backup, logs}.
 
         BASELINE POLICY. A package carries the fingerprint of the state it was

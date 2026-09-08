@@ -199,6 +199,7 @@ const TEXT = {
   colSize: 'Size',
   colStatus: 'Status',
   stAccepted: 'Accepted',
+  stCopyHere: 'Copied from another report',
   stRejected: 'Rejected — fixed template section',
   stConfirm: 'Needs confirmation',
   changesTitle: 'What applying it changes',
@@ -988,6 +989,9 @@ async function readPackage(file, dir, project) {
     }
     base.note = String((manifest && manifest.note) || '');
     base.declaredBase = declaredBaseOf(manifest, dir);
+    // Files the package cannot carry because their bytes only exist here: it
+    // names a source already on this machine and the apply copies it over.
+    base.copies = Array.isArray(manifest && manifest.copy) ? manifest.copy : [];
     const target = zip.entries.find(
       (e) => e.name === dir + '/project.json' || e.name === 'project.json');
     if (target) {
@@ -1127,6 +1131,14 @@ function buildManifest(pkg, dir, rejected) {
       goesTo: dir + '/project.json',
       size: formatBytes(pkg.size),
       status: TEXT.stAccepted,
+    });
+  }
+  for (const item of pkg.copies || []) {
+    rows.push({
+      file: String(item.from || ''),
+      goesTo: String(item.to || ''),
+      size: '—',
+      status: TEXT.stCopyHere,
     });
   }
   for (const item of rejected || []) {
