@@ -312,6 +312,13 @@ hr { height: 1px; margin: 0; border: 0; background: var(--line); }
 .rw-empty--over { border-color: var(--accent); background: var(--accent-wash); color: var(--accent); }
 .rw-drop { border: var(--bw-empty) dashed var(--fg-faint); border-radius: var(--r-card); background: var(--bg-sunken); }
 .rw-drop--over { border-color: var(--accent); background: var(--accent-wash); }
+/* An empty figure frame, and an empty cell of a figure grid, are where a paste
+ * lands -- so a press has to SHOW that the next Ctrl+V arrives here. :focus and
+ * not :focus-visible alone: the press that arms the frame is a mouse press,
+ * which is exactly what :focus-visible is defined to ignore. */
+.rw-empty:focus, .rw-figgrid__cell .rw-drop:focus {
+  outline: none; border-style: solid; border-color: var(--accent); color: var(--fg-muted);
+}
 
 /* A dashed action row that closes a list. */
 .rw-dashrow {
@@ -728,8 +735,9 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 }
 .rw-figure__clear:hover { background: var(--bad-wash); border-color: var(--bad-line); color: var(--bad); }
 /* A figure holding a picture is focusable, because Ctrl+V has to land
- * somewhere. Say where it landed. */
-.rw-figure:focus-visible {
+ * somewhere. Say where it landed -- after a press as well as after a Tab, since
+ * a press is how the picture about to be replaced is usually chosen. */
+.rw-figure:focus, .rw-figure:focus-visible {
   outline: none; border-radius: var(--r-grid);
   box-shadow: 0 0 0 var(--bw-focus, 2px) var(--accent);
 }

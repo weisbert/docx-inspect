@@ -79,6 +79,7 @@ const T = {
   deleteBlock: 'Delete block',
   dropHint: 'Paste a screenshot with Ctrl+V, or drop a file',
   clearPicture: 'Remove the picture',
+  chooseFile: 'Choose a file',
   storedIn: 'Stored in images/',
   crossReference: 'Cross-reference',
   pickTarget: 'Pick a figure or table to point at',
@@ -1198,6 +1199,7 @@ export function FigureCard(props) {
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(null);
   const fileRef = useRef(null);
+  const cardRef = useRef(null);       // the whole card: the paste is aimed at it
   const refocus = useRef(false);      // the empty frame takes focus after a clear
   const entry = numbers && numbers.get ? numbers.get(block.id) : null;
   const label = entry ? entry.label : '';
@@ -1234,6 +1236,50 @@ export function FigureCard(props) {
     return true;
   };
 
+  // ONE paste handler for the WHOLE card -- the empty frame, the picture and
+  // the caption row alike -- because a paste is aimed at the FIGURE, not at
+  // whichever of its parts happens to hold the focus. It used to hang on the
+  // frame and on the picture separately, so a paste with the caret in the
+  // caption, or anywhere else in the card, fell through to the asset tray,
+  // which filed the screenshot in images/ and left the block pointing nowhere.
+  //
+  // It claims only when the clipboard really carries a picture, so pasting
+  // words into the caption still reaches the input. Claiming is also what makes
+  // the tray's document-level listener stand aside: one keystroke, one file.
+  const takePaste = (event) => {
+    if (event.defaultPrevented) return;
+    const files = imageFilesFrom(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    take(files);
+  };
+
+  // A SELECTED card takes the paste even when nothing inside it holds the
+  // focus. Selecting a card is a press on its head, and a head focuses nothing
+  // -- so the Ctrl+V that follows reached the document, where the asset tray
+  // stored the picture and left the figure exactly as empty as it was.
+  //
+  // Capture phase, because the tray listens on the document too and registered
+  // first; a bubbling listener here would arrive after it. A paste that landed
+  // INSIDE this card is left alone: takePaste above has it, and taking it here
+  // as well would store the same picture twice.
+  const liveTake = useRef(take);
+  liveTake.current = take;
+  useEffect(() => {
+    if (!selected) return undefined;
+    const onDocumentPaste = (event) => {
+      if (event.defaultPrevented) return;
+      const card = cardRef.current;
+      if (card && event.target && card.contains && card.contains(event.target)) return;
+      const files = imageFilesFrom(event.clipboardData);
+      if (!files.length) return;
+      event.preventDefault();
+      liveTake.current(files);
+    };
+    document.addEventListener('paste', onDocumentPaste, true);
+    return () => document.removeEventListener('paste', onDocumentPaste, true);
+  }, [selected]);
+
   const meta = block.file
     ? block.file.slice('images/'.length) + (size ? '  ' + size.w + ' × ' + size.h : '')
     : '';
@@ -1251,7 +1297,8 @@ export function FigureCard(props) {
     : WIDTH_OPTIONS.concat([storedWidth]).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0));
 
   return html`
-    <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}>
+    <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}
+         ref=${cardRef} onPaste=${takePaste}>
       <${CardHead} marker="rw-card__marker--figure" type=${T.figure} numberLabel=${label}
                    meta=${meta} index=${index} first=${first} last=${last} api=${acts}
                    menuItems=${[{ label: T.replace, onClick: () => fileRef.current && fileRef.current.click() }]}
@@ -1287,19 +1334,6 @@ export function FigureCard(props) {
                  event.preventDefault();
                  setOver(false);
                  takeAsset(event);
-               }}
-               onPaste=${(event) => {
-                 // A FILLED figure takes a paste as well, and the paste
-                 // replaces what is there. Re-taking a screenshot is the
-                 // commonest edit this document gets, and it used to mean
-                 // deleting the whole block -- caption, number and all -- or
-                 // going out to the file picker. Claimed the same way the empty
-                 // frame claims it, so the asset tray's document-level listener
-                 // stands aside and one keystroke writes images/ once.
-                 const files = imageFilesFrom(event.clipboardData);
-                 if (!files.length) return;
-                 event.preventDefault();
-                 take(files);
                }}>
             <div class="rw-figure__frame">
               <img class="rw-figure__img" src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
@@ -1351,20 +1385,32 @@ export function FigureCard(props) {
                  if (takeAsset(event)) return;
                  take(imageFilesFrom(event.dataTransfer));
                }}
-               onPaste=${(event) => {
-                 const files = imageFilesFrom(event.clipboardData);
-                 if (!files.length) return;
-                 // This card is storing the picture, so nothing else may. The
-                 // asset tray listens for paste on the document and steps aside
-                 // for a paste that was already claimed; saying so is what keeps
-                 // one keystroke from writing images/ twice. Only claimed when
-                 // there is really a picture here, so a text paste still reaches
-                 // whatever else wants it.
-                 event.preventDefault();
-                 take(files);
+               onClick=${(event) => {
+                 // A PRESS ARMS THE FRAME. IT DOES NOT OPEN A DIALOG.
+                 //
+                 // Every press used to open the file picker, which is a native
+                 // window: it takes the focus off the page, and it was the one
+                 // thing that guaranteed the Ctrl+V this frame's own hint asks
+                 // for could not land. It was also the long way round to a
+                 // screenshot the user never saved to disk in the first place.
+                 //
+                 // The press now takes the focus, so the paste that follows
+                 // arrives here. The picker is still one press away: the button
+                 // below, Replace on the head, or a double-press on the frame.
+                 const node = event.currentTarget;
+                 if (node && node.focus) node.focus();
                }}
-               onClick=${() => fileRef.current && fileRef.current.click()}>
+               onDblClick=${() => fileRef.current && fileRef.current.click()}>
             <div class="rw-empty__title">${T.dropHint}</div>
+            <div class="rw-empty__actions">
+              <${Button} level="tertiary"
+                         onClick=${(event) => {
+                           // The button is the picker; the frame around it is
+                           // not, so the press stops here.
+                           event.stopPropagation();
+                           if (fileRef.current) fileRef.current.click();
+                         }}>${T.chooseFile}<//>
+            </div>
             <div class="rw-micro">${T.storedIn}</div>
           </div>`}
       </div>
@@ -1383,6 +1429,7 @@ export function FigureGridCard(props) {
   const cols = Math.max(1, parseInt(block.cols, 10) || 2);
   const [over, setOver] = useState(-1);
   const fileRef = useRef(null);
+  const cardRef = useRef(null);       // the whole card: the paste is aimed at it
   const slotRef = useRef(-1);
 
   // One trailing empty cell is always offered, so there is always somewhere to
@@ -1413,8 +1460,49 @@ export function FigureGridCard(props) {
     return true;
   };
 
+  // Where a picture goes when the paste named the CARD rather than a cell.
+  // The first free cell, which is the one a reader would point at: a grid is
+  // filled left to right and the trailing cell is always empty.
+  const firstFreeSlot = () => {
+    for (let i = 0; i < items.length; i++) {
+      if (!items[i] || !items[i].file) return i;
+    }
+    return items.length;
+  };
+
+  // The card's own paste, for everything outside a cell -- the caption row, a
+  // sub-caption, the card head. A cell that took the paste itself has already
+  // claimed it and this steps aside. See the figure card for why claiming is
+  // what keeps the asset tray from storing the same picture a second time.
+  const takePaste = (event) => {
+    if (event.defaultPrevented) return;
+    const files = imageFilesFrom(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    take(firstFreeSlot(), files);
+  };
+
+  // The selected card takes the paste with nothing inside it focused, exactly
+  // as a figure card does, and for the same reason: selecting a card is a press
+  // on its head, and a head focuses nothing. Capture phase, and a paste that
+  // landed inside the card is left to the handlers that are already on it.
+  const livePaste = useRef(takePaste);
+  livePaste.current = takePaste;
+  useEffect(() => {
+    if (!selected) return undefined;
+    const onDocumentPaste = (event) => {
+      if (event.defaultPrevented) return;
+      const card = cardRef.current;
+      if (card && event.target && card.contains && card.contains(event.target)) return;
+      livePaste.current(event);
+    };
+    document.addEventListener('paste', onDocumentPaste, true);
+    return () => document.removeEventListener('paste', onDocumentPaste, true);
+  }, [selected]);
+
   return html`
-    <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}>
+    <div class=${cx('rw-card', selected && 'rw-card--selected')} data-block=${index}
+         ref=${cardRef} onPaste=${takePaste}>
       <${CardHead} marker="rw-card__marker--figure" type=${T.figureGrid} numberLabel=${label}
                    meta=${T.figuresAndColumns(items.filter((it) => it && it.file).length, cols)}
                    index=${index} first=${first} last=${last} api=${acts}
@@ -1458,7 +1546,19 @@ export function FigureGridCard(props) {
                        take(slot, files);
                      }}
                      tabIndex="0"
-                     onClick=${() => { slotRef.current = slot; if (fileRef.current) fileRef.current.click(); }}>
+                     onClick=${(event) => {
+                       // The cell is a paste target and a press arms it, for
+                       // the reason spelled out on the figure card's frame: the
+                       // file picker is a native window and takes the focus the
+                       // Ctrl+V needs. The picker is the button in the cell, or
+                       // a double-press.
+                       const node = event.currentTarget;
+                       if (node && node.focus) node.focus();
+                     }}
+                     onDblClick=${() => {
+                       slotRef.current = slot;
+                       if (fileRef.current) fileRef.current.click();
+                     }}>
                   ${item.file
                     ? html`
                       <div class="rw-figure__frame">
@@ -1469,17 +1569,32 @@ export function FigureGridCard(props) {
                                        onClick=${(event) => {
                                          // The cell keeps its place and its
                                          // sub-caption; only the picture goes.
-                                         // The press must not reach the cell,
-                                         // whose click opens the file picker --
-                                         // clearing would immediately be asked
-                                         // to fill again.
+                                         // The press stops here and the cell
+                                         // around it takes the focus, so the
+                                         // Ctrl+V that brings the new picture
+                                         // needs no click of its own.
                                          event.stopPropagation();
+                                         const cell = event.currentTarget.closest
+                                           ? event.currentTarget.closest('.rw-drop') : null;
                                          while (items.length <= slot) items.push({ file: '', sub: '' });
                                          items[slot] = Object.assign({}, items[slot], { file: '' });
                                          acts.changed();
+                                         if (cell && cell.focus) cell.focus();
                                        }} />
                       </div>`
-                    : html`<span class="rw-micro">${T.dropHint}</span>`}
+                    : html`
+                      <div class="rw-empty__actions"
+                           style=${{ flexDirection: 'column', marginTop: 0, textAlign: 'center' }}>
+                        <span class="rw-micro">${T.dropHint}</span>
+                        <${Button} level="tertiary"
+                                   onClick=${(event) => {
+                                     // The button is the picker; the cell
+                                     // around it is not.
+                                     event.stopPropagation();
+                                     slotRef.current = slot;
+                                     if (fileRef.current) fileRef.current.click();
+                                   }}>${T.chooseFile}<//>
+                      </div>`}
                 </div>
                 ${block.sub_captions ? html`
                   <input class="rw-input" type="text" value=${item.sub || ''} aria-label=${T.subCaption}
