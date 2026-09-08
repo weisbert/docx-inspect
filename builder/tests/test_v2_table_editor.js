@@ -83,7 +83,12 @@ const HEALTHY_SIBLING = PROJECT_ID + '/' + MODULE_ID + '/PDR';
 const BROKEN_SIBLING = PROJECT_ID + '/' + MODULE_ID + '/FDR';
 
 const SECTION = 'Simulation results';
-const SECOND_SECTION = 'Notes';
+// A second section to navigate to. It is NOT called 'Notes': clickText below
+// matches any clickable whose text CONTAINS the label, and the frame now has
+// a Notes tab, a Notes pill and a Notes strip under every card -- one of which
+// would be clicked instead of the outline row, leaving the first section on
+// screen and its row count in the footer.
+const SECOND_SECTION = 'Bench setup';
 const TABLE_ID = 'b-table-1';
 
 /* The column plan this fixture produces, and every index used below:

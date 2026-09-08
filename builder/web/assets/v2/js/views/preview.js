@@ -57,6 +57,10 @@ import {
   EmptyState, Pill, Spinner, Menu, Toast,
   useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback,
 } from '../components/index.js';
+// The third tab. This file owns the panel and its tab strip; views/notes.js
+// owns what a note is, so the list here and the panel under a card cannot
+// drift apart.
+import { NotesTab, countOpenNotes } from './notes.js';
 
 /* ------------------------------------------------------------------ *
  * Frozen strings.
@@ -80,6 +84,7 @@ const SEP = ' ' + String.fromCharCode(0x00b7) + ' '; // middle dot list separato
 const S = {
   preview: 'Preview',
   check: 'Check',
+  notes: 'Notes',
   approximate: 'Approximate layout',
   proof: 'Proof this section',
   seconds: '{n}s',
@@ -1742,7 +1747,9 @@ export function RightPanel(props) {
       </div>`;
   }
 
-  const tab = ui.rightTab === 'check' ? 'check' : 'preview';
+  const tab = ui.rightTab === 'check' ? 'check'
+    : ui.rightTab === 'notes' ? 'notes' : 'preview';
+  const openNoteCount = countOpenNotes(project);
   return html`
     <div ref=${rootRef} class=${classNames(!nested && 'rw-editor__right', nested && 'rw-preview__fill')}>
       <div class="rw-right__head">
@@ -1756,6 +1763,14 @@ export function RightPanel(props) {
             ${S.check}
             ${errorCount ? html`<span class="rw-check__badge">${errorCount}</span>` : null}
           </button>
+          <button type="button" role="tab" aria-selected=${String(tab === 'notes')}
+                  class=${classNames('rw-tabs__item', tab === 'notes' && 'rw-tabs__item--on')}
+                  onClick=${() => store.setUi({ rightTab: 'notes' })}>
+            ${S.notes}
+            ${openNoteCount
+              ? html`<span class="rw-check__badge">${openNoteCount}</span>`
+              : null}
+          </button>
         </div>
         <span class="rw-spacer"></span>
         <${ExportChip} />
@@ -1765,7 +1780,9 @@ export function RightPanel(props) {
       <${ExportDialog} />
       ${tab === 'preview'
         ? html`<${PreviewTab} dir=${dir} />`
-        : html`<${CheckTab} dir=${dir} />`}
+        : tab === 'notes'
+          ? html`<${NotesTab} dir=${dir} />`
+          : html`<${CheckTab} dir=${dir} />`}
     </div>`;
 }
 

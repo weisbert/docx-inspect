@@ -43,6 +43,10 @@ import {
   html, cx, Fragment,
   useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback,
 } from '../components/index.js';
+// The notes channel: a remark about the report that never becomes part of it.
+// This file owns where a note is OFFERED -- under every card, and the count in
+// the top bar -- and views/notes.js owns what a note is and how it is written.
+import { CardNotes, countOpenNotes } from './notes.js';
 
 /* ------------------------------------------------------------------ *
  * Frozen strings
@@ -139,6 +143,10 @@ const S = {
   nextSection: 'Next section',
   sectionNote: 'Section note',
   sectionNoteHint: 'Notes travel with the report and never appear in the exported file',
+  hideSectionNote: 'Hide the section note',
+  notes: 'Notes',
+  noNotes: 'No notes',
+  openNotes: (n) => n + (n === 1 ? ' open note' : ' open notes'),
   // format toolbar
   styleLabel: 'Style',
   font: 'Font',
@@ -840,6 +848,11 @@ function Header(props) {
   const { dir, project, cfg } = props;
   const tree = useStore((s) => s.tree);
   const saveState = useStore((s) => s.saveState);
+  // Recomputed when the document changes, which `rev` is: a note added under a
+  // card has to reach this pill without a reload.
+  const noteRev = useStore((s) => s.rev);
+  const noteProject = useStore((s) => s.project);
+  const openNoteCount = useMemo(() => countOpenNotes(noteProject), [noteProject, noteRev]);
   const saveBlock = useStore((s) => s.saveBlock);
   const savedAt = useStore((s) => s.savedAt);
   const dirty = useStore((s) => s.dirty);
@@ -916,6 +929,11 @@ function Header(props) {
           ${since > 0
             ? html`<span class="rw-warn">${' · ' + since + ' ' + S.sectionsChangedSince}</span>`
             : null}
+        <//>
+        <${Pill} tone=${openNoteCount > 0 ? 'warn' : 'neutral'} glyph="\u{1F4DD}"
+                 title=${S.notes}
+                 onClick=${() => store.setUi({ rightOpen: true, rightTab: 'notes' })}>
+          ${openNoteCount > 0 ? S.openNotes(openNoteCount) : S.noNotes}
         <//>
         <${Button} level="tertiary" onClick=${props.onHistory}>${S.history}<//>
 
@@ -1463,8 +1481,15 @@ function SectionBar(props) {
                   title=${text(node.title) || S.untitledSection}
                   onDblClick=${() => { setDraft(text(node.title)); setEditing(true); }}
             >${row.number + '  ' + (text(node.title) || S.untitledSection)}</span>`}
+        ${/* The pill is the note's SWITCH, not a badge -- it says so with a
+              caret, because the panel it opens used to have no way back and
+              the only thing that closed it was leaving the section. */ ''}
         ${hasNote || noteOpen
-          ? html`<${Pill} tone="note" onClick=${() => setNoteOpen(!noteOpen)}>${S.sectionNote}<//>`
+          ? html`
+            <${Pill} tone="note" onClick=${() => setNoteOpen(!noteOpen)}
+                     title=${noteOpen ? S.hideSectionNote : S.sectionNote}>
+              ${S.sectionNote + (noteOpen ? '  \u25B4' : '  \u25BE')}
+            <//>`
           : null}
         <div class="rw-sectionbar__actions">
           ${!hasNote && !noteOpen
@@ -1488,6 +1513,8 @@ function SectionBar(props) {
                       }}></textarea>
             <div class="rw-meta">${S.sectionNoteHint}</div>
           </div>
+          <${IconButton} glyph="\u00d7" small=${true} title=${S.hideSectionNote}
+                         onClick=${() => setNoteOpen(false)} />
         </div>` : null}
     <//>`;
 }
@@ -2032,6 +2059,13 @@ function Canvas(props) {
                     onUp=${() => moveCard(start, count, -1)}
                     onDown=${() => moveCard(start, count, 1)}
                     onDelete=${() => props.onDeleteCard(start, count)} />`}
+              ${/* A NOTE BELONGS TO THE CARD, and it is offered here rather
+                    than inside views/blocks.js so that every kind of card --
+                    text, figure, grid, table -- grows one from a single place.
+                    The owner is the card's FIRST block, which is the block this
+                    canvas already hands the card component, so the note stays
+                    with the card when it moves and travels with the report. */ ''}
+              <${CardNotes} block=${block} />
             </div>`;
           return html`<${Fragment} key=${'slot' + start}>${seam(start, i)}${slot}<//>`;
         })}

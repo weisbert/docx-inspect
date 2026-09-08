@@ -748,6 +748,68 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-figgrid { display: grid; gap: var(--sp-9); }
 .rw-figgrid__cell { display: flex; flex-direction: column; gap: var(--sp-4); }
 
+/* == 16b - notes =============================================================
+ * A remark ABOUT the report that never becomes part of it. Three places wear
+ * these: the strip under every card, the section bar's panel and the right
+ * panel's Notes tab. One set of rules, so a note looks the same wherever it is
+ * read. */
+.rw-cardnotes { margin: 2px 0 10px; }
+.rw-cardnotes__toggle {
+  display: flex; align-items: center; gap: var(--sp-6);
+  padding: 2px var(--sp-6); border: 0; border-radius: var(--r-ctl);
+  background: transparent; color: var(--fg-faint);
+  font: inherit; font-size: var(--fs-meta); cursor: pointer;
+}
+.rw-cardnotes__toggle:hover { color: var(--fg-dim); background: var(--bg-sunken); }
+.rw-cardnotes__toggle:focus-visible { outline: none; color: var(--accent); }
+.rw-cardnotes--live .rw-cardnotes__toggle { color: var(--warn); }
+.rw-cardnotes__count {
+  min-width: 16px; padding: 0 5px; border-radius: 8px; text-align: center;
+  background: var(--line); color: var(--fg-dim); font-size: var(--fs-micro);
+}
+.rw-cardnotes__count--live { background: var(--warn-wash, var(--accent-wash)); color: var(--warn); }
+.rw-cardnotes__caret { font-size: var(--fs-micro); }
+.rw-cardnotes .rw-notes { margin: var(--sp-4) 0 0 var(--sp-9); }
+
+.rw-notes {
+  border: 1px solid var(--line); border-left: 2px solid var(--note-line, var(--line-strong));
+  border-radius: var(--r-card); background: var(--bg-panel); padding: var(--sp-6) var(--sp-9);
+}
+.rw-note { display: flex; gap: var(--sp-9); padding: var(--sp-6) 0; border-top: 1px solid var(--line2, var(--line)); }
+.rw-note:first-child { border-top: 0; }
+.rw-note--done { opacity: .55; }
+.rw-note__meta { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; min-width: 66px; }
+.rw-note__by {
+  padding: 1px var(--sp-6); border-radius: 8px; background: var(--accent-wash); color: var(--accent);
+  font-size: var(--fs-micro); font-weight: var(--fw-strong); white-space: nowrap; text-align: center;
+}
+.rw-note__by--claude { background: var(--note-wash, var(--bg-sunken)); color: var(--note-ink, var(--fg-dim)); }
+.rw-note__at { color: var(--fg-faint); font-size: var(--fs-micro); text-align: center; }
+.rw-note__main { flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.rw-note__text { width: 100%; min-height: 34px; }
+.rw-note__text[readonly] { background: var(--bg-sunken); color: var(--fg-dim); }
+.rw-note__actions { display: flex; align-items: center; gap: var(--sp-6); }
+.rw-note__status {
+  padding: 1px var(--sp-9); border: 1px solid var(--line-strong); border-radius: var(--r-ctl);
+  background: var(--bg-panel); color: var(--warn); font: inherit; font-size: var(--fs-micro); cursor: pointer;
+}
+.rw-note__status--done { color: var(--good, var(--fg-dim)); border-color: var(--good-line, var(--line)); }
+.rw-note__add { display: flex; align-items: flex-start; gap: var(--sp-6); padding-top: var(--sp-6); }
+.rw-note__add .rw-textarea { flex: 1 1 auto; min-height: 34px; }
+
+.rw-noteslist { padding: var(--sp-12); overflow: auto; }
+.rw-noteslist__head { display: flex; flex-direction: column; gap: var(--sp-4); padding-bottom: var(--sp-9); }
+.rw-notesgroup { margin-bottom: var(--sp-12); }
+.rw-notesgroup__head { display: flex; align-items: center; gap: var(--sp-6); padding-bottom: var(--sp-4); }
+.rw-notesgroup__where {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-muted); font-size: var(--fs-meta); font-weight: var(--fw-strong);
+}
+.rw-notesgroup__plain {
+  display: flex; gap: var(--sp-6); padding: var(--sp-4) 0 var(--sp-6);
+  color: var(--fg-dim); font-size: var(--fs-meta);
+}
+
 /* == 17 - table surface =====================================================
  * The grid control draws its own cells; these rules set the surround and the
  * semantic fills, so both table shapes read the same. */
