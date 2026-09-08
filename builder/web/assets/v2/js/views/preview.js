@@ -51,7 +51,7 @@ import { store, useStore } from '../store.js';
 import * as api from '../api.js';
 // numericValue is imported alongside the rule it feeds: this file must never
 // grow a second numeric parser, and the pinned test reads this line.
-import { computeCaptionNumbers, formatBytes, classNames, numericValue, simAxisValues, axisValue, flagsFrom } from '../util.js';
+import { computeCaptionNumbers, formatBytes, classNames, numericValue, simAxisValues, axisValue, flagsFrom, gridSubLabel } from '../util.js';
 import {
   html, Fragment, Button, IconButton, SegmentedControl, Dialog, Banner,
   EmptyState, Pill, Spinner, Menu, Toast,
@@ -988,17 +988,6 @@ function ComplianceTable(props) {
 // The label an unlabelled panel of an image grid gets: (a)..(z),(aa),(ab)...
 // The mirror of engine.py::_grid_sub_label, so a grid of more than 26 panels
 // reads the same on the paper as it does in the exported document.
-function gridSubLabel(index) {
-  let n = Number(index) + 1;
-  let s = '';
-  while (n > 0) {
-    const r = (n - 1) % 26;
-    s = String.fromCharCode(97 + r) + s;
-    n = Math.floor((n - 1) / 26);
-  }
-  return '(' + s + ')';
-}
-
 // One block of the document, plus the hover affordance that takes the user to it
 // in the centre canvas.
 function PaperBlock(props) {

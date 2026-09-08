@@ -36,8 +36,8 @@
 
 import { store, useStore } from '../store.js';
 import * as api from '../api.js';
-import { computeCaptionNumbers, groupBlocks } from '../util.js';
-import { Button, IconButton, Field, Banner, Dialog } from '../components/index.js';
+import { computeCaptionNumbers, groupBlocks, gridSubLabel } from '../util.js';
+import { Button, IconButton, Field, Banner, Dialog, Lightbox } from '../components/index.js';
 // The asset tray owns the drag payload its cards carry, so it owns reading it
 // back too: these two are its published readers, not a second copy of the
 // format. The tray promises "Drag onto a figure block or into the text to
@@ -73,6 +73,11 @@ const T = {
   addCaption: 'Add a caption',
   subCaption: 'Sub-caption',
   subCaptions: 'Sub-captions',
+  panelLabels: 'Panel labels (a)(b)',
+  panelLabelsOn: 'Every panel is labelled. Press to stop labelling them',
+  panelLabelsOff: 'Label every panel (a), (b), (c) …',
+  panelPrints: (label) => 'This panel prints ' + label + ' unless a label is typed',
+  panelOverridden: (label) => label + ' is replaced by the label typed here',
   moveUp: 'Move up',
   moveDown: 'Move down',
   duplicate: 'Duplicate',
@@ -80,6 +85,8 @@ const T = {
   dropHint: 'Paste a screenshot with Ctrl+V, or drop a file',
   clearPicture: 'Remove the picture',
   chooseFile: 'Choose a file',
+  inspect: 'Look at this picture full size',
+  picture: 'Picture',
   storedIn: 'Stored in images/',
   crossReference: 'Cross-reference',
   pickTarget: 'Pick a figure or table to point at',
@@ -1199,6 +1206,10 @@ export function FigureCard(props) {
   const { block, index, first, last, acts, numbers, selected, dir, footer } = props;
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(null);
+  // A figure is drawn at the width it will have on the page, which for a
+  // screenshot of a plot is too small to read. Opening it is looking, not
+  // editing: nothing in the viewer writes to the document.
+  const [looking, setLooking] = useState(false);
   const fileRef = useRef(null);
   const cardRef = useRef(null);       // the whole card: the paste is aimed at it
   const refocus = useRef(false);      // the empty frame takes focus after a clear
@@ -1335,7 +1346,8 @@ export function FigureCard(props) {
                  event.preventDefault();
                  setOver(false);
                  takeAsset(event);
-               }}>
+               }}
+               onDblClick=${() => setLooking(true)}>
             <div class="rw-figure__frame">
               <img class="rw-figure__img" src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
                    style=${{ width: (block.width_cm || 15.5) * 26 + 'px' }}
@@ -1343,6 +1355,12 @@ export function FigureCard(props) {
                      const node = event.currentTarget;
                      setSize({ w: node.naturalWidth, h: node.naturalHeight });
                    }} />
+              <${IconButton} className="rw-figure__zoom" small glyph="⤢"
+                             title=${T.inspect}
+                             onClick=${(event) => {
+                               event.stopPropagation();
+                               setLooking(true);
+                             }} />
               <${IconButton} className="rw-figure__clear" small glyph="✕"
                              title=${T.clearPicture}
                              onClick=${(event) => {
@@ -1416,6 +1434,10 @@ export function FigureCard(props) {
           </div>`}
       </div>
       ${footer || null}
+      ${looking && block.file ? html`
+        <${Lightbox} src=${api.imgUrl(dir, block.file)} alt=${block.caption || ''}
+                     title=${label || T.figure} subtitle=${meta}
+                     onClose=${() => setLooking(false)} />` : null}
     </div>`;
 }
 
@@ -1430,6 +1452,9 @@ export function FigureGridCard(props) {
   const items = Array.isArray(block.items) ? block.items : (block.items = []);
   const cols = Math.max(1, parseInt(block.cols, 10) || 2);
   const [over, setOver] = useState(-1);
+  // Which cell is being looked at, or -1. Same reason as the figure card: a
+  // cell of a grid is smaller still.
+  const [looking, setLooking] = useState(-1);
   const fileRef = useRef(null);
   const cardRef = useRef(null);       // the whole card: the paste is aimed at it
   const slotRef = useRef(-1);
@@ -1508,16 +1533,25 @@ export function FigureGridCard(props) {
       <${CardHead} marker="rw-card__marker--figure" type=${T.figureGrid} numberLabel=${label}
                    meta=${T.figuresAndColumns(items.filter((it) => it && it.file).length, cols)}
                    index=${index} first=${first} last=${last} api=${acts}
-                   menuItems=${[{
-                     label: T.subCaptions,
-                     onClick: () => { block.sub_captions = !block.sub_captions; acts.changed(); },
-                   }]}
                    extra=${html`
-        <select class="rw-select rw-select--bar" style=${{ width: '72px', marginLeft: '6px' }}
-                aria-label=${T.columns} title=${T.columns} value=${String(cols)}
-                onChange=${(event) => { block.cols = parseInt(event.currentTarget.value, 10); acts.changed(); }}>
-          ${[1, 2, 3, 4].map((n) => html`<option value=${String(n)} key=${n}>${n}</option>`)}
-        </select>`} />
+        <${Fragment}>
+          <select class="rw-select rw-select--bar" style=${{ width: '72px', marginLeft: '6px' }}
+                  aria-label=${T.columns} title=${T.columns} value=${String(cols)}
+                  onChange=${(event) => { block.cols = parseInt(event.currentTarget.value, 10); acts.changed(); }}>
+            ${[1, 2, 3, 4].map((n) => html`<option value=${String(n)} key=${n}>${n}</option>`)}
+          </select>
+          ${/* ON THE HEAD, AND IT SHOWS ITS STATE. This was one line of an
+                overflow menu that said only 'Sub-captions', with nothing to say
+                whether they were on -- so the panel labels the document has
+                always printed were, in practice, unreachable. */ ''}
+          <${Button} level="tertiary"
+                     className=${block.sub_captions ? 'rw-btn--on' : null}
+                     aria-pressed=${block.sub_captions ? 'true' : 'false'}
+                     title=${block.sub_captions ? T.panelLabelsOn : T.panelLabelsOff}
+                     onClick=${() => { block.sub_captions = !block.sub_captions; acts.changed(); }}>
+            ${T.panelLabels}
+          <//>
+        <//>`} />
       <div class="rw-card__body">
         <input ref=${fileRef} type="file" accept="image/*" class="rw-hidden"
                onChange=${(event) => {
@@ -1558,6 +1592,9 @@ export function FigureGridCard(props) {
                        if (node && node.focus) node.focus();
                      }}
                      onDblClick=${() => {
+                       // A FILLED cell is opened to be looked at; an empty one
+                       // asks for a file, which is what the press was for.
+                       if (item.file) { setLooking(slot); return; }
                        slotRef.current = slot;
                        if (fileRef.current) fileRef.current.click();
                      }}>
@@ -1566,6 +1603,12 @@ export function FigureGridCard(props) {
                       <div class="rw-figure__frame">
                         <img class="rw-figure__img" src=${api.imgUrl(dir, item.file)} alt=${item.sub || ''}
                              style=${{ maxHeight: '150px' }} />
+                        <${IconButton} className="rw-figure__zoom" small glyph="⤢"
+                                       title=${T.inspect}
+                                       onClick=${(event) => {
+                                         event.stopPropagation();
+                                         setLooking(slot);
+                                       }} />
                         <${IconButton} className="rw-figure__clear" small glyph="✕"
                                        title=${T.clearPicture}
                                        onClick=${(event) => {
@@ -1598,14 +1641,31 @@ export function FigureGridCard(props) {
                                    }}>${T.chooseFile}<//>
                       </div>`}
                 </div>
-                ${block.sub_captions ? html`
-                  <input class="rw-input" type="text" value=${item.sub || ''} aria-label=${T.subCaption}
-                         placeholder=${T.subCaption}
-                         onInput=${(event) => {
-                           while (items.length <= slot) items.push({ file: '', sub: '' });
-                           items[slot] = Object.assign({}, items[slot], { sub: event.currentTarget.value });
-                           acts.changed();
-                         }} />` : null}
+                ${/* Only a cell that HOLDS a picture is labelled, which is
+                      engine's rule: it labels the panels, and the trailing
+                      empty cell this grid always offers is not one. A letter
+                      there promises a label the document will not print. */ ''}
+                ${block.sub_captions && item.file ? html`
+                  <div class="rw-figgrid__sub">
+                    ${/* The letter is what the document prints for this panel
+                          when the box is empty -- engine renders `sub` OR the
+                          letter, never both -- so it is shown, and dimmed once
+                          something typed has taken its place. */ ''}
+                    <span class=${cx('rw-figgrid__letter',
+                                     (item.sub || '') && 'rw-figgrid__letter--replaced')}
+                          title=${(item.sub || '')
+                            ? T.panelOverridden(gridSubLabel(slot))
+                            : T.panelPrints(gridSubLabel(slot))}>
+                      ${gridSubLabel(slot)}
+                    </span>
+                    <input class="rw-input" type="text" value=${item.sub || ''} aria-label=${T.subCaption}
+                           placeholder=${T.subCaption}
+                           onInput=${(event) => {
+                             while (items.length <= slot) items.push({ file: '', sub: '' });
+                             items[slot] = Object.assign({}, items[slot], { sub: event.currentTarget.value });
+                             acts.changed();
+                           }} />
+                  </div>` : null}
               </div>`;
           })}
         </div>
@@ -1616,6 +1676,12 @@ export function FigureGridCard(props) {
         <div class="rw-micro">${T.storedIn}</div>
       </div>
       ${footer || null}
+      ${looking >= 0 && items[looking] && items[looking].file ? html`
+        <${Lightbox} src=${api.imgUrl(dir, items[looking].file)}
+                     alt=${items[looking].sub || block.caption || ''}
+                     title=${(label || T.figureGrid) + '  ' + (looking + 1)}
+                     subtitle=${String(items[looking].file).slice('images/'.length)}
+                     onClose=${() => setLooking(-1)} />` : null}
     </div>`;
 }
 

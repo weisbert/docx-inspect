@@ -122,6 +122,25 @@ export function computeCaptionNumbers(outline, fixedBodies) {
 //
 // Returns: [ {kind:'prose', start:<index of first block>, blocks:[...]} |
 //            {kind:'block', idx:<index>, block:<block>} ]
+/* The label a panel of a figure grid prints when nothing has been typed for
+ * it: (a)..(z), then (aa), (ab)... so a grid of more than 26 panels stays
+ * readable instead of running off the end of the alphabet into punctuation.
+ *
+ * MIRRORS core/engine.py::_grid_sub_label, which is the authority -- what Word
+ * prints. Two readers, both here: the paper preview and the grid card's own
+ * chips. Change the rule in both places or the editor promises a label the
+ * document does not keep. */
+export function gridSubLabel(index) {
+  let n = Number(index) + 1;
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(97 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return '(' + s + ')';
+}
+
 export function groupBlocks(blocks) {
   const cards = [];
   let current = null;

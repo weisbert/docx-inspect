@@ -747,6 +747,18 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-caption .rw-input:hover { border-color: var(--line); background: var(--bg-panel); }
 .rw-figgrid { display: grid; gap: var(--sp-9); }
 .rw-figgrid__cell { display: flex; flex-direction: column; gap: var(--sp-4); }
+/* A panel's own label. The letter is what the document prints when the box is
+   empty, so it is shown next to the box rather than hidden in a placeholder. */
+.rw-figgrid__sub { display: flex; align-items: center; gap: var(--sp-4); }
+.rw-figgrid__sub .rw-input { flex: 1 1 auto; min-width: 0; }
+.rw-figgrid__letter {
+  flex: 0 0 auto; min-width: 26px; padding: 0 var(--sp-4); text-align: center;
+  border-radius: var(--r-ctl); background: var(--bg-sunken);
+  color: var(--fg-muted); font-size: var(--fs-micro); font-variant-numeric: tabular-nums;
+}
+.rw-figgrid__letter--replaced { opacity: .4; text-decoration: line-through; }
+/* A tertiary button that is currently ON. */
+.rw-btn--on { background: var(--accent-wash); border-color: var(--accent); color: var(--accent); }
 
 /* == 16b - notes =============================================================
  * A remark ABOUT the report that never becomes part of it. Three places wear
@@ -812,6 +824,59 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
   display: flex; gap: var(--sp-6); padding: var(--sp-4) 0 var(--sp-6);
   color: var(--fg-dim); font-size: var(--fs-meta);
 }
+
+/* == 16c - the picture viewer ===============================================
+ * One picture, as large as the screen allows. It is for LOOKING at: a figure in
+ * the canvas is drawn at the width it will have on the page, and the axis
+ * labels that are the reason the picture is in the report are unreadable
+ * there. */
+.rw-lightbox {
+  position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column;
+  /* Nearly opaque, and dark on purpose. The shared --scrim is a light veil made
+     for a dialog that is still part of the page; this is a room with the lights
+     off, so a plot is judged against nothing but itself and the white type on
+     the bar is legible over whatever the page had there. */
+  background: rgba(11, 13, 16, .94); backdrop-filter: blur(3px);
+}
+.rw-lightbox__bar {
+  display: flex; align-items: center; gap: var(--sp-12);
+  padding: var(--sp-9) var(--sp-12); color: #fff;
+}
+.rw-lightbox__titles { flex: 1 1 auto; min-width: 0; }
+.rw-lightbox__title { font-size: var(--fs-meta); font-weight: var(--fw-strong); }
+.rw-lightbox__sub { font-size: var(--fs-micro); opacity: .7; }
+.rw-lightbox__tools { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-4); }
+.rw-lightbox__btn {
+  min-width: 28px; height: 26px; padding: 0 var(--sp-6);
+  border: 1px solid rgba(255, 255, 255, .28); border-radius: var(--r-ctl);
+  background: rgba(255, 255, 255, .08); color: #fff;
+  font: inherit; font-size: var(--fs-meta); line-height: 1; cursor: pointer;
+}
+.rw-lightbox__btn:hover { background: rgba(255, 255, 255, .2); }
+.rw-lightbox__btn--on { background: #fff; color: #111; border-color: #fff; }
+.rw-lightbox__btn--text { min-width: 38px; }
+.rw-lightbox__pct {
+  min-width: 52px; text-align: center; color: #fff; font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.rw-lightbox__frame {
+  flex: 1 1 auto; min-height: 0; display: grid; place-items: center;
+  overflow: hidden; touch-action: none;
+}
+.rw-lightbox__img {
+  max-width: none; transform-origin: center center; user-select: none;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .5); background: #fff;
+}
+.rw-lightbox__hint {
+  flex: 0 0 auto; padding: var(--sp-6) var(--sp-12) var(--sp-12);
+  color: rgba(255, 255, 255, .6); font-size: var(--fs-micro); text-align: center;
+}
+/* The zoom button sits beside the ✕ that clears the picture, on the picture. */
+.rw-figure__zoom {
+  position: absolute; top: var(--sp-4); right: 34px; line-height: 1;
+  background: var(--bg-panel); border: 1px solid var(--line-strong); box-shadow: var(--sh-card);
+}
+.rw-figure__zoom:hover { background: var(--accent-wash); border-color: var(--accent); color: var(--accent); }
 
 /* == 17 - table surface =====================================================
  * The grid control draws its own cells; these rules set the surround and the

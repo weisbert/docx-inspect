@@ -60,6 +60,7 @@ export { Chips } from './Chips.js';
 export { SegmentedControl } from './SegmentedControl.js';
 export { SearchInput } from './SearchInput.js';
 export { Dialog } from './Dialog.js';
+export { Lightbox } from './Lightbox.js';
 export { Drawer } from './Drawer.js';
 export { Menu } from './Menu.js';
 export { Banner } from './Banner.js';
