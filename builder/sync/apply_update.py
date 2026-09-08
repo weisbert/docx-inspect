@@ -1221,7 +1221,26 @@ def cmd_list(root):
     return 0
 
 
+def _tolerant_console():
+    """Let this CLI report on content the console cannot spell.
+
+    A bundle's note, and the section titles echoed while patching, are arbitrary
+    text written on another machine. A Windows console is often a legacy code
+    page, and printing one character it cannot encode raises UnicodeEncodeError
+    -- which, on the line that echoes the note, aborts the apply BEFORE anything
+    is written. Nothing was wrong with the bundle; the run just died describing
+    it. Degrading those characters in the transcript is strictly better than
+    losing the apply, and the files written are unaffected either way.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None):
+    _tolerant_console()
     ap = argparse.ArgumentParser(description="Apply report update bundles.")
     ap.add_argument("bundle", nargs="?", help="bundle .zip (default: newest in <root>/_updates/)")
     ap.add_argument("--root", help="reports root (default: <repo>/local)")

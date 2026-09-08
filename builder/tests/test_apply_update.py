@@ -13,6 +13,7 @@ Run:  .venv\\Scripts\\python.exe builder\\test_apply_update.py
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -290,6 +291,46 @@ def test_delete_node():
           "and the chapter's children go with it", str(p["outline"]))
 
 
+def test_note_the_console_cannot_spell():
+    """A note character the console cannot encode must not abort the apply.
+
+    The CLI echoes the bundle's note before doing any work. On a legacy code
+    page (a Chinese Windows console is cp936) a single character outside it --
+    a micro sign, a warning sign, a true minus -- used to raise
+    UnicodeEncodeError on that line, so the apply died having written nothing.
+    Run the real CLI in a subprocess pinned to cp936 and check the patch lands.
+    """
+    root = tempfile.mkdtemp(prefix="au_note_")
+    os.makedirs(os.path.join(root, "proj"))
+    pj = os.path.join(root, "proj", "project.json")
+    with open(pj, "w", encoding="utf-8") as fh:
+        json.dump({"schema_version": 1,
+                   "outline": [{"id": "s", "title": "S", "blocks": []}]}, fh)
+
+    note = u"leakage 6.928 µA − over spec ⚠"   # micro sign, minus, warning sign
+    zbytes = _make_smart_zip(
+        note=note,
+        projects={"proj": {"mode": "patch", "ops": [
+            {"op": "set_blocks", "node_id": "s",
+             "blocks": [{"type": "para", "runs": [{"t": "x"}]}]}]}})
+    bundle = os.path.join(root, "u.zip")
+    with open(bundle, "wb") as fh:
+        fh.write(zbytes)
+
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp936"
+    proc = subprocess.run(
+        [sys.executable, os.path.join(au.__file__), bundle, "--root", root, "--yes"],
+        env=env, capture_output=True)
+    on_disk = json.load(open(pj, encoding="utf-8"))
+    check(proc.returncode == 0,
+          "a note the console cannot spell does not fail the apply",
+          proc.stderr.decode("utf-8", "replace")[-300:])
+    check(on_disk["outline"][0]["blocks"],
+          "and the patch is actually written",
+          proc.stderr.decode("utf-8", "replace")[-300:])
+
+
 def main():
     test_find_and_ops()
     test_delete_node()
@@ -298,6 +339,7 @@ def main():
     test_rollback_created()
     test_rollback_scope_case()
     test_snapshot_finds_nested_reports()
+    test_note_the_console_cannot_spell()
     print("\n%d test failure(s)" % fails)
     return 1 if fails else 0
 
