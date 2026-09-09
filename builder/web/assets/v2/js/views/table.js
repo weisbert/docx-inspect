@@ -1308,18 +1308,39 @@ export function TableBlock(props) {
     };
     if (model.mode === 'compliance') options.nestedHeaders = buildNestedHeaders(model);
 
+    // SPREADSHEET-level settings, not worksheet ones -- the control reads them
+    // off the parent config, so they belong on the outer object in both calls
+    // below.
+    //
+    //   contextMenu: returning false suppresses the control's own menu so this
+    //   view can draw one whose entries are the table's vocabulary.
+    //
+    //   parseFormulas: A CELL IS TEXT. The control evaluates any value whose
+    //   first character is '=' and turns what it cannot evaluate into the
+    //   literal '#ERROR'. This is a data grid, not a spreadsheet: a `range`
+    //   limit is DRAWN as '=' and came out as '#ERROR', and so did any
+    //   plain-table cell a user began with '='.
+    //
+    //   It is a DRAWING fault, and only that -- measured, not assumed: what
+    //   onchange hands over is the raw text, so project.json was never wrong,
+    //   and opening such a cell and closing it again does not commit the
+    //   '#ERROR' it shows (test_v2_formula_off.js asserts both, and both held
+    //   before this line existed). What it cost was the screen: a `range` row
+    //   could not be read in the editor at all.
+    //
+    //   Turning the sign into something else would not be the fix: '=' is also
+    //   what a user types to mean `range` (see SIGN_TO_LIMIT).
+    const spreadsheet = { contextMenu: () => false, parseFormulas: false };
+
     let ws = null;
     try {
-      // The context menu is a SPREADSHEET-level setting, not a worksheet one:
-      // returning false from it suppresses the control's own menu so this view
-      // can draw one whose entries are the table's vocabulary.
       const made = jss(host, Object.assign(
-        { worksheets: [options], contextMenu: () => false }, gridEvents
+        { worksheets: [options] }, spreadsheet, gridEvents
       ));
       ws = Array.isArray(made) ? made[0] : made;
     } catch (err) {
       try {
-        const made = jss(host, Object.assign({ contextMenu: () => false }, options));
+        const made = jss(host, Object.assign({}, spreadsheet, options));
         ws = Array.isArray(made) ? made[0] : made;
       } catch (err2) {
         store.pushBanner({ level: 'error', code: 'grid', message: String(err2 && err2.message) });
