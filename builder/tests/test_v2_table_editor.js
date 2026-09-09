@@ -24,7 +24,9 @@
  *
  * 3. A RED CELL SAYS WHY.
  *    The value, the bound it broke and the limit that condemned it, on the cell
- *    and on the note line.
+ *    and on the note line -- and the bound named is the one that cell was
+ *    actually judged against, since a spec typed into the TYP slot judges the
+ *    TYP column alone.
  *
  * 4. ARROW KEYS DO NOT STOP ON THE SEPARATOR COLUMNS.
  *    The 10px column between two groups holds nothing and takes nothing; the
@@ -100,7 +102,7 @@ const TABLE_ID = 'b-table-1';
  *  17 sep   18 Unit                                                        */
 const X = {
   item: 2, limit: 3, specMax: 7, specNtwc: 8, sepBeforePre: 9,
-  preMin: 10, postMax: 16,
+  preMin: 10, preTyp: 11, preMax: 12, postMax: 16,
 };
 
 function writeJson(file, value) {
@@ -145,7 +147,10 @@ function sampleReport() {
                 // 0 -- a setting row: never judged, never noted.
                 row('Conditions', 'Supply', 'V', 'common_setting', null,
                   [null, '1.80', null], [null, '1.80', null], [null, '1.80', null]),
-                // 1 -- judged, and the post group breaks the spec MAX.
+                // 1 -- judged, and broken twice over: the schematic TYP (5.01)
+                //      misses the spec TYP of 5.0, and the extracted MAX (5.30)
+                //      misses the spec MAX of 5.2. Two red cells, two different
+                //      bounds, which is what section 3 reads back.
                 row('Performance', 'Divided frequency', 'GHz', 'result', 'le',
                   ['4.8', '5.0', '5.2'], ['4.85', '5.01', '5.14'], ['4.83', '5.00', '5.30']),
                 // 2 -- no limit at all: 'No limit set'.
@@ -645,13 +650,37 @@ async function browserChecks() {
     /* ---- 3. a red cell says why ---- */
 
     section('a red cell says why');
-    const why = await page.evaluate(() => {
-      const el = document.querySelector('td.rw-grid__cell--overspec');
-      return el ? String(el.getAttribute('title') || '') : null;
-    });
-    check('an over-spec cell carries the comparison as its tooltip',
-      !!why && why.indexOf('>') > 0 && why.indexOf('spec MAX') > 0,
-      'the tooltip read ' + JSON.stringify(why));
+    // Row 1 has a spec of 4.8 / 5.0 / 5.2 and breaks it twice, in two different
+    // ways: the schematic TYP is 5.01 against the spec TYP of 5.0, and the
+    // extracted MAX is 5.30 against the spec MAX of 5.2. Each cell must name
+    // the bound IT was judged against -- a spec typed into the TYP slot judges
+    // the TYP column and nothing else, so answering "spec MAX" on the TYP
+    // column would explain the red with a number that did not cause it.
+    const tooltipAt = (page_, x, y) => page_.evaluate((at) => {
+      const td = document.querySelector(
+        'td[data-x="' + at.x + '"][data-y="' + at.y + '"]');
+      if (!td) return null;
+      return {
+        red: td.className.indexOf('rw-grid__cell--overspec') >= 0,
+        title: String(td.getAttribute('title') || ''),
+      };
+    }, { x: x, y: y });
+
+    const typWhy = await tooltipAt(page, X.preTyp, 1);
+    check('the TYP column that misses the spec TYP is red, and says which bound',
+      !!typWhy && typWhy.red && typWhy.title.indexOf('>') > 0
+        && typWhy.title.indexOf('spec TYP') > 0,
+      'the tooltip read ' + JSON.stringify(typWhy));
+
+    const maxWhy = await tooltipAt(page, X.postMax, 1);
+    check('an over-spec MAX cell carries its own comparison as its tooltip',
+      !!maxWhy && maxWhy.red && maxWhy.title.indexOf('>') > 0
+        && maxWhy.title.indexOf('spec MAX') > 0,
+      'the tooltip read ' + JSON.stringify(maxWhy));
+
+    const calmMax = await tooltipAt(page, X.preMax, 1);
+    check('a MAX inside the spec MAX is not reddened by the spec TYP beside it',
+      !!calmMax && !calmMax.red, 'the cell read ' + JSON.stringify(calmMax));
 
     const redCell = await cellBox(page, X.postMax, 1);
     if (redCell) {

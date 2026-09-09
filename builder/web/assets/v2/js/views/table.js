@@ -44,7 +44,7 @@ import { store } from '../store.js';
 import * as api from '../api.js';
 import {
   numericValue, simAxisValues, axisValue as sharedAxisValue,
-  flagsFrom as sharedFlagsFrom, flagsForGroup, plural,
+  flagsFrom as sharedFlagsFrom, flagsForGroup, plural, TYP_AXIS,
 } from '../util.js';
 import {
   Button, IconButton, Select, SegmentedControl, Dialog, Menu, Pill, Spinner, Toast,
@@ -2131,13 +2131,16 @@ function specBounds(row) {
 }
 
 // The threshold `violates` would compare against, and what to call it, for one
-// limit and one set of bounds. Returns null when there is none -- which is the
-// case the note exists for.
-function boundFor(limit, b) {
+// limit, one set of bounds and one axis. Returns null when there is none --
+// which is the case the note exists for. The axis matters because a spec TYP
+// judges the TYP column alone (util.js TYP_AXIS): naming it as the bound on any
+// other column would explain a red cell that is no longer there.
+function boundFor(limit, b, axis) {
+  const styp = axis === TYP_AXIS ? b.styp : null;
   if (limit === 'le') {
+    if (styp !== null) return { value: styp, name: 'spec TYP' };
     if (b.smax !== null) return { value: b.smax, name: 'spec MAX' };
     if (b.en !== null) return { value: b.en, name: 'spec' };
-    if (b.styp !== null) return { value: b.styp, name: 'spec TYP' };
     return null;
   }
   if (limit === 'ge') {
@@ -2154,11 +2157,14 @@ function boundFor(limit, b) {
 }
 
 // The bound a set limit needs and does not have: 'spec MAX' for le, 'spec MIN'
-// for ge, either end of the range. Null when the row can in fact be judged.
+// for ge, either end of the range. Null when the row can in fact be judged --
+// on ANY of its axes, since a spec TYP alone judges the TYP column and that is
+// a row which is checked, not one that is never marked.
 function missingBoundName(row) {
   const limit = row && row.limit;
   if (!limit) return null;
-  if (boundFor(limit, specBounds(row))) return null;
+  const bounds = specBounds(row);
+  if (AXIS_NAMES.some((unused, ai) => boundFor(limit, bounds, ai))) return null;
   if (limit === 'le') return 'spec MAX';
   if (limit === 'ge') return 'spec MIN';
   if (limit === 'range') return 'spec MIN or MAX';
@@ -2203,7 +2209,7 @@ function overSpecReason(row, groupKey, ai) {
     }
     return '';
   }
-  const bound = boundFor(row.limit, b);
+  const bound = boundFor(row.limit, b, ai);
   if (!bound || bound.value === null) return '';
   const relation = row.limit === 'ge' ? ' < ' : ' > ';
   return value + relation + bound.value + ' (' + bound.name + ', limit ' + sign + ')';

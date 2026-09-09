@@ -1114,13 +1114,18 @@ def check_real_config():
         if dt:
             s, vc = rcall("POST", "/api/validate-compliance", body={"data": dt["data"]})
             nflags = sum(len(v) for v in vc.get("flags", {}).values())
+            # Five since a spec typed into the TYP slot judges the TYP column
+            # rather than every column: one row of this report specifies
+            # -105 typical / -100 worst and simulates -104.7 typical, which
+            # misses the number it was specified at. It used to be judged
+            # against the worst-case bound like every other column and passed.
             f += expect(
-                s == 200 and nflags == 4,
-                "real validate-compliance == 4 flags",
+                s == 200 and nflags == 5,
+                "real validate-compliance == 5 flags",
                 "flags=%r" % vc.get("flags"),
             )
         else:
-            record("real validate-compliance == 4 flags", "SKIP (no datatable)")
+            record("real validate-compliance == 5 flags", "SKIP (no datatable)")
 
         s, ex = rcall("POST", "/api/export?dir=" + demo_dir + "&fmt=docx", body={})
         ok = (

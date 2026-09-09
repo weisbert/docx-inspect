@@ -212,15 +212,32 @@ def _fmt_val(v):
     return v
 
 
-def _violates(limit, nv, smin, smax, en, styp):
-    """True when a single simulated value ``nv`` is out of the row's limit.
+# The axis a spec TYP value is allowed to judge -- and the only one.
+#
+# A number typed into the spec's TYP slot is a statement about the typical
+# corner. It used to be the last resort of the ``le`` threshold chain for EVERY
+# axis, so a row specified only at TYP reddened its MIN, MAX and NTWC columns
+# against the typical number, which no reader ever asked it to mean: the worst
+# corner of a part specified typically is not out of spec for exceeding the
+# typical value. It is scoped to its own column now. A spec MAX is unchanged and
+# still judges every axis -- "no corner above X" is a claim about all of them.
+TYP_AXIS = 1
+
+
+def _violates(limit, nv, smin, smax, en, styp, axis=None):
+    """True when a single simulated value ``nv``, sitting on axis ``axis`` of its
+    group, is out of the row's limit.
 
     Directions: ``le`` (<= upper bound) / ``ge`` (>= target) / ``range`` ([MIN,MAX]).
-    Thresholds come from the spec triple / scalar spec -- no hardcoded numbers."""
+    Thresholds come from the spec triple / scalar spec -- no hardcoded numbers.
+    ``styp`` is visible only on the TYP axis (see TYP_AXIS), where it is the
+    tightest thing the row says about that column and so is preferred over the
+    row-wide bounds; ``ge`` has never read it and does not start to here."""
     if nv is None:
         return False
+    typ = styp if axis == TYP_AXIS else None
     if limit == "le":
-        thr = smax if smax is not None else (en if en is not None else styp)
+        thr = typ if typ is not None else (smax if smax is not None else en)
         return thr is not None and nv > thr
     if limit == "ge":
         thr = smin if smin is not None else (smax if smax is not None else en)
@@ -251,7 +268,7 @@ def _flags_from(row, mtm, ntwc):
     en = _numv(row.get("spec"))
     flags = set()
     for i, v in enumerate(mtm or []):
-        if _violates(limit, _numv(v), smin, smax, en, styp):
+        if _violates(limit, _numv(v), smin, smax, en, styp, i):
             flags.add(i)
     nt = _numv(ntwc)
     if nt is not None:
@@ -259,7 +276,7 @@ def _flags_from(row, mtm, ntwc):
         n_smin = nspec if nspec is not None else smin
         n_smax = nspec if nspec is not None else smax
         n_en = nspec if nspec is not None else en
-        if _violates(limit, nt, n_smin, n_smax, n_en, styp):
+        if _violates(limit, nt, n_smin, n_smax, n_en, styp, 3):
             flags.add(3)
     return flags
 

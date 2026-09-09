@@ -929,6 +929,36 @@ def main():
     check(2 in tables._flags_from(ps_row2, *tables._sim_axis_vals(ps_row2, "pdr")),
           "per-sim flag: comparison column reds when IT is out of spec")
 
+    # --- a spec in the TYP slot judges the TYP column, and only it ---
+    # A number typed under Spec/TYP is a statement about the typical corner. It
+    # used to be the last resort of the `le` threshold for EVERY axis, so a row
+    # specified only at TYP reddened its MIN, MAX and NTWC against the typical
+    # number -- which is not what "typically 500" claims about the worst corner.
+    def _typ_flags(spec_mtm, mtm, limit="le", ntwc=None):
+        row = {"cat": "C", "item": "x", "kind": "result", "unit": "u",
+               "limit": limit, "spec_mtm": spec_mtm,
+               "sim_mtm": mtm, "sim_ntwc": ntwc}
+        return sorted(tables.flag_positions(row))
+
+    check(_typ_flags([None, 500, None], [336.1, 482.1, 688.2]) == [],
+          "spec only at TYP: MAX above the typical value is NOT red",
+          "flags=%r" % _typ_flags([None, 500, None], [336.1, 482.1, 688.2]))
+    check(_typ_flags([None, 500, None], [336.1, 620.4, 688.2]) == [1],
+          "spec only at TYP: the TYP column that misses it IS red",
+          "flags=%r" % _typ_flags([None, 500, None], [336.1, 620.4, 688.2]))
+    check(_typ_flags([None, 500, None], [336, 482, 688], ntwc=900) == [],
+          "spec only at TYP: the NTWC corner is not judged by it either")
+    check(_typ_flags([None, -105, -100], [-107.5, -103.2, -98.86]) == [1, 2],
+          "spec at TYP and MAX: each column answers to its own bound",
+          "flags=%r" % _typ_flags([None, -105, -100], [-107.5, -103.2, -98.86]))
+    check(_typ_flags([None, 24, 30], [15.53, 22.24, 30.46]) == [2],
+          "a TYP spec that IS met stays black; the MAX breach still reds",
+          "flags=%r" % _typ_flags([None, 24, 30], [15.53, 22.24, 30.46]))
+    check(_typ_flags([None, None, 500], [336.1, 482.1, 688.2]) == [2],
+          "a spec MAX is unchanged: it still judges every axis")
+    check(_typ_flags([None, 3, None], [1, 2, 4], limit="ge") == [],
+          "ge has never read the TYP slot and still does not")
+
     # --- sim_span per-group merge: EACH sim group merges its OWN axes (CDR's 3 ->
     #     1, PDR's 3 -> 1, SEPARATELY -- not one cell across both) ---
     def _span_data(span):

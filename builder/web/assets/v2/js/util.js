@@ -313,14 +313,23 @@ export function axisValue(row, groupKey, ai) {
   return ai < arr.length ? arr[ai] : null;
 }
 
-// True when one simulated value is out of the row's limit. Directions:
-// le (<= upper bound) / ge (>= target) / range (within [MIN, MAX]). Thresholds
-// come from the row's own spec triple / scalar spec -- no number is hardcoded,
-// and a row with no limit is never over spec.
-export function violates(limit, nv, smin, smax, en, styp) {
+// The axis a spec TYP value is allowed to judge -- and the only one. Mirrors
+// core/tables.py::TYP_AXIS: a number in the spec's TYP slot describes the
+// typical corner, so it reddens the TYP column and no other. A spec MAX still
+// judges every axis, because "no corner above X" is a claim about all of them.
+export const TYP_AXIS = 1;
+
+// True when one simulated value, sitting on axis `axis` of its group, is out of
+// the row's limit. Directions: le (<= upper bound) / ge (>= target) / range
+// (within [MIN, MAX]). Thresholds come from the row's own spec triple / scalar
+// spec -- no number is hardcoded, and a row with no limit is never over spec.
+// `styp` is visible only on the TYP axis, where it is the tightest thing the row
+// says about that column; `ge` has never read it and does not start to here.
+export function violates(limit, nv, smin, smax, en, styp, axis) {
   if (nv === null) return false;
+  const typ = axis === TYP_AXIS ? styp : null;
   if (limit === 'le') {
-    const thr = smax !== null ? smax : (en !== null ? en : styp);
+    const thr = typ !== null ? typ : (smax !== null ? smax : en);
     return thr !== null && nv > thr;
   }
   if (limit === 'ge') {
@@ -351,7 +360,7 @@ export function flagsFrom(row, mtm, ntwc) {
   const en = numericValue(row.spec);
   const list = Array.isArray(mtm) ? mtm : [];
   for (let i = 0; i < list.length; i++) {
-    if (violates(limit, numericValue(list[i]), smin, smax, en, styp)) flags.add(i);
+    if (violates(limit, numericValue(list[i]), smin, smax, en, styp, i)) flags.add(i);
   }
   const nt = numericValue(ntwc);
   if (nt !== null) {
@@ -359,7 +368,7 @@ export function flagsFrom(row, mtm, ntwc) {
     const nmin = nspec !== null ? nspec : smin;
     const nmax = nspec !== null ? nspec : smax;
     const nen = nspec !== null ? nspec : en;
-    if (violates(limit, nt, nmin, nmax, nen, styp)) flags.add(3);
+    if (violates(limit, nt, nmin, nmax, nen, styp, 3)) flags.add(3);
   }
   return flags;
 }
