@@ -331,6 +331,35 @@ export function plainRowKinds(block) {
   return out;
 }
 
+// Move the legacy index-keyed row_fills map with the rows it colours.
+//
+// That map addresses a colour BY POSITION, which is the whole reason row kinds
+// replaced it -- but old content still carries one, and a table that keeps it
+// has to keep it truthful. Left alone through a delete it does two things at
+// once: every entry below the cut lands on the wrong row, and an entry past the
+// new end of the table survives out of sight, waiting for a later insert to
+// bring it back into range and colour a row nobody asked it to. `mapIndex`
+// returns a row's new index, or null when the row is gone; entries that fall
+// outside the table afterwards are dropped rather than kept for later.
+// Non-numeric keys are not positions and are copied through untouched.
+function remapRowFills(block, mapIndex) {
+  const fills = block && block.row_fills;
+  if (!fills || typeof fills !== 'object' || Array.isArray(fills)) return;
+  const rowCount = ((block && block.rows) || []).length;
+  const moved = {};
+  Object.keys(fills).forEach((key) => {
+    const i = parseInt(key, 10);
+    if (!Number.isFinite(i) || String(i) !== String(key).trim()) {
+      moved[key] = fills[key];
+      return;
+    }
+    const to = mapIndex(i);
+    if (to === null || to < 0 || to >= rowCount) return;
+    moved[String(to)] = fills[key];
+  });
+  block.row_fills = moved;
+}
+
 function setPlainRowKind(block, index, kind) {
   const rows = block.rows || [];
   const list = plainRowKinds(block);
@@ -338,6 +367,44 @@ function setPlainRowKind(block, index, kind) {
   if (FREE_ROW_KINDS.indexOf(kind) < 0) return;
   list[index] = kind;
   block.row_kinds = list.map((k) => k || null);
+}
+
+// Insert `count` blank rows at `index`, shaped and coloured like row `like`.
+// Exported because the row actions and their regression test must be the same
+// code: the ordering below is the whole point of the function.
+export function insertPlainRows(block, index, count, like) {
+  const rows = block.rows || (block.rows = []);
+  const width = Math.max(1, rowCells(rows[like]).length);
+  const kinds = plainRowKinds(block);
+  const inherit = kinds[like] === 'header' ? null : kinds[like] || null;
+  for (let i = 0; i < count; i++) {
+    rows.splice(index, 0, new Array(width).fill(''));
+    kinds.splice(index, 0, inherit);
+  }
+  block.row_kinds = kinds.map((k) => k || null);
+  remapRowFills(block, (i) => (i < index ? i : i + count));
+}
+
+// Delete `count` rows from `from`. Answers whether anything went: a table is
+// never emptied of its last row this way.
+//
+// READ THE KINDS BEFORE THE ROWS MOVE. plainRowKinds is bounded by rows.length
+// and falls back to the index-keyed row_fills for any row that declares no
+// kind, so asking it AFTER the splice asks about a different table: the list
+// comes back short by the rows just removed -- and was then cut short a second
+// time -- and the legacy fills line up against whatever row has slid into their
+// index. That is how deleting one condition row repainted the result rows
+// underneath it as conditions.
+export function deletePlainRows(block, from, count) {
+  const rows = block.rows || [];
+  if (rows.length <= count) return false;
+  const kinds = plainRowKinds(block);
+  rows.splice(from, count);
+  kinds.splice(from, count);
+  block.row_kinds = kinds.map((k) => k || null);
+  remapRowFills(block,
+    (i) => (i < from ? i : (i < from + count ? null : i - count)));
+  return true;
 }
 
 /* ================================================================== *
@@ -1365,15 +1432,7 @@ export function TableBlock(props) {
         const like = rows[activeCell().y];
         for (let i = 0; i < count; i++) rows.splice(index, 0, blankComplianceRow(like));
       } else {
-        const rows = block.rows || (block.rows = []);
-        const width = Math.max(1, rowCells(rows[activeCell().y]).length);
-        const kinds = plainRowKinds(block);
-        const inherit = kinds[activeCell().y] === 'header' ? null : kinds[activeCell().y] || null;
-        for (let i = 0; i < count; i++) {
-          rows.splice(index, 0, new Array(width).fill(''));
-          kinds.splice(index, 0, inherit);
-        }
-        block.row_kinds = kinds.map((k) => k || null);
+        insertPlainRows(block, index, count, activeCell().y);
       }
     });
   };
@@ -1393,13 +1452,8 @@ export function TableBlock(props) {
         const rows = block.data.rows || [];
         if (rows.length <= count) return false;
         rows.splice(from, count);
-      } else {
-        const rows = block.rows || [];
-        if (rows.length <= count) return false;
-        rows.splice(from, count);
-        const kinds = plainRowKinds(block);
-        kinds.splice(from, count);
-        block.row_kinds = kinds.map((k) => k || null);
+      } else if (!deletePlainRows(block, from, count)) {
+        return false;
       }
       return true;
     });
@@ -2242,7 +2296,7 @@ function parseTsv(text) {
 }
 
 // Appended rows inherit the kind of the row above them.
-function appendRows(block, cfg, count) {
+export function appendRows(block, cfg, count) {
   if (block.type === 'datatable') {
     const rows = block.data.rows || (block.data.rows = []);
     const last = rows[rows.length - 1];
@@ -2266,11 +2320,17 @@ function appendRows(block, cfg, count) {
   const width = Math.max(1, rowCells(rows[rows.length - 1]).length);
   const kinds = plainRowKinds(block);
   const inherit = kinds.length ? kinds[kinds.length - 1] : null;
+  const before = rows.length;
   for (let i = 0; i < count; i++) {
     rows.push(new Array(width).fill(''));
     kinds.push(inherit === 'header' ? null : inherit);
   }
   block.row_kinds = kinds.map((k) => k || null);
+  // No row moves when rows are appended, so the map is the identity -- but an
+  // entry stranded past the end of the table as it was would come back INTO
+  // range here and colour one of the rows just added. Bounded by the length
+  // before the append, so it is dropped instead.
+  remapRowFills(block, (i) => (i < before ? i : null));
 }
 
 /* ================================================================== *
