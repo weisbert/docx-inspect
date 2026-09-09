@@ -757,6 +757,16 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
   color: var(--fg-muted); font-size: var(--fs-micro); font-variant-numeric: tabular-nums;
 }
 .rw-figgrid__letter--replaced { opacity: .4; text-decoration: line-through; }
+/* Removing a PANEL is not the same act as clearing its picture, so it is not
+ * the same button. It belongs to the cell rather than to the picture, and sits
+ * at the corner opposite the ones that do belong to the picture. The trailing
+ * cell the grid always offers is not a panel and carries no such button. */
+.rw-figgrid__cell .rw-drop { position: relative; }
+.rw-figgrid__remove {
+  position: absolute; top: var(--sp-4); left: var(--sp-4); line-height: 1;
+  background: var(--bg-panel); border: 1px solid var(--line-strong); box-shadow: var(--sh-card);
+}
+.rw-figgrid__remove:hover { background: var(--bad-wash); border-color: var(--bad-line); color: var(--bad); }
 /* A tertiary button that is currently ON. */
 .rw-btn--on { background: var(--accent-wash); border-color: var(--accent); color: var(--accent); }
 

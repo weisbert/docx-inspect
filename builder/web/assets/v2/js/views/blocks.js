@@ -84,6 +84,13 @@ const T = {
   deleteBlock: 'Delete block',
   dropHint: 'Paste a screenshot with Ctrl+V, or drop a file',
   clearPicture: 'Remove the picture',
+  /* The two are not the same act and the grid offers both. Clearing empties a
+     panel and leaves the layout alone -- the place stays, ready for the picture
+     that replaces it. Removing takes the panel out, so the ones after it move
+     up and the document prints one figure fewer. */
+  addPanel: 'Add a panel',
+  addPanelHint: 'Add an empty panel to this grid',
+  removePanel: 'Remove this panel from the grid',
   chooseFile: 'Choose a file',
   inspect: 'Look at this picture full size',
   picture: 'Picture',
@@ -1460,8 +1467,32 @@ export function FigureGridCard(props) {
   const slotRef = useRef(-1);
 
   // One trailing empty cell is always offered, so there is always somewhere to
-  // drop the next figure.
+  // drop the next figure. It is not a panel yet: nothing in `items` answers to
+  // it, the document prints nothing for it, and it cannot be removed -- there
+  // is nothing there to remove.
   const cellCount = Math.max(items.length + 1, cols);
+  const isPanel = (slot) => slot < items.length;
+
+  // HOW MANY PANELS THE GRID HAS IS THE AUTHOR'S TO SET.
+  // The card could grow -- paste into the trailing cell -- but never shrink:
+  // the only ✕ it had emptied a panel and kept its place, so a grid that had
+  // once held four figures printed four for good, one of them blank. These two
+  // are the missing half, and they are what the previous editor offered.
+  const addPanel = () => {
+    items.push({ file: '', sub: '' });
+    acts.changed();
+  };
+
+  // The panel goes, and the ones after it move up -- which is the point: the
+  // letters (a)(b)(c) the document prints are positional, so removing the
+  // second panel of three must leave two, labelled (a) and (b).
+  const removePanel = (slot) => {
+    if (!isPanel(slot)) return;
+    items.splice(slot, 1);
+    if (looking === slot) setLooking(-1);
+    else if (looking > slot) setLooking(looking - 1);
+    acts.changed();
+  };
 
   const take = (slot, files) => {
     const file = files && files[0];
@@ -1551,6 +1582,9 @@ export function FigureGridCard(props) {
                      onClick=${() => { block.sub_captions = !block.sub_captions; acts.changed(); }}>
             ${T.panelLabels}
           <//>
+          <${Button} level="tertiary" title=${T.addPanelHint} onClick=${addPanel}>
+            ${T.addPanel}
+          <//>
         <//>`} />
       <div class="rw-card__body">
         <input ref=${fileRef} type="file" accept="image/*" class="rw-hidden"
@@ -1598,6 +1632,17 @@ export function FigureGridCard(props) {
                        slotRef.current = slot;
                        if (fileRef.current) fileRef.current.click();
                      }}>
+                  ${isPanel(slot) ? html`
+                    <${IconButton} className="rw-figgrid__remove" small glyph="−"
+                                   title=${T.removePanel}
+                                   onClick=${(event) => {
+                                     // The press stops here: the cell around it
+                                     // is a paste target and a press on it arms
+                                     // the Ctrl+V, which is not what removing
+                                     // the cell should leave behind.
+                                     event.stopPropagation();
+                                     removePanel(slot);
+                                   }} />` : null}
                   ${item.file
                     ? html`
                       <div class="rw-figure__frame">
