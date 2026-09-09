@@ -274,7 +274,10 @@ def build_free_table_xlsx(rows, header_rows=1, merges=None, col_w=None,
     for r, rowvals in enumerate(rows):
         rowcells = tables._row_cells(rowvals)
         kind = kinds[r]
-        if kind in kind_fills:
+        own = tables._inline_row_fill(rowvals)
+        if own:
+            band = _fill(own)
+        elif kind in kind_fills:
             band = _fill(kind_fills[kind])
         elif r < header_rows:
             band = hfill

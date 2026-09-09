@@ -391,12 +391,26 @@ def _lint_para_refs(block, add, targets):
             add("dangling_ref", "dangling_ref.missing")
 
 
+def _free_row_cells(row):
+    """The cells of one free-table row. A row is either a bare list of cells or
+    a dict that carries them under ``cells`` alongside its own kind and colour --
+    the shape core/tables.py::_row_cells reads. Repeated here rather than
+    imported because this file runs before (and without) python-docx.
+
+    Counting only the list rows, as this did, made a table whose rows ALL carry
+    a colour look zero columns wide, and every merge in it out of bounds."""
+    if isinstance(row, dict):
+        cells = row.get("cells")
+        return cells if isinstance(cells, (list, tuple)) else []
+    return row if isinstance(row, (list, tuple)) else []
+
+
 def _lint_free_table(block, rows, add):
     if not isinstance(rows, list):
         add("table_no_rows", "table_no_rows.not_list")
         return
     nrows = len(rows)
-    ncols = max((len(r) for r in rows if isinstance(r, (list, tuple))), default=0)
+    ncols = max((len(_free_row_cells(r)) for r in rows), default=0)
     for m in (block.get("merges") or []):
         if not isinstance(m, dict):
             continue

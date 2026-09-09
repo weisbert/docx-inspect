@@ -45,6 +45,32 @@ def _shade(cell, hex6):
     tcPr.append(shd)
 
 
+def _merge_cells(a, b):
+    """Merge ``a``..``b`` and drop the blank paragraphs the merge leaves behind.
+
+    python-docx concatenates the paragraphs of EVERY cell a merge swallows, and
+    the swallowed cells hold an empty paragraph each -- so a cell merged across
+    three columns comes out holding its text plus two blank lines, and the row is
+    drawn three lines tall. A table with two dozen merges is loose everywhere.
+
+    Nothing in this module wants a blank line inside a cell: every cell is
+    written with exactly one paragraph (line breaks inside it are runs, not
+    paragraphs) before any merge happens. So: keep the paragraphs that say
+    something, and when none of them does keep exactly one -- a cell must hold at
+    least one paragraph or the document is invalid."""
+    merged = a.merge(b)
+    paras = list(merged.paragraphs)
+    if len(paras) < 2:
+        return merged
+    said = [bool(p.text.strip()) for p in paras]
+    keep_blank = 0 if not any(said) else -1      # index of the blank worth keeping
+    for i, p in enumerate(paras):
+        if said[i] or i == keep_blank:
+            continue
+        p._element.getparent().remove(p._element)
+    return merged
+
+
 def _vcenter(cell):
     tcPr = cell._tc.get_or_add_tcPr()
     va = OxmlElement("w:vAlign")
@@ -462,14 +488,14 @@ def render_datatable(doc, data, cfg):
                        ("spec", "Spec"), ("unit", "Unit")):
         if key in col_of:
             c = col_of[key]
-            grid[0][c].merge(grid[2][c])
+            _merge_cells(grid[0][c], grid[2][c])
             _set_cell_text(grid[0][c], label, font_pt, bold=True)
     for g in groups:
         cc = group_axis_cols[g["key"]]
-        grid[0][cc[0]].merge(grid[0][cc[-1]])
+        _merge_cells(grid[0][cc[0]], grid[0][cc[-1]])
         _set_cell_text(grid[0][cc[0]], g["title"], font_pt, bold=True)
         if g.get("stage"):
-            grid[1][cc[0]].merge(grid[1][cc[-1]])
+            _merge_cells(grid[1][cc[0]], grid[1][cc[-1]])
             _set_cell_text(grid[1][cc[0]], g["stage"], font_pt, bold=True)
         for ai, ax in enumerate(g["axes"]):
             _set_cell_text(grid[2][col_of[("axis", g["key"], ai)]], ax,
@@ -591,12 +617,12 @@ def render_datatable(doc, data, cfg):
                 for g in sim_groups:
                     cc = group_axis_cols[g["key"]]
                     if len(cc) >= 2:
-                        grid[r][cc[0]].merge(grid[r][cc[-1]])
+                        _merge_cells(grid[r][cc[0]], grid[r][cc[-1]])
         # vertical merge of the category column
         cc = col_of["cat"]
         r0, r1 = start + g0, start + g1
         band = fills["setting"] if rows[g0].get("kind") in setting_kinds else fills["result"]
-        grid[r0][cc].merge(grid[r1][cc])
+        _merge_cells(grid[r0][cc], grid[r1][cc])
         _shade(grid[r0][cc], band)
         _set_cell_text(grid[r0][cc], rows[g0].get("cat", ""), font_pt, bold=True)
 
@@ -676,6 +702,28 @@ def _col_align_list(col_align, ncols):
         for i, v in enumerate(col_align[:ncols]):
             out[i] = _align_name(v)
     return out
+
+
+def _hex6(value):
+    """A colour normalised to bare 'RRGGBB' upper case, or None when it is not
+    one. Anything unreadable is "no colour asked for" rather than an error: a
+    typo in a report's data must not stop the render."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lstrip("#").upper()
+    if len(s) != 6:
+        return None
+    return s if all(c in "0123456789ABCDEF" for c in s) else None
+
+
+def _inline_row_fill(row):
+    """The colour a dict row carries inline, or None.
+
+    A row's own colour is the ONE spelling that survives editing: it is written
+    on the row, so inserting or deleting a row above it cannot hand it to a
+    different row. ``row_fills`` -- the index map -- is the same colour said the
+    fragile way, and is kept only for content written before kinds existed."""
+    return _hex6(row.get("fill")) if isinstance(row, dict) else None
 
 
 def _cell_align(val):
@@ -766,6 +814,12 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     config default -- lets a table library preset carry its own header shade (e.g.
     an amber-headed sign-off summary table) without changing every free table.
 
+    A ROW'S OWN COLOUR: a row written as a dict may carry ``fill`` -- a bare
+    'RRGGBB' -- and that colour wins over every rule below. It is the spelling
+    for a colour no kind names (a table's "difference" rows, say), and it is
+    written on the row, so it cannot be handed to a different row by an insert
+    or a delete the way an index-keyed entry can.
+
     ``row_kinds`` (optional): the row kinds -- a list positionally parallel to
     ``rows`` (``None`` per row for "no kind") or a {row_index: kind} map. A kind is
     one of ``FREE_ROW_KINDS`` and is mapped to a fill by ``free_kind_fills``, so a
@@ -785,7 +839,8 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     cell of running text reads left. A table that names no alignment anywhere
     renders exactly as it did before this existed.
 
-    Shading precedence for a row: a KIND the fill map knows wins (its mapped value may
+    Shading precedence for a row: the row's own ``fill`` first; then a KIND the fill
+    map knows (its mapped value may
     be ``None``, meaning "leave unshaded"); otherwise a header row takes the header
     fill and any other row takes its ``row_fills`` entry. Data with no kinds therefore
     renders exactly as before -- ``row_fills`` stays supported so the older editor,
@@ -827,9 +882,13 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     for r, rowvals in enumerate(rows):
         cells = _row_cells(rowvals)
         kind = kinds[r]
-        # kind -> fill wins when the map knows the kind (a mapped None means
-        # "unshaded"); otherwise fall back to header_rows / the legacy row_fills.
-        if kind in kind_fills:
+        own = _inline_row_fill(rowvals)
+        # A colour written ON the row wins: it was asked for by hand, about that
+        # row, and no kind can know it. Then kind -> fill when the map knows the
+        # kind (a mapped None means "unshaded"); then header_rows / row_fills.
+        if own:
+            fill = own
+        elif kind in kind_fills:
             fill = kind_fills[kind]
         elif r < header_rows:
             fill = hfill
@@ -862,7 +921,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
 
     for m in (merges or []):
         r, c, rs, cs = m["r"], m["c"], m.get("rs", 1), m.get("cs", 1)
-        table.cell(r, c).merge(table.cell(r + rs - 1, c + cs - 1))
+        _merge_cells(table.cell(r, c), table.cell(r + rs - 1, c + cs - 1))
 
     if row_h is not None:
         for r in range(nrows):

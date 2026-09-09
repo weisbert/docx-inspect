@@ -365,6 +365,62 @@ export function setColAligns(block, list) {
   block.col_align = list.map((a) => alignName(a) || null);
 }
 
+/* A row's own colour. The three kinds cover the rows a report keeps talking
+ * about -- header, condition, result -- and a template maps each to a fill. A
+ * colour outside that vocabulary (the "difference" rows of a comparison table,
+ * say) is written ON the row as `fill`, a bare RRGGBB, and wins over the kind.
+ *
+ * On the row, and not in an index map, for the reason kinds are: a colour
+ * addressed by position is handed to a different row by the next insert or
+ * delete. core/tables.py::_inline_row_fill reads the same key. */
+
+export const FREE_FILLS = [
+  { name: 'Blue', hex: 'DCE6F1' },
+  { name: 'Teal', hex: 'DAEEF3' },
+  { name: 'Green', hex: 'E2EFDA' },
+  { name: 'Amber', hex: 'FFF2CC' },
+  { name: 'Orange', hex: 'FBE4D5' },
+  { name: 'Rose', hex: 'FCE4E4' },
+  { name: 'Violet', hex: 'E4E0F0' },
+  { name: 'Grey', hex: 'EDEDED' },
+];
+
+// A colour normalised to bare RRGGBB, or null when it is not one.
+export function fillHex(value) {
+  if (typeof value !== 'string') return null;
+  const s = value.trim().replace(/^#/, '').toUpperCase();
+  return /^[0-9A-F]{6}$/.test(s) ? s : null;
+}
+
+export function plainRowFill(row) {
+  return (row && !Array.isArray(row) && typeof row === 'object') ? fillHex(row.fill) : null;
+}
+
+// Give one row a colour of its own, or take it away (`hex` null / not a colour).
+// A row only becomes a dict when it has something to carry, and drops back to a
+// bare list of cells when it no longer does -- an empty wrapper would show up in
+// every upstream diff for the rest of the report's life.
+export function setPlainRowFill(block, index, hex) {
+  const rows = (block && block.rows) || [];
+  const row = rows[index];
+  if (row === undefined) return false;
+  const want = fillHex(hex);
+  const isDict = row && !Array.isArray(row) && typeof row === 'object';
+  if (!want) {
+    if (!isDict || row.fill === undefined) return false;
+    delete row.fill;
+    if (Object.keys(row).filter((k) => k !== 'cells').length === 0) rows[index] = rowCells(row);
+    return true;
+  }
+  if (isDict) {
+    if (row.fill === want) return false;
+    row.fill = want;
+  } else {
+    rows[index] = { cells: rowCells(row), fill: want };
+  }
+  return true;
+}
+
 // Per-row kind, by the same precedence core/tables.py uses, with the legacy
 // fill map as a last resort so old content still reads correctly.
 export function plainRowKinds(block) {
@@ -442,8 +498,12 @@ export function insertPlainRows(block, index, count, like) {
   const width = Math.max(1, rowCells(rows[like]).length);
   const kinds = plainRowKinds(block);
   const inherit = kinds[like] === 'header' ? null : kinds[like] || null;
+  // Read from the source row BEFORE anything is spliced in above it. A new row
+  // inside a coloured band belongs to the band.
+  const colour = kinds[like] === 'header' ? null : plainRowFill(rows[like]);
   for (let i = 0; i < count; i++) {
-    rows.splice(index, 0, new Array(width).fill(''));
+    const cells = new Array(width).fill('');
+    rows.splice(index, 0, colour ? { cells: cells, fill: colour } : cells);
     kinds.splice(index, 0, inherit);
   }
   block.row_kinds = kinds.map((k) => k || null);
@@ -1144,6 +1204,9 @@ export function TableBlock(props) {
       overSpecCells(block, cfg).forEach((c) => { flagged[c.row + ':' + c.group + ':' + c.axis] = true; });
     }
     const kinds = m.mode === 'plain' ? plainRowKinds(block) : null;
+    // A row's own colour is not one of the kinds the stylesheet knows, so it is
+    // painted here, on the cells, over whatever the kind class put there.
+    const colours = m.mode === 'plain' ? (block.rows || []).map(plainRowFill) : null;
     for (let y = 0; y < ws.records.length; y++) {
       const tr = ws.rows && ws.rows[y] && ws.rows[y].element;
       if (tr) {
@@ -1189,6 +1252,9 @@ export function TableBlock(props) {
           // inline style too and clearing would take it with it.
           const own = cellAlign(rowCells((block.rows || [])[y])[col.index], col.align);
           el.style.textAlign = own || DEFAULT_ALIGN;
+          // Written on every cell, cleared included, so a colour taken away
+          // leaves nothing behind on the cell that had it.
+          el.style.backgroundColor = colours[y] ? '#' + colours[y] : '';
         }
       }
     }
@@ -1627,6 +1693,20 @@ export function TableBlock(props) {
         }
       }
     });
+  };
+
+  // A colour for the selected rows, or none. Rows, not cells: the row is the
+  // case the reader is being helped with -- find the difference rows in a table
+  // of triplets -- and a row keeps its colour through an edit to any cell in it.
+  const setRowFill = (hex) => {
+    const sel = selectionRef.current || { y1: activeCell().y, y2: activeCell().y };
+    mutate(() => {
+      let touched = false;
+      for (let y = sel.y1; y <= sel.y2; y++) {
+        if (setPlainRowFill(block, y, hex)) touched = true;
+      }
+      return touched;
+    }, { rebuild: false });
   };
 
   // Alignment is a property of the COLUMN, not of the cell under the cursor: a
@@ -2073,6 +2153,19 @@ export function TableBlock(props) {
           ariaLabel="Row kind" />
 
         ${compliance ? null : html`
+          <${Button} glyph=${swatch(currentRowFill(block, selection))}
+                     title="Give the selected rows a colour of their own"
+                     onClick=${(ev) => setMenu({
+                       x: ev.clientX, y: ev.clientY,
+                       items: FREE_FILLS.map((c) => ({
+                         label: c.name, glyph: swatch(c.hex),
+                         onClick: () => setRowFill(c.hex),
+                       })).concat([{
+                         label: 'No fill', glyph: swatch(null), separatorBefore: true,
+                         onClick: () => setRowFill(null),
+                       }]),
+                     })}>Row colour<//>
+
           <span class="rw-tblbar__rule"></span>
           <span class="rw-micro rw-tblbar__label">Align</span>
           <${SegmentedControl}
@@ -2277,6 +2370,18 @@ function applyCellEdit(ctx, x, y, value) {
     return writeCell({ block, cfg, model }, x, y, value);
   }, { rebuild: col.kind === 'cat' || col.kind === 'limit' || col.kind === 'item' });
   if (run > 1 && !catWarnRef.current) setCatAsk({ count: run, revert: undo });
+}
+
+// A colour chip, for the toolbar button and the menu items. Empty means the row
+// takes whatever its kind gives it.
+function swatch(hex) {
+  return html`<span class=${cx('rw-swatch', !hex && 'rw-swatch--none')}
+                    style=${hex ? { background: '#' + hex } : null}></span>`;
+}
+
+// What the Row colour button shows: the colour of the row under the cursor.
+function currentRowFill(block, selection) {
+  return plainRowFill(((block && block.rows) || [])[selection ? selection.y1 : 0]);
 }
 
 // What the Align control shows: the alignment of the column under the cursor.

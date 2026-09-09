@@ -1242,6 +1242,18 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-tblbar__rule { width: 1px; height: 20px; margin: 0 var(--sp-4); background: var(--line); }
 .rw-tblbar__right { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4); margin-left: auto; }
 
+/* A colour chip: the row colours are the document's own, not tokens, so the
+ * value is set inline. The chip is outlined so a pale fill still reads as a
+ * chip, and struck through when it stands for no colour at all. */
+.rw-swatch {
+  display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+  border: 1px solid var(--line); background: var(--bg-panel);
+}
+.rw-swatch--none {
+  background: linear-gradient(to top right, transparent 44%, var(--line) 44%,
+                              var(--line) 56%, transparent 56%);
+}
+
 .rw-tblnote {
   display: flex; align-items: center; gap: var(--sp-9);
   padding: var(--sp-4) var(--sp-9);

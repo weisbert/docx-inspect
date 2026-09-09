@@ -64,7 +64,9 @@ import { NotesTab, countOpenNotes } from './notes.js';
 // The plain table's data model -- what a row's cells are, what its kind is, and
 // which way a cell reads -- lives with the grid that edits it. The paper borrows
 // it rather than keeping a second opinion.
-import { plainRowKinds, plainColAligns, plainWidth, rowCells, cellText, cellAlign } from './table.js';
+import {
+  plainRowKinds, plainRowFill, plainColAligns, plainWidth, rowCells, cellText, cellAlign,
+} from './table.js';
 
 /* ------------------------------------------------------------------ *
  * Frozen strings.
@@ -887,12 +889,16 @@ function FreeTable(props) {
           ${rows.map((row, r) => {
             const cells = rowCells(row);
             const kind = kinds[r];
-            // A known kind decides the shading; only a row without one falls
-            // back to the legacy index-keyed fill, exactly as the renderer does.
+            // The row's own colour first -- it is the document's real value, so
+            // the paper paints it rather than approximating with a token. Then a
+            // known kind; only a row without one falls back to the legacy
+            // index-keyed fill, exactly as the renderer does.
+            const own = plainRowFill(row);
             const shaded = kind ? kind === 'setting' : fills[String(r)] !== undefined;
             const head = r < headerRows || kind === 'header';
             return html`
-              <tr key=${r} class=${shaded ? 'rw-paper__setting' : null}>
+              <tr key=${r} class=${(!own && shaded) ? 'rw-paper__setting' : null}
+                  style=${own ? { background: '#' + own } : null}>
                 ${cells.map((cell, c) => {
                   const style = { textAlign: cellAlign(cell, aligns[c]) || 'center' };
                   return head
