@@ -3021,6 +3021,12 @@ class Handler(BaseHTTPRequestHandler):
         apply_update = _import_apply_update()
         verdict, refusal = _baseline_verdict(apply_update, project_dir,
                                              diff.get("base_sha"), dir_arg)
+        if refusal and apply_update.diff_is_section_scoped(diff):
+            # Ops replace whole sections and carry their own ancestors, so a
+            # disagreement about the WHOLE report's ancestor is not this
+            # payload's question -- apply_text_diff checks it per section and
+            # reports what both sides touched. See reconcile_ops.
+            verdict, refusal = "diverged", None
         if refusal:
             return self._send_json(refusal, status=409)
         # A missing baseline is allowed through on purpose: snapshot, apply, and

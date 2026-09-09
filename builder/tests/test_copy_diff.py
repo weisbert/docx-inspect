@@ -213,21 +213,120 @@ def baseline_invariant():
         check(canon(json.load(open(bl, encoding="utf-8"))) == canon(pasted),
               "record_replace (paste-import) moves the baseline")
 
-    print("== a diff cut from a genuinely different ancestor is still refused ==")
+    print("== a diff from a different ancestor is checked SECTION BY SECTION ==")
+    # The workflow this exists for: a report that only ever travels downstream as
+    # a patch-by-title package. The far side holds figures this machine never has
+    # the file names for, so the two project.json files -- and therefore the two
+    # baselines -- can never be byte-equal, and a whole-report handshake refuses
+    # every delta forever. The ops each carry one section, so they are judged one
+    # section at a time.
+    with tempfile.TemporaryDirectory() as root:
+        stale = copy.deepcopy(BASE)
+        stale["outline"][0]["children"][0]["blocks"].append(
+            {"type": "image", "file": "images/only-the-far-side-has-this.png",
+             "caption": "", "width_cm": 12})
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        far = copy.deepcopy(stale)
+        edit_para(far, 0, 1, "cut from a state this machine never agreed on")
+        diff = A.make_text_diff(stale, far, "demo")
+        check(diff["base_sha"] != A.project_sha(bl),
+              "fixture: the two sides really do name different ancestors")
+        before_bl = rb(bl)
+        res = A.apply_text_diff(root, diff, dir_name="demo")
+        check(res.get("baseline") == "diverged",
+              "mismatched ancestor + section-scoped delta -> 'diverged', not refused")
+        got = json.load(open(pj, encoding="utf-8"))
+        check(got["outline"][0]["children"][1]["blocks"][0]["runs"][0]["t"]
+              == "cut from a state this machine never agreed on",
+              "the far side's edit lands")
+        check(rb(bl) == before_bl, "a diverged delta still does not move the baseline")
+        check(res.get("conflicts") == [],
+              "the section the far side edited was untouched here -> no conflict")
+        states = dict((v["title"], v["state"]) for v in res["sections"])
+        check(states.get("Sec 1.2") == A.OP_FAST_FORWARD,
+              "a section this machine had not moved reads fast_forward")
+        snaps = os.path.join(d, A.AUTOSAVE_DIRNAME)
+        check(os.path.isdir(snaps) and bool(os.listdir(snaps)),
+              "a diverged delta snapshots before writing")
+
+    print("== a section BOTH sides edited is named, not silently taken ==")
+    with tempfile.TemporaryDirectory() as root:
+        local = copy.deepcopy(BASE)
+        edit_para(local, 0, 1, "rewritten here since the last exchange")
+        d, pj, bl = seed(root, local, baseline=BASE)
+        far = copy.deepcopy(BASE)
+        edit_para(far, 0, 1, "rewritten there since the last exchange")
+        edit_para(far, 1, 0, "and one section only they touched")
+        diff = A.make_text_diff(BASE, far, "demo")
+        res = A.apply_text_diff(root, diff, dir_name="demo")
+        titles = [v["title"] for v in res["conflicts"]]
+        check(titles == ["Sec 1.2"],
+              "exactly the section both sides edited is reported")
+        states = dict((v["title"], v["state"]) for v in res["sections"])
+        check(states.get("Sec 2.1") == A.OP_FAST_FORWARD,
+              "the section only they touched still fast-forwards")
+        got = json.load(open(pj, encoding="utf-8"))
+        check(got["outline"][0]["children"][1]["blocks"][0]["runs"][0]["t"]
+              == "rewritten there since the last exchange",
+              "the incoming version of a conflicted section wins")
+        check(any("Sec 1.2" in line for line in A.reconcile_summary(res["sections"])),
+              "the summary names the conflicted section")
+
+    print("== re-pasting a delta reads 'already applied', not 'diverged' ==")
+    with tempfile.TemporaryDirectory() as root:
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        far = copy.deepcopy(BASE)
+        edit_para(far, 0, 1, "once")
+        diff = A.make_text_diff(BASE, far, "demo")
+        A.apply_text_diff(root, diff, dir_name="demo")
+        res = A.apply_text_diff(root, diff, dir_name="demo")
+        states = [v["state"] for v in res["sections"]]
+        check(states == [A.OP_ALREADY],
+              "the second paste changes nothing and says so")
+        check(res.get("conflicts") == [], "an idempotent re-paste is not a conflict")
+
+    print("== an older sender's delta, with no per-section ancestors ==")
+    with tempfile.TemporaryDirectory() as root:
+        # Exactly the payload already cut on the work machine before this change
+        # shipped: ops with no base_node_sha, and a whole-report sha that cannot
+        # match. It must land, and say which sections could not be checked.
+        d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
+        far = copy.deepcopy(BASE)
+        edit_para(far, 0, 1, "cut before per-section ancestors existed")
+        diff = A.make_text_diff(BASE, far, "demo")
+        for op in diff["ops"]:
+            op.pop("base_node_sha", None)
+        diff["base_sha"] = "0" * 40
+        res = A.apply_text_diff(root, diff, dir_name="demo")
+        check(res.get("baseline") == "diverged",
+              "an old-format delta from a stale ancestor still applies")
+        states = [v["state"] for v in res["sections"]]
+        check(states == [A.OP_UNKNOWN],
+              "a section with no ancestor to compare reads 'unknown'")
+        got = json.load(open(pj, encoding="utf-8"))
+        check(got["outline"][0]["children"][1]["blocks"][0]["runs"][0]["t"]
+              == "cut before per-section ancestors existed",
+              "an old-format delta lands its edit")
+
+    print("== a WHOLE-OUTLINE delta from a different ancestor is still refused ==")
+    # This one is not section-scoped: it resends the top-level structure, so it
+    # can drop sections held only here. The common-ancestor question is real.
     with tempfile.TemporaryDirectory() as root:
         stale = copy.deepcopy(BASE)
         stale["meta"]["title"] = "an older agreement"
         d, pj, bl = seed(root, copy.deepcopy(BASE), baseline=BASE)
         far = copy.deepcopy(stale)
-        edit_para(far, 0, 1, "cut from a state this machine never agreed on")
+        far["outline"].append(node("c9", "Chapter 9", "added over there"))
         diff = A.make_text_diff(stale, far, "demo")
+        check("outline" in diff and not A.diff_is_section_scoped(diff),
+              "fixture: a top-level structure change resends the whole outline")
         before_bl, before_pj = rb(bl), rb(pj)
         refused = False
         try:
             A.apply_text_diff(root, diff, dir_name="demo")
         except A.BaselineMismatch:
             refused = True
-        check(refused, "mismatched ancestor -> still refused")
+        check(refused, "mismatched ancestor + whole outline -> still refused")
         check(rb(bl) == before_bl and rb(pj) == before_pj,
               "a refused diff writes neither project.json nor the baseline")
 

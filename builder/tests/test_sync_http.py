@@ -14,7 +14,12 @@ that channel breaks on when they drift:
    the package against the live file refused every report edited since its last
    exchange -- in practice all of them -- so test_drifted_report_still_applies
    below fails against that behaviour, as does the localBase assertion in
-   test_real_mismatch_is_refused.
+   test_real_mismatch_merges_section_by_section. A delta that names a whole-report
+   ancestor this machine never held is NOT refused: its ops replace whole
+   sections and carry their own ancestors, so it is merged section by section
+   and the sections both sides edited are reported. Only a payload that can drop
+   sections held here -- a delta resending the top-level outline, or a package --
+   still refuses.
 
 2. A REFUSED APPLY WRITES NOTHING. /api/merge3-apply used to take its snapshot
    before validating, so a request that was then turned away still left a file
@@ -196,13 +201,49 @@ def test_drifted_report_still_applies(root):
           and digest(os.path.join(pdir, "project.json")) == after_first)
 
 
-def test_real_mismatch_is_refused(root):
-    """A package cut from an ancestor we never held is still refused, and the
-    body names BOTH shas so the drawer can explain the two ways forward."""
+def test_real_mismatch_merges_section_by_section(root):
+    """A delta whose whole-report ancestor we never held is NOT refused: its ops
+    each replace one whole section and carry that section's own ancestor, so the
+    report-wide fingerprint is not the question they ask. It is applied, and the
+    sections both sides had edited come back named."""
     name = "mismatch"
     pdir = make_report(root, name)
     diff = cut_diff(root, name)
     diff["base_sha"] = "0" * 64
+    status, body = post("/api/apply-update", {"dir": name, "diff": diff})
+    check("a section-scoped delta from another ancestor is merged, not refused",
+          status == 200 and body.get("baseline") == "diverged",
+          "-> %s %s" % (status, body))
+    with open(os.path.join(pdir, "project.json"), encoding="utf-8") as fh:
+        merged = json.load(fh)
+    check("their edit landed",
+          "retyped on the work machine"
+          in merged["outline"][0]["blocks"][0]["runs"][0]["t"])
+    check("the section this machine had rewritten is untouched by their delta",
+          "rewritten on this machine"
+          in merged["outline"][5]["blocks"][0]["runs"][0]["t"])
+    check("neither side had edited the same section -> no conflict reported",
+          body.get("conflicts") == [], "-> %s" % (body.get("conflicts"),))
+    check("it was snapshotted before the write",
+          any("preapply" in s for s in snapshots(pdir)), "-> %s" % snapshots(pdir))
+
+
+def test_whole_outline_from_another_ancestor_is_refused(root):
+    """The payload that CAN still drop sections held only here -- a delta that
+    resends the top-level structure -- keeps the refusal, and the body names
+    BOTH shas so the drawer can explain the two ways forward."""
+    name = "mismatch_outline"
+    pdir = make_report(root, name)
+    with open(os.path.join(pdir, "_baseline.json"), encoding="utf-8") as fh:
+        agreed = json.load(fh)
+    theirs = copy.deepcopy(agreed)
+    theirs["outline"].append({"id": "added_over_there",
+                              "title": "Section added on the work machine",
+                              "blocks": [], "children": []})
+    diff = apply_update.make_text_diff(agreed, theirs, name)
+    diff["base_sha"] = "0" * 64
+    check("fixture: a top-level structure change resends the whole outline",
+          "outline" in diff and not apply_update.diff_is_section_scoped(diff))
     before = digest(os.path.join(pdir, "project.json"))
     status, body = post("/api/apply-update", {"dir": name, "diff": diff})
     check("a genuinely different ancestor is refused",
@@ -665,7 +706,8 @@ def run():
     try:
         print("baseline rule")
         test_drifted_report_still_applies(root)
-        test_real_mismatch_is_refused(root)
+        test_real_mismatch_merges_section_by_section(root)
+        test_whole_outline_from_another_ancestor_is_refused(root)
         test_missing_baseline_is_not_a_mismatch(root)
         print("merge surface")
         test_merge3_shape(root)

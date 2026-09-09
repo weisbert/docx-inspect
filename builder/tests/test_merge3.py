@@ -429,21 +429,49 @@ def test_baseline_policy():
               "drifted file + matching ancestor -> the local edit survives",
               canon(texts_of(find(got, "s22"))))
 
-    # (b) the two sides name DIFFERENT ancestors -> refuse. The local baseline
-    # holds a state the package was never cut from.
+    # (b) the two sides name DIFFERENT ancestors. A section-scoped delta is not
+    # refused for it: each op replaces one whole section and carries that
+    # section's own ancestor, so the report-wide fingerprint is not the question
+    # -- and for a report that only travels back as a patch package it can never
+    # agree anyway. The sections both sides edited are named instead.
     with tempfile.TemporaryDirectory() as root:
         other_ancestor = copy.deepcopy(base)
         set_text(other_ancestor, "s21", "setup as of some other exchange")
         d = seed_report(root, "CLKDIV_5G", base, baseline=other_ancestor)
+        res = A.apply_text_diff(root, diff, dir_name="CLKDIV_5G")
+        check(res.get("baseline") == "diverged",
+              "mismatched sha + section-scoped delta -> 'diverged', not refused",
+              str(res.get("baseline")))
+        got = read_json(os.path.join(d, "project.json"))
+        check(texts_of(find(got, "s11")) == ["scope edited upstream"],
+              "mismatched sha -> the delta still lands",
+              canon(texts_of(find(got, "s11"))))
+        check(res.get("conflicts") == [],
+              "no section was edited on both sides -> nothing to report",
+              canon(res.get("conflicts")))
+
+    # ...and the mismatch object itself is still what the HTTP layer renders,
+    # for the payloads that DO still raise (a package, a whole-outline delta).
+    with tempfile.TemporaryDirectory() as root:
+        other_ancestor = copy.deepcopy(base)
+        set_text(other_ancestor, "s21", "setup as of some other exchange")
+        d = seed_report(root, "CLKDIV_5G", base, baseline=other_ancestor)
+        restructured = copy.deepcopy(base)
+        restructured["outline"].append(
+            {"id": "cX", "title": "Chapter added over there", "blocks": [],
+             "children": []})
+        whole = A.make_text_diff(base, restructured, "CLKDIV_5G")
+        check(not A.diff_is_section_scoped(whole),
+              "fixture: a top-level structure change is not section-scoped")
         before = read_json(os.path.join(d, "project.json"))
         raised = None
         try:
-            A.apply_text_diff(root, diff, dir_name="CLKDIV_5G")
+            A.apply_text_diff(root, whole, dir_name="CLKDIV_5G")
         except A.BaselineMismatch as exc:
             raised = exc
-        check(raised is not None, "mismatched sha -> BaselineMismatch raised")
+        check(raised is not None, "mismatched sha + whole outline -> raised")
         if raised is not None:
-            check(raised.packageBase == diff.get("base_sha"),
+            check(raised.packageBase == whole.get("base_sha"),
                   "mismatch carries the package fingerprint")
             check(bool(raised.localBase) and raised.localBase != raised.packageBase,
                   "mismatch carries the local fingerprint")

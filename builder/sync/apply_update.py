@@ -509,6 +509,27 @@ def _cmp_own(n):
     return own
 
 
+def _cmp_tree(n):
+    """_cmp_own extended down the subtree, so a whole branch has one comparable
+    shape. Used to fingerprint what a ``set_children`` op replaces."""
+    d = _cmp_own(n if isinstance(n, dict) else {})
+    d["children"] = [_cmp_tree(c) for c in ((n or {}).get("children") or [])]
+    return d
+
+
+def node_sha(n):
+    """Fingerprint of ONE section's own content -- exactly what a ``patch_node``
+    op replaces, normalized by _cmp_own so editor UI keys and the grid's
+    cosmetic per-table ids never register as a difference."""
+    return _sha(_canon(_cmp_own(n if isinstance(n, dict) else {})))
+
+
+def children_sha(children):
+    """Fingerprint of one section's child list -- what a ``set_children`` op
+    replaces, normalized the same way."""
+    return _sha(_canon([_cmp_tree(c) for c in (children or [])]))
+
+
 def _child_key(n):
     """Stable identity of a child for structure comparison: id when present, else
     ('t', title). A section added in the editor gets a fresh id, so it simply
@@ -537,7 +558,12 @@ def _diff_node(base, cur, ops):
                    and nb.get(k) != nc.get(k)}
         removed = [k for k in nb if k not in nc]
         op = {"op": "patch_node", "node_id": cur.get("id"),
-              "title": cur.get("title"), "fields": changed}
+              "title": cur.get("title"), "fields": changed,
+              # The ancestor of THIS SECTION, not of the whole report. A patch
+              # is a self-contained replacement of one section's own fields, so
+              # the only question its receiver has to answer is whether that one
+              # section has moved underneath it -- see reconcile_ops.
+              "base_node_sha": node_sha(base)}
         if removed:
             op["remove_fields"] = removed
         ops.append(op)
@@ -548,7 +574,8 @@ def _diff_node(base, cur, ops):
     elif bch != cch:
         # structure changed at this level -> resend this node's whole subtree.
         ops.append({"op": "set_children", "node_id": cur.get("id"),
-                    "title": cur.get("title"), "children": cch})
+                    "title": cur.get("title"), "children": cch,
+                    "base_node_sha": children_sha(bch)})
 
 
 def make_text_diff(base, cur, dir_name=""):
@@ -586,6 +613,120 @@ def make_text_diff(base, cur, dir_name=""):
     elif b_out != c_out:
         diff["outline"] = c_out    # top-level structure changed -> full outline
     return diff
+
+
+# ---------------------------------------------------------------------------
+# Per-section reconciliation.
+#
+# WHY THE WHOLE-FILE HANDSHAKE CANNOT BE THE GUARD FOR AN OP-DIFF.
+# A report that is only ever sent downstream as a patch-by-title package never
+# has a byte-identical twin on the two machines: the package carries the
+# sections it names and nothing else, so everything it does not name stays as
+# each side already had it. The clearest case is a figure -- the picture is
+# pasted on the work machine, so that side holds a real file name where this one
+# holds an empty string, for the life of the report. Two project.json files that
+# can never be equal produce two _baseline.json files that can never be equal,
+# and a guard that compares them refuses every delta forever. That is a property
+# of the workflow, not a state either side can repair.
+#
+# The question the guard was actually asking -- "would applying this quietly
+# destroy work?" -- is answerable at the granularity the payload is written in.
+# An op is a WHOLE-SECTION replacement, self-contained: it does not need the
+# rest of the report to make sense, so it needs an ancestor for its own section
+# and no more. Each op carries one (``base_node_sha``), and the receiver sorts
+# the ops into four cases rather than refusing the lot.
+# ---------------------------------------------------------------------------
+
+OP_FAST_FORWARD = "fast_forward"   # this section here == the state it was cut from
+OP_ALREADY = "already_applied"     # applying it would change nothing
+OP_DIVERGED = "diverged"           # both sides moved this section; theirs wins, loudly
+OP_ABSENT = "absent"               # no such section here; the op is skipped
+OP_UNKNOWN = "unknown"             # older sender: the op names no ancestor
+
+_OP_STATE_WORDS = {
+    OP_FAST_FORWARD: "unchanged here since the state it was cut from",
+    OP_ALREADY: "already holds this",
+    OP_DIVERGED: "ALSO edited here -- the incoming version wins",
+    OP_ABSENT: "no section of that name here -- skipped",
+    OP_UNKNOWN: "cut by an older sender, which names no ancestor",
+}
+
+
+def diff_is_section_scoped(diff):
+    """True when a delta says only "here is section X, whole" -- ops and nothing
+    that replaces the report wholesale. A full ``outline`` is the other kind: it
+    resends the top-level structure, so it CAN drop sections this machine holds,
+    and the common-ancestor question stays meaningful for it."""
+    return bool(diff.get("ops")) and "outline" not in diff
+
+
+def _op_would_change(node, op):
+    """Whether applying one op to the section it matched would change that
+    section's content -- the test that makes a re-pasted delta read as
+    ``already_applied`` rather than as a divergence."""
+    kind = op.get("op")
+    if kind == "patch_node":
+        after = dict(node)
+        for k, v in (op.get("fields") or {}).items():
+            if k != "children":
+                after[k] = v
+        for k in op.get("remove_fields") or []:
+            if k not in ("children", "id"):
+                after.pop(k, None)
+        return node_sha(after) != node_sha(node)
+    if kind == "set_children":
+        return (children_sha(op.get("children") or [])
+                != children_sha(node.get("children") or []))
+    return True
+
+
+def _op_local_sha(node, op):
+    """The fingerprint on this machine that an op's ``base_node_sha`` is
+    comparable to: a section's own fields for patch_node, its child list for
+    set_children."""
+    if op.get("op") == "set_children":
+        return children_sha(node.get("children") or [])
+    return node_sha(node)
+
+
+def reconcile_ops(project, diff):
+    """Sort a delta's ops against what this machine actually holds.
+
+    Returns one dict per op: ``{op, node_id, title, state}``, state being one of
+    the OP_* constants above. Nothing is written and nothing is refused -- this
+    only says which sections carry a risk worth naming, so a caller can apply
+    the delta and report the handful that both sides touched instead of turning
+    the whole exchange away.
+    """
+    out = []
+    for op in diff.get("ops") or []:
+        entry = {"op": op.get("op"), "node_id": op.get("node_id"),
+                 "title": op.get("title") or op.get("node_id") or "?"}
+        node = _find_node(project.get("outline", []),
+                          op.get("node_id"), op.get("title"))
+        if node is None:
+            entry["state"] = OP_ABSENT
+        elif not _op_would_change(node, op):
+            # Idempotent re-paste, or a section that arrived by another route.
+            # True whatever the two sides call their ancestors.
+            entry["state"] = OP_ALREADY
+        elif not op.get("base_node_sha"):
+            entry["state"] = OP_UNKNOWN
+        elif op["base_node_sha"] == _op_local_sha(node, op):
+            entry["state"] = OP_FAST_FORWARD
+        else:
+            entry["state"] = OP_DIVERGED
+        out.append(entry)
+    return out
+
+
+def reconcile_summary(verdicts):
+    """One line per section that is worth a word -- the diverged, the absent and
+    the un-fingerprinted. Sections that fast-forward or already hold the incoming
+    content say nothing: they are the normal case and there is nothing to check."""
+    return ["section '%s': %s" % (v["title"], _OP_STATE_WORDS.get(v["state"], v["state"]))
+            for v in verdicts
+            if v["state"] in (OP_DIVERGED, OP_ABSENT, OP_UNKNOWN)]
 
 
 def diff_is_empty(diff):
@@ -646,10 +787,24 @@ def _apply_text_diff_into(project, diff):
 def apply_text_diff(root, diff, dir_name=None, backup=True):
     """Apply an upstream "Copy diff" delta to a local project.json. Backs the
     target into the shared rollback history and writes atomically. Returns
-    {ok, backup, logs, rel, base_match, baseline, baseline_moved}. base_match is
-    None when the diff carried no fingerprint, else whether the CURRENT file still
-    equals the state the diff was cut from -- drift reporting only, never the
-    guard. ``baseline`` names which of check_baseline's three cases applied.
+    {ok, backup, logs, rel, base_match, baseline, baseline_moved, sections,
+    conflicts}. base_match is None when the diff carried no fingerprint, else
+    whether the CURRENT file still equals the state the diff was cut from --
+    drift reporting only, never the guard. ``baseline`` names which of
+    check_baseline's three cases applied, plus a fourth, "diverged", described
+    below. ``sections`` is reconcile_ops' verdict per op and ``conflicts`` the
+    subset both sides had edited.
+
+    A SECTION-SCOPED DELTA IS NEVER REFUSED. Its ops each replace one whole
+    section and carry that section's own ancestor, so a disagreement about the
+    WHOLE report's ancestor says nothing about whether any particular section is
+    at risk -- and for a report that only ever travels downstream as a
+    patch-by-title package, that disagreement is permanent and unrepairable (see
+    the reconcile_ops header). So a mismatched base_sha on such a delta reads
+    "diverged": it is applied after a snapshot, and the sections both sides had
+    edited are named in ``conflicts`` rather than silently taken. A delta that
+    carries a full ``outline`` is a different animal -- it replaces the report's
+    structure and can drop sections held only here -- and that one still raises.
 
     THE BASELINE DOES NOT MOVE HERE. A delta is one-way: only the far side's
     edits crossed, this machine's did not, so the two sides did not arrive at a
@@ -681,13 +836,21 @@ def apply_text_diff(root, diff, dir_name=None, backup=True):
     base_match = None
     if diff.get("base_sha"):
         base_match = (diff["base_sha"] == local_sha)
-    # Refuses (raises) on a real mismatch; a report with no baseline yet is let
-    # through on purpose and snapshotted first.
-    baseline = check_baseline(root, rel, diff.get("base_sha"), dname)
+    # A report with no baseline yet is let through on purpose and snapshotted
+    # first; a whole-outline delta from a different ancestor still raises.
+    try:
+        baseline = check_baseline(root, rel, diff.get("base_sha"), dname)
+    except BaselineMismatch:
+        if not diff_is_section_scoped(diff):
+            raise
+        baseline = "diverged"
+    verdicts = reconcile_ops(project, diff)
+    conflicts = [v for v in verdicts if v["state"] == OP_DIVERGED]
     had_baseline, _ = baseline_state(root, rel)
     if baseline != "ok":
         snapshot_project(os.path.dirname(tgt), "prebaseline")
     logs = _apply_text_diff_into(project, diff)
+    logs += ["  ! " + line for line in reconcile_summary(verdicts)]
     new_bytes = json.dumps(project, ensure_ascii=False, indent=2).encode("utf-8")
     bdir = _new_backup_dir(root)
     if backup:
@@ -704,7 +867,8 @@ def apply_text_diff(root, diff, dir_name=None, backup=True):
         _stamp_baseline(root, rel, new_bytes)
     return {"ok": True, "backup": bdir.replace("\\", "/"), "logs": logs,
             "rel": rel.replace("\\", "/"), "base_match": base_match,
-            "baseline": baseline, "baseline_moved": not had_baseline}
+            "baseline": baseline, "baseline_moved": not had_baseline,
+            "sections": verdicts, "conflicts": conflicts}
 
 
 # ---------------------------------------------------------------------------
@@ -989,8 +1153,22 @@ def cmd_apply_diff(root, path, dir_name, yes):
     try:
         state = check_baseline(root, rel, diff.get("base_sha"), dname)
     except BaselineMismatch as mismatch:
-        _print_baseline_refusal(mismatch)
-        return 3
+        if not diff_is_section_scoped(diff):
+            _print_baseline_refusal(mismatch)
+            return 3
+        state = "diverged"
+        _print_baseline_divergence(mismatch)
+    notes = []
+    if diff_is_section_scoped(diff):
+        try:
+            local = json.loads(_read(tgt).decode("utf-8-sig"))
+        except Exception:
+            local = {}
+        notes = reconcile_summary(reconcile_ops(local, diff))
+        if notes:
+            print("\nWorth a look before this lands:")
+            for line in notes:
+                print("  ! " + line)
     if state == "no_baseline":
         print("\nNote: this report has no exchange baseline yet, so there is "
               "nothing to compare the diff against. It will be applied after a "
@@ -1006,10 +1184,28 @@ def cmd_apply_diff(root, path, dir_name, yes):
     except BaselineMismatch as mismatch:   # the file moved between check and write
         _print_baseline_refusal(mismatch)
         return 3
+    for v in res.get("conflicts") or []:
+        print("  ! section '%s' was edited on BOTH sides -- the incoming "
+              "version was taken; the previous one is in the backup below."
+              % v["title"])
+    echoed = set("  ! " + line for line in notes)   # said once, before the prompt
     for line in res["logs"]:
-        print(line)
+        if line not in echoed:
+            print(line)
     print("\nOK. Backed up to: %s" % res["backup"])
     return 0
+
+
+def _print_baseline_divergence(mismatch):
+    """A section-scoped delta whose whole-report ancestor does not match. Said
+    once, as a fact about the channel rather than as an error: the payload is
+    per-section and is checked per section, which the lines that follow report."""
+    print("\nThe two sides name different whole-report ancestors.")
+    print("  diff was cut from: %s" % (mismatch.packageBase or "?"))
+    print("  local baseline   : %s" % (mismatch.localBase or "?"))
+    print("This delta carries whole sections, so it is checked section by "
+          "section instead -- a report that only ever travels back as a "
+          "patch package cannot have a matching whole-report ancestor.")
 
 
 def _print_baseline_refusal(mismatch):
