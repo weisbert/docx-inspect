@@ -28,7 +28,12 @@
  *   4. a paste into that frame stores a new file and points the block at it;
  *   5. a paste onto a figure that STILL HOLDS a picture replaces it;
  *   6. one cell of a figure grid can be emptied without touching its
- *      neighbours or its sub-caption.
+ *      neighbours or its sub-caption;
+ *   7. the caption belongs to the FIGURE, not to the picture: the box is on
+ *      screen and writable while the figure holds no picture, which is the
+ *      state a figure is in the moment it is added to a section. It used to be
+ *      drawn only in the branch that has a picture, so a new figure had no
+ *      caption field at all until a screenshot had been fetched for it.
  *
  *   Assertions 3 and 5 are the ones with teeth: against the old code the filled
  *   figure ignores the paste entirely and the block still names the old file.
@@ -64,6 +69,11 @@ const SECTION = 'Simulation results';
 const FIG_ID = 'b-fig-1';
 const GRID_ID = 'b-grid-1';
 const FIG_CAPTION = 'Divider output at the slow corner';
+// Typed into the caption box while the figure holds no picture, which is the
+// state a figure is in the moment it is added. Everything after that point
+// expects the longer caption.
+const CAPTION_SUFFIX = ' (rewritten while empty)';
+const CAPTION_AFTER = FIG_CAPTION + CAPTION_SUFFIX;
 const GRID_SUB = 'corner TT';
 
 /* A 1x1 PNG. Small, valid, and decodable by the canvas the app re-encodes
@@ -299,13 +309,19 @@ const figureState = (page) => page.evaluate(() => {
   // The number chip only. The rest of the head carries the file name and its
   // pixel size, which SHOULD change when the picture does.
   const head = card ? card.querySelector('.rw-numchip') : null;
-  const caption = document.querySelector('.rw-figure input.rw-input, .rw-card input.rw-input');
+  // Scoped to the figure card. It used to be read off the whole page, which
+  // happened to find the right box only because the caption sat inside the
+  // picture; the caption belongs to the figure and is drawn whether or not
+  // there is a picture, so the card is the thing to ask.
+  const caption = card ? card.querySelector('.rw-caption input.rw-input') : null;
   const active = document.activeElement;
   return {
     hasImg: !!img,
     imgSrc: img ? img.getAttribute('src') : '',
     hasClear: !!document.querySelector('.rw-figure__clear'),
     headText: head ? head.textContent.replace(/\s+/g, ' ').trim().slice(0, 120) : '',
+    hasCaptionBox: !!caption,
+    captionDisabled: !!(caption && (caption.disabled || caption.readOnly)),
     captionValue: caption ? caption.value : '',
     activeClass: active ? String(active.className || '') : '',
     hasEmptyFrame: !!document.querySelector('.rw-card .rw-empty'),
@@ -407,6 +423,35 @@ async function browserChecks() {
       /rw-empty/.test(afterClear.activeClass),
       'focus is on ' + JSON.stringify(afterClear.activeClass));
 
+    /* ---- 2b: the caption belongs to the figure, not to the picture ---- */
+    // A figure with no picture in it is exactly what a figure looks like the
+    // moment it is added to a section. Its number is already on its head and
+    // the document is already going to print a caption line for it, so the
+    // caption has to be writable before the screenshot is fetched -- laying a
+    // chapter out first and filling the pictures in afterwards is an ordinary
+    // way to work, and it was impossible.
+    check('the caption box is still on screen with no picture in the figure',
+      afterClear.hasCaptionBox && !afterClear.captionDisabled,
+      JSON.stringify(afterClear));
+    check('and it still reads the caption that was there',
+      afterClear.captionValue === FIG_CAPTION,
+      'the box reads ' + JSON.stringify(afterClear.captionValue));
+
+    const emptyCaption = '.rw-card[data-block="1"] .rw-caption input.rw-input';
+    await page.click(emptyCaption);
+    await page.keyboard.press('End');
+    await page.keyboard.type(CAPTION_SUFFIX);
+    await settle(page, 900);
+    const captioned = await waitForBlock(reportsRoot, FIG_ID,
+      (b) => (b.caption || '').indexOf(CAPTION_SUFFIX.trim()) >= 0);
+    check('typing in it reaches the document, with no picture involved',
+      !!captioned && captioned.caption === CAPTION_AFTER,
+      'the caption on disk is ' + JSON.stringify(captioned && captioned.caption));
+    check('and the figure still holds no picture, so nothing was smuggled in',
+      !!captioned && !captioned.file,
+      'block.file is ' + JSON.stringify(captioned && captioned.file));
+    await page.screenshot({ path: path.join(shots, '3b-caption-while-empty.png') });
+
     /* ---- 3: pasting into the empty frame ---- */
     section('pasting the new picture straight in');
     const err2 = await pasteImage(page, '.rw-card .rw-empty');
@@ -418,7 +463,8 @@ async function browserChecks() {
       !!refilled && /^images\/.*pasted/.test(refilled.file || ''),
       'block.file is ' + JSON.stringify(refilled && refilled.file));
     check('and still its own caption and id',
-      !!refilled && refilled.caption === FIG_CAPTION && refilled.id === FIG_ID);
+      !!refilled && refilled.caption === CAPTION_AFTER && refilled.id === FIG_ID,
+      'the caption on disk is ' + JSON.stringify(refilled && refilled.caption));
 
     /* ---- 4: one cell of a figure grid ---- */
     section('one cell of a figure grid');

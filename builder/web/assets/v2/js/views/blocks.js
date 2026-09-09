@@ -1384,11 +1384,6 @@ export function FigureCard(props) {
                                acts.changed();
                              }} />
             </div>
-            <div style=${{ width: '100%' }}>
-              <${CaptionRow} numberLabel=${label} value=${block.caption}
-                             onChange=${(value) => { block.caption = value; acts.changed(); }} />
-              <div class="rw-micro" style=${{ paddingLeft: '2px' }}>${T.storedIn}</div>
-            </div>
           </div>` : html`
           <div class=${cx('rw-empty', over && 'rw-empty--over')} tabIndex="0"
                ref=${(node) => {
@@ -1437,8 +1432,20 @@ export function FigureCard(props) {
                            if (fileRef.current) fileRef.current.click();
                          }}>${T.chooseFile}<//>
             </div>
-            <div class="rw-micro">${T.storedIn}</div>
           </div>`}
+        ${/* THE CAPTION BELONGS TO THE FIGURE, NOT TO THE PICTURE. It used to
+              be drawn inside the branch that has one, so a figure just added to
+              a section had no caption field at all: the number was already on
+              its head, the document was already going to print a caption line
+              for it, and the only way to write one was to fetch the screenshot
+              first. Writing the captions while laying a chapter out and filling
+              the pictures in afterwards is an ordinary way to work, and the
+              field is drawn for both states now. */ ''}
+        <div style=${{ marginTop: '9px' }}>
+          <${CaptionRow} numberLabel=${label} value=${block.caption}
+                         onChange=${(value) => { block.caption = value; acts.changed(); }} />
+          <div class="rw-micro" style=${{ paddingLeft: '2px' }}>${T.storedIn}</div>
+        </div>
       </div>
       ${footer || null}
       ${looking && block.file ? html`
