@@ -114,13 +114,34 @@ def _cell_margins(table, top=0, bottom=0, left=28, right=28):
     tblPr.append(mar)
 
 
+# Horizontal alignment inside a table cell. Every table cell in this module is
+# centred unless something asks otherwise, so an unknown name reads as "nothing
+# was asked for" and centres: a typo in a report's data must not raise mid-render.
+_ALIGNMENTS = {"left": ALIGN.LEFT, "center": ALIGN.CENTER, "right": ALIGN.RIGHT}
+
+
+def _align_name(value):
+    """A normalised alignment name ('left'/'center'/'right'), or None for
+    "not asked for" -- which includes every value this module does not know."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip().lower()
+    if name == "centre":
+        name = "center"
+    return name if name in _ALIGNMENTS else None
+
+
+def _para_align(name):
+    return _ALIGNMENTS.get(_align_name(name) or "center", ALIGN.CENTER)
+
+
 def _set_cell_text(cell, val, font_pt, ascii_font="Arial", eastasia="SimSun",
                    bold=False, color=None, align="center"):
     """Write a single compact run into a cell; sizes the paragraph mark too so empty
     cells do not push the (exact) row height up. Never edits the global Normal style."""
     cell.text = ""
     p = cell.paragraphs[0]
-    p.alignment = ALIGN.CENTER if align == "center" else ALIGN.LEFT
+    p.alignment = _para_align(align)
     pf = p.paragraph_format
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
@@ -156,14 +177,22 @@ def _set_cell_text(cell, val, font_pt, ascii_font="Arial", eastasia="SimSun",
 
 
 def _set_cell_runs(cell, runs, font_pt, ascii_font="Arial", eastasia="SimSun",
-                   header_bold=False):
+                   header_bold=False, align=None):
     """Render styled runs [{t, b, i, color}] into a cell (per-run bold/italic/color).
     Mirrors _set_cell_text but supports several runs, so a free-table cell can carry
-    the same inline styling as a body paragraph."""
+    the same inline styling as a body paragraph.
+
+    ``align`` (optional): 'left' / 'center' / 'right'. None keeps what this
+    function has always done -- centre a sized cell, and leave an unsized one to
+    the style -- so a caller that names no alignment renders exactly as before."""
     cell.text = ""
     p = cell.paragraphs[0]
+    if align and not font_pt:
+        # An unsized cell is otherwise left to the style. Once an alignment is
+        # asked for by name, honour it whether or not the config sizes the text.
+        p.alignment = _para_align(align)
     if font_pt:
-        p.alignment = ALIGN.CENTER
+        p.alignment = _para_align(align or "center")
         pf = p.paragraph_format
         pf.space_before = Pt(0)
         pf.space_after = Pt(0)
@@ -628,6 +657,44 @@ def _row_cells(row):
     return row if isinstance(row, (list, tuple)) else []
 
 
+def _col_align_list(col_align, ncols):
+    """Per-column alignment for a free table: a list parallel to the columns, a
+    {column_index: name} map, or one name for the whole table. Returns a list of
+    names with None wherever nothing (or nothing valid) was asked for."""
+    if isinstance(col_align, str):
+        return [_align_name(col_align)] * ncols
+    out = [None] * ncols
+    if isinstance(col_align, dict):
+        for k, v in col_align.items():
+            try:
+                i = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < ncols:
+                out[i] = _align_name(v)
+    elif isinstance(col_align, (list, tuple)):
+        for i, v in enumerate(col_align[:ncols]):
+            out[i] = _align_name(v)
+    return out
+
+
+def _cell_align(val):
+    """The alignment a dict cell carries inline, or None."""
+    return _align_name(val.get("align")) if isinstance(val, dict) else None
+
+
+def _cell_plain_value(val):
+    """A free-table cell's value for the branches that write plain text. A dict
+    cell that carries no runs is a cell described by keys (``align`` and friends):
+    take its text if it names any, and never print the mapping itself."""
+    if isinstance(val, dict):
+        for key in ("t", "text"):
+            if key in val:
+                return val[key]
+        return ""
+    return val
+
+
 def _inline_row_kind(row):
     """The ``kind`` carried by a dict row, or None."""
     if isinstance(row, dict):
@@ -686,7 +753,8 @@ def _row_kind_list(rows, row_kinds):
 # Public: free-table renderer (arbitrary rows/cols)
 # ---------------------------------------------------------------------------
 def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
-                      row_fills=None, header_fill=None, row_h=None, row_kinds=None):
+                      row_fills=None, header_fill=None, row_h=None, row_kinds=None,
+                      col_align=None):
     """Render an arbitrary table. ``cfg`` = template config's ``free_table`` section:
         header_fill, border{val,sz,color}, font_pt(optional).
 
@@ -707,6 +775,15 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
 
     ``row_fills`` (optional, legacy): map of row-index -> hex6 fill, letting a caller
     shade whole rows (e.g. band condition rows vs result rows).
+
+    ``col_align`` (optional): horizontal alignment per column -- a list parallel to
+    the columns, a {column_index: name} map, or a single name for the whole table.
+    A name is 'left', 'center' or 'right'; anything else (including a column left
+    at None) keeps the centred default. A single cell overrides its column by
+    being written as a dict with an ``align`` key -- ``{"runs": [...],
+    "align": "left"}`` -- so a column of short labels can stay centred while one
+    cell of running text reads left. A table that names no alignment anywhere
+    renders exactly as it did before this existed.
 
     Shading precedence for a row: a KIND the fill map knows wins (its mapped value may
     be ``None``, meaning "leave unshaded"); otherwise a header row takes the header
@@ -729,6 +806,7 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
     rfills = {int(k): v for k, v in (row_fills or {}).items()}
     kinds = _row_kind_list(rows, row_kinds)
     kind_fills = free_kind_fills(cfg, header_fill)
+    caligns = _col_align_list(col_align, ncols)
 
     table = doc.add_table(rows=nrows, cols=ncols)
     table.alignment = 1
@@ -763,13 +841,20 @@ def render_free_table(doc, rows, cfg, header_rows=1, merges=None, col_w=None,
             cell = grid[r][c]
             if fill:
                 _shade(cell, fill)
+            # A cell's own alignment wins over its column's; None means nobody
+            # asked, and the cell centres as it always has.
+            align = _cell_align(val) or caligns[c]
             runs = val.get("runs") if isinstance(val, dict) else None
             if isinstance(runs, list):
-                _set_cell_runs(cell, runs, font_pt, header_bold=is_head)
+                _set_cell_runs(cell, runs, font_pt, header_bold=is_head, align=align)
             elif font_pt:
-                _set_cell_text(cell, val, font_pt, bold=is_head, align="center")
+                _set_cell_text(cell, _cell_plain_value(val), font_pt, bold=is_head,
+                               align=align or "center")
             else:
-                cell.text = "" if val is None else str(val)
+                plain = _cell_plain_value(val)
+                cell.text = "" if plain is None else str(plain)
+                if align:
+                    cell.paragraphs[0].alignment = _para_align(align)
                 if is_head:
                     for p in cell.paragraphs:
                         for run in p.runs:

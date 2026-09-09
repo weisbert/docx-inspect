@@ -239,8 +239,24 @@ def build_datatable_xlsx(data, comp_cfg):
 # ---------------------------------------------------------------------------
 # Free table -> xlsx (mirrors tables.render_free_table).
 # ---------------------------------------------------------------------------
+def _cell_alignment(name, wrap):
+    """openpyxl alignment for one free-table cell, mirroring what the document
+    does with it: horizontal by name, vertical centred, and wrapping whenever the
+    text carries its own line breaks -- Word breaks those on its own, Excel has
+    to be told or the cell shows one long line."""
+    if not name and not wrap:
+        return CENTER
+    return Alignment(horizontal=name or "center", vertical="center", wrap_text=bool(wrap))
+
+
 def build_free_table_xlsx(rows, header_rows=1, merges=None, col_w=None,
-                          row_fills=None, header_fill="D9D9D9"):
+                          row_fills=None, header_fill="D9D9D9",
+                          row_kinds=None, col_align=None, cfg=None):
+    """``cfg`` = the template config's 'free_table' section, read only for its
+    kind -> fill map; ``header_fill`` still wins for the header kind. Row shading
+    and alignment follow tables.render_free_table exactly -- same precedence,
+    computed by the same helpers -- so the sheet cannot say one thing while the
+    document says another."""
     rows = rows or []
     wb = Workbook()
     ws = wb.active
@@ -248,28 +264,42 @@ def build_free_table_xlsx(rows, header_rows=1, merges=None, col_w=None,
     if not rows:
         return _save(wb)
 
-    ncols = max(len(r) for r in rows)
+    ncols = max(len(tables._row_cells(r)) for r in rows)
     rfills = {int(k): v for k, v in (row_fills or {}).items()}
     hfill = _fill(header_fill)
+    kinds = tables._row_kind_list(rows, row_kinds)
+    kind_fills = tables.free_kind_fills(cfg or {}, header_fill)
+    caligns = tables._col_align_list(col_align, ncols)
 
     for r, rowvals in enumerate(rows):
-        band = hfill if r < header_rows else (_fill(rfills[r]) if r in rfills else None)
+        rowcells = tables._row_cells(rowvals)
+        kind = kinds[r]
+        if kind in kind_fills:
+            band = _fill(kind_fills[kind])
+        elif r < header_rows:
+            band = hfill
+        else:
+            band = _fill(rfills[r]) if r in rfills else None
+        is_head = r < header_rows or kind == "header"
         for c in range(ncols):
-            val = rowvals[c] if c < len(rowvals) else ""
+            val = rowcells[c] if c < len(rowcells) else ""
             cell = ws.cell(row=r + 1, column=c + 1)
             _paint(cell, band)
+            align = tables._cell_align(val) or caligns[c]
             runs = val.get("runs") if isinstance(val, dict) else None
             if isinstance(runs, list):
                 # openpyxl has one font per cell: flatten rich runs (concatenate
                 # text; bold/italic/colour if ANY run carries it).
                 text = "".join(str(rn.get("t", "")) for rn in runs)
-                bold = (r < header_rows) or any(rn.get("b") for rn in runs)
+                bold = is_head or any(rn.get("b") for rn in runs)
                 italic = any(rn.get("i") for rn in runs)
                 color = next((rn.get("color") for rn in runs if rn.get("color")), None)
                 cell.value = _coerce(text)
                 cell.font = Font(bold=bold, italic=italic, color=_argb(color), size=DEFAULT_SIZE)
             else:
-                _text(cell, val, bold=(r < header_rows))
+                text = tables._cell_plain_value(val)
+                _text(cell, text, bold=is_head)
+            cell.alignment = _cell_alignment(align, "\n" in str(text or ""))
 
     if col_w:
         for idx, cw in enumerate(col_w):
@@ -314,5 +344,7 @@ def build_block_xlsx(block, cfg):
         return build_free_table_xlsx(
             block.get("rows") or [], block.get("header_rows", 1),
             block.get("merges"), block.get("col_w"), block.get("row_fills"),
-            free.get("header_fill", "D9D9D9"))
+            block.get("header_fill") or free.get("header_fill", "D9D9D9"),
+            row_kinds=block.get("row_kinds"), col_align=block.get("col_align"),
+            cfg=free)
     raise ValueError("block type %r is not an exportable table" % btype)

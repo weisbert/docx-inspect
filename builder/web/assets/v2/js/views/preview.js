@@ -61,6 +61,10 @@ import {
 // owns what a note is, so the list here and the panel under a card cannot
 // drift apart.
 import { NotesTab, countOpenNotes } from './notes.js';
+// The plain table's data model -- what a row's cells are, what its kind is, and
+// which way a cell reads -- lives with the grid that edits it. The paper borrows
+// it rather than keeping a second opinion.
+import { plainRowKinds, plainColAligns, plainWidth, rowCells, cellText, cellAlign } from './table.js';
 
 /* ------------------------------------------------------------------ *
  * Frozen strings.
@@ -866,23 +870,35 @@ function PaperImage(props) {
          onError=${() => setFailed(true)} />`;
 }
 
+// The paper's plain table. It reads a row and a cell through the same helpers
+// the grid uses, so the three drawings of one table -- grid, paper, document --
+// cannot disagree about which row is a condition or which cell reads left.
 function FreeTable(props) {
   const { block } = props;
   const rows = Array.isArray(block.rows) ? block.rows : [];
   const headerRows = Number(block.header_rows || 0);
   const fills = (block.row_fills && typeof block.row_fills === 'object') ? block.row_fills : {};
+  const kinds = plainRowKinds(block);
+  const aligns = plainColAligns(block, plainWidth(block));
   return html`
     <div class="rw-preview__wide">
       <table>
         <tbody>
           ${rows.map((row, r) => {
-            const cells = Array.isArray(row) ? row : [row];
-            const shaded = fills[String(r)] !== undefined;
+            const cells = rowCells(row);
+            const kind = kinds[r];
+            // A known kind decides the shading; only a row without one falls
+            // back to the legacy index-keyed fill, exactly as the renderer does.
+            const shaded = kind ? kind === 'setting' : fills[String(r)] !== undefined;
+            const head = r < headerRows || kind === 'header';
             return html`
               <tr key=${r} class=${shaded ? 'rw-paper__setting' : null}>
-                ${cells.map((cell, c) => (r < headerRows
-                  ? html`<th key=${c}>${cell === null || cell === undefined ? '' : String(cell)}</th>`
-                  : html`<td key=${c}>${cell === null || cell === undefined ? '' : String(cell)}</td>`))}
+                ${cells.map((cell, c) => {
+                  const style = { textAlign: cellAlign(cell, aligns[c]) || 'center' };
+                  return head
+                    ? html`<th key=${c} style=${style}>${cellText(cell)}</th>`
+                    : html`<td key=${c} style=${style}>${cellText(cell)}</td>`;
+                })}
               </tr>`;
           })}
         </tbody>

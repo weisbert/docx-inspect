@@ -292,12 +292,77 @@ export function rowCells(row) {
   return Array.isArray(row) ? row : [];
 }
 
-function cellText(value) {
+// The text of one plain-table cell. Exported because the preview paper draws
+// the same cells and must read them the same way -- a cell written as an object
+// is a cell, not the word "[object Object]".
+export function cellText(value) {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'object' && Array.isArray(value.runs)) {
-    return value.runs.map((r) => (r && r.t) || '').join('');
+  if (typeof value === 'object') {
+    if (Array.isArray(value.runs)) return value.runs.map((r) => (r && r.t) || '').join('');
+    if (value.t !== undefined) return String(value.t);
+    if (value.text !== undefined) return String(value.text);
+    return '';
   }
   return String(value);
+}
+
+/* Alignment. A plain table is centred throughout unless it says otherwise:
+ * `block.col_align` names a column's alignment (a list parallel to the columns,
+ * or a {index: name} map) and a cell overrides its own column by carrying an
+ * `align` key. Same precedence as core/tables.py::render_free_table -- cell,
+ * then column, then centred -- so the grid, the preview paper, the document and
+ * the spreadsheet export all put the same text on the same side. */
+
+export const FREE_ALIGNS = ['left', 'center', 'right'];
+export const DEFAULT_ALIGN = 'center';
+
+export function alignName(value) {
+  if (typeof value !== 'string') return null;
+  let name = value.trim().toLowerCase();
+  if (name === 'centre') name = 'center';
+  return FREE_ALIGNS.indexOf(name) >= 0 ? name : null;
+}
+
+// Per-column alignment, as a list of names with null where none was asked for.
+export function plainColAligns(block, ncols) {
+  const out = new Array(Math.max(0, ncols)).fill(null);
+  const src = block && block.col_align;
+  if (typeof src === 'string') return out.map(() => alignName(src));
+  if (Array.isArray(src)) {
+    for (let i = 0; i < Math.min(src.length, out.length); i++) out[i] = alignName(src[i]);
+  } else if (src && typeof src === 'object') {
+    Object.keys(src).forEach((k) => {
+      const i = parseInt(k, 10);
+      if (i >= 0 && i < out.length) out[i] = alignName(src[k]);
+    });
+  }
+  return out;
+}
+
+// The alignment one cell is drawn with: its own, else its column's, else null
+// for "centred, because nobody asked".
+export function cellAlign(cell, colAlign) {
+  const own = (cell && typeof cell === 'object' && !Array.isArray(cell))
+    ? alignName(cell.align) : null;
+  return own || alignName(colAlign) || null;
+}
+
+// How many columns the rows actually have.
+export function plainWidth(block) {
+  let n = 0;
+  ((block && block.rows) || []).forEach((row) => { n = Math.max(n, rowCells(row).length); });
+  return n;
+}
+
+// Write per-column alignment back, and only when there is something to say: a
+// table nobody has aligned keeps no col_align key at all, so the upstream diff
+// stays quiet about tables that were never touched.
+export function setColAligns(block, list) {
+  if (!list.some((a) => !!a)) {
+    if (block.col_align !== undefined) delete block.col_align;
+    return;
+  }
+  block.col_align = list.map((a) => alignName(a) || null);
 }
 
 // Per-row kind, by the same precedence core/tables.py uses, with the legacy
@@ -404,6 +469,47 @@ export function deletePlainRows(block, from, count) {
   block.row_kinds = kinds.map((k) => k || null);
   remapRowFills(block,
     (i) => (i < from ? i : (i < from + count ? null : i - count)));
+  return true;
+}
+
+// Insert a blank column at `at`. Exported for the same reason the row actions
+// are: the widths and the alignments are addressed BY POSITION, so a column
+// action that leaves either behind hands every column past the cut its
+// neighbour's width and its neighbour's alignment.
+export function insertPlainColumn(block, at) {
+  const rows = block.rows || (block.rows = []);
+  const aligns = plainColAligns(block, plainWidth(block));   // before the columns move
+  rows.forEach((row, i) => {
+    const cells = rowCells(row);
+    cells.splice(at, 0, '');
+    if (Array.isArray(row)) rows[i] = cells;
+    else row.cells = cells;
+  });
+  if (Array.isArray(block.col_w)) block.col_w.splice(at, 0, 2);
+  aligns.splice(at, 0, null);
+  setColAligns(block, aligns);
+  return true;
+}
+
+// Delete the column at `at`. Answers whether anything went: a table is never
+// emptied of its last column this way, and when nothing is cut nothing else
+// moves either.
+export function deletePlainColumn(block, at) {
+  const rows = block.rows || [];
+  const aligns = plainColAligns(block, plainWidth(block));
+  let cut = false;
+  rows.forEach((row, i) => {
+    const cells = rowCells(row);
+    if (cells.length <= 1) return;
+    cells.splice(at, 1);
+    cut = true;
+    if (Array.isArray(row)) rows[i] = cells;
+    else row.cells = cells;
+  });
+  if (!cut) return false;
+  if (Array.isArray(block.col_w)) block.col_w.splice(at, 1);
+  aligns.splice(at, 1);
+  setColAligns(block, aligns);
   return true;
 }
 
@@ -685,9 +791,13 @@ function plainModel(block) {
   let ncols = 1;
   for (let i = 0; i < rows.length; i++) ncols = Math.max(ncols, rowCells(rows[i]).length);
   const widths = block.col_w || [];
+  const aligns = plainColAligns(block, ncols);
   const plan = [{ kind: 'num', label: '', width: W.num }];
   for (let c = 0; c < ncols; c++) {
-    plan.push({ kind: 'cell', index: c, label: columnLetter(c), width: cmToPx(widths[c]) || 128 });
+    plan.push({
+      kind: 'cell', index: c, label: columnLetter(c),
+      width: cmToPx(widths[c]) || 128, align: aligns[c] || DEFAULT_ALIGN,
+    });
   }
   const grid = [];
   for (let y = 0; y < rows.length; y++) {
@@ -1071,8 +1181,14 @@ export function TableBlock(props) {
           continue;
         }
         if (col.kind === 'limit') { el.classList.add('rw-grid__cell--num'); continue; }
-        if (col.kind === 'cell' && kinds && kinds[y] === 'header') {
-          el.classList.add('rw-grid__cell--head');
+        if (col.kind === 'cell') {
+          if (kinds && kinds[y] === 'header') el.classList.add('rw-grid__cell--head');
+          // The control aligns by COLUMN; a cell that names its own alignment is
+          // set here. The effective name is written on every cell of the column,
+          // never cleared, because the control's own column alignment is an
+          // inline style too and clearing would take it with it.
+          const own = cellAlign(rowCells((block.rows || [])[y])[col.index], col.align);
+          el.style.textAlign = own || DEFAULT_ALIGN;
         }
       }
     }
@@ -1094,7 +1210,7 @@ export function TableBlock(props) {
     const columns = model.plan.map((col) => ({
       title: col.kind === 'sep' ? ' ' : (col.label || ' '),
       width: col.width,
-      align: col.kind === 'item' || col.kind === 'cat' ? 'left' : 'center',
+      align: col.align || (col.kind === 'item' || col.kind === 'cat' ? 'left' : 'center'),
       readOnly: col.kind === 'num' || col.kind === 'sep' || !!col.readOnly,
       type: 'text',
       wordWrap: false,
@@ -1464,16 +1580,7 @@ export function TableBlock(props) {
   const insertColumn = () => {
     const col = model.plan[activeCell().x];
     if (block.type !== 'datatable') {
-      mutate(() => {
-        const at = Math.max(0, activeCell().x - 1) + 1;
-        (block.rows || []).forEach((row, i) => {
-          const cells = rowCells(row);
-          cells.splice(at, 0, '');
-          if (Array.isArray(block.rows[i])) block.rows[i] = cells;
-          else block.rows[i].cells = cells;
-        });
-        if (Array.isArray(block.col_w)) block.col_w.splice(at, 0, 2);
-      });
+      mutate(() => insertPlainColumn(block, Math.max(0, activeCell().x - 1) + 1));
       return;
     }
     if (!col || col.kind !== 'axis' || col.group === 'spec') return;
@@ -1491,17 +1598,7 @@ export function TableBlock(props) {
   const deleteColumn = () => {
     const col = model.plan[activeCell().x];
     if (block.type !== 'datatable') {
-      mutate(() => {
-        const at = Math.max(0, activeCell().x - 1);
-        (block.rows || []).forEach((row, i) => {
-          const cells = rowCells(row);
-          if (cells.length <= 1) return;
-          cells.splice(at, 1);
-          if (Array.isArray(block.rows[i])) block.rows[i] = cells;
-          else block.rows[i].cells = cells;
-        });
-        if (Array.isArray(block.col_w)) block.col_w.splice(at, 1);
-      });
+      mutate(() => deletePlainColumn(block, Math.max(0, activeCell().x - 1)));
       return;
     }
     if (!col || col.kind !== 'axis' || col.group === 'spec') return;
@@ -1529,6 +1626,26 @@ export function TableBlock(props) {
           setPlainRowKind(block, y, kind);
         }
       }
+    });
+  };
+
+  // Alignment is a property of the COLUMN, not of the cell under the cursor: a
+  // cell edit rewrites the cell and would take a per-cell alignment with it,
+  // while a column keeps its own however often the text is retyped.
+  const setColumnAlign = (name) => {
+    const sel = selectionRef.current || { x1: activeCell().x, x2: activeCell().x };
+    mutate(() => {
+      const aligns = plainColAligns(block, plainWidth(block));
+      let touched = false;
+      for (let x = sel.x1; x <= sel.x2; x++) {
+        const col = model.plan[x];
+        if (!col || col.kind !== 'cell') continue;
+        aligns[col.index] = name === DEFAULT_ALIGN ? null : alignName(name);
+        touched = true;
+      }
+      if (!touched) return false;
+      setColAligns(block, aligns);
+      return true;
     });
   };
 
@@ -1955,6 +2072,19 @@ export function TableBlock(props) {
           onChange=${setRowKind}
           ariaLabel="Row kind" />
 
+        ${compliance ? null : html`
+          <span class="rw-tblbar__rule"></span>
+          <span class="rw-micro rw-tblbar__label">Align</span>
+          <${SegmentedControl}
+            value=${currentColAlign(model, selection)}
+            options=${[
+              { value: 'left', label: '⇤', title: 'Align left' },
+              { value: 'center', label: '⇔', title: 'Align centre' },
+              { value: 'right', label: '⇥', title: 'Align right' },
+            ]}
+            onChange=${setColumnAlign}
+            ariaLabel="Column alignment" />`}
+
         <span class="rw-tblbar__rule"></span>
         <${IconButton} glyph="⤒" title="Insert row above" onClick=${() => insertRow('above')} />
         <${IconButton} glyph="⤓" title="Insert row below" onClick=${() => insertRow('below')} />
@@ -2147,6 +2277,12 @@ function applyCellEdit(ctx, x, y, value) {
     return writeCell({ block, cfg, model }, x, y, value);
   }, { rebuild: col.kind === 'cat' || col.kind === 'limit' || col.kind === 'item' });
   if (run > 1 && !catWarnRef.current) setCatAsk({ count: run, revert: undo });
+}
+
+// What the Align control shows: the alignment of the column under the cursor.
+function currentColAlign(model, selection) {
+  const col = model && model.plan[selection ? selection.x1 : 1];
+  return (col && col.align) || DEFAULT_ALIGN;
 }
 
 function currentRowKind(block, cfg, selection) {

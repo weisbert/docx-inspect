@@ -1466,6 +1466,13 @@ def _build_outline(doc, cfg, outline, names, on_progress=None, section_only=None
                             merges=block.get("merges"),
                             col_w=block.get("col_w"),
                             row_fills=block.get("row_fills"),
+                            # A row's kind is what colours it in the editor. Left
+                            # out of this call it coloured nothing in the document:
+                            # the editor showed the kind's fill and Word printed
+                            # the legacy index-keyed one, with nothing to say the
+                            # two disagreed.
+                            row_kinds=block.get("row_kinds"),
+                            col_align=block.get("col_align"),
                             header_fill=block.get("header_fill"),
                             row_h=block.get("row_h"))
                         _collect_table_result(
