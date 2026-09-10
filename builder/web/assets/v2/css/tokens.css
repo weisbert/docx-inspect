@@ -69,7 +69,6 @@
   /* --- table, editor side --------------------------------------------- */
   --grid-head:     #fdf6c3;  /* readable yellow for the editor header rows */
   --grid-head-2:   #fbf0ad;  /* the grouped band above it */
-  --grid-head-3:   #fbf5d3;  /* a column excluded from checking */
   --grid-head-line:#d9d0a0;
   --grid-head-ink: #5c4a00;
   --grid-sep:      #dbe6f4;  /* vertical bar between simulation groups */

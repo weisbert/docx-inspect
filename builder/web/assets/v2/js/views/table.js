@@ -186,7 +186,7 @@ export function planColumns(groups) {
       plan.push({
         kind: 'axis', label: group.axes[ai], width: W.axis,
         group: group.key, role: group.role, axis: ai,
-        readOnly: !!group.readOnly, excluded: ai >= MTM_AXES,
+        readOnly: !!group.readOnly,
       });
     }
   }
@@ -2625,15 +2625,14 @@ function buildNestedHeaders(model) {
   return [band, stages];
 }
 
-// A column the spec comparison skips still holds measured values. Greying the
-// column and labelling it `not checked` said the opposite -- readers took it to
-// mean the numbers themselves were unverified -- so the fact lives in a tooltip
-// and the values look like every other measured value.
-const AXIS_NOT_FLAGGED = 'Measured like the other corners. It is the spec '
-  + 'comparison that skips this column, not the simulation.';
-
 // Header cells the control has already built: mark the axis row and the
 // separator columns.
+//
+// The fourth axis used to be greyed and labelled `not checked`. That was true
+// of an older rule and is not true of this one: util.js::flagsFrom judges the
+// NTWC corner like every other axis -- against spec_ntwc when the row carries
+// one, against the MIN/MAX bounds otherwise -- and so does the engine. The
+// column is a measured corner that is checked, so it is drawn like one.
 function decorateHeaders(host, model) {
   const table = host.querySelector('table.jss_worksheet');
   if (!table) return;
@@ -2660,8 +2659,6 @@ function decorateHeaders(host, model) {
       cell.classList.remove('rw-grid__axis');
       cell.classList.add('rw-grid__sep');
       cell.textContent = '';
-    } else if (col.kind === 'axis' && col.excluded) {
-      cell.title = AXIS_NOT_FLAGGED;
     }
   }
 }
