@@ -898,8 +898,6 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
   color: var(--grid-head-ink); font-size: var(--fs-grid-head); font-weight: var(--fw-title);
 }
 .rw-grid__band { background: var(--grid-head-2); }
-.rw-grid__axis--excluded { background: var(--grid-head-3); color: var(--fg-dim); }
-.rw-grid__axisnote { display: block; font-size: var(--fs-grid-head-sm); font-weight: var(--fw-regular); color: var(--fg-dim); }
 /* Not decoration: this is the exported separator column, drawn on screen. */
 .rw-grid__sep { width: var(--tbl-sep-w); min-width: var(--tbl-sep-w); background: var(--grid-sep); }
 .rw-grid__frozen { box-shadow: 1px 0 0 var(--line-strong); }
@@ -908,7 +906,6 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-grid__cell { padding: 0 var(--sp-4); border-right: 1px solid var(--line-inner); border-bottom: 1px solid var(--line-inner); color: var(--fg); }
 .rw-grid__cell--num { font-family: var(--font-num); font-variant-numeric: tabular-nums; text-align: right; }
 .rw-grid__cell--overspec { background: var(--bad-wash); color: var(--bad); font-weight: var(--fw-strong); }
-.rw-grid__cell--excluded { color: var(--fg-dim); }
 .rw-grid__cell--selected { background: var(--sel-fill); box-shadow: inset 0 0 0 var(--tbl-sel-bw) var(--sel-edge); }
 .rw-grid__cell--active { box-shadow: inset 0 0 0 var(--tbl-active-bw) var(--accent); }
 .rw-grid__handle { width: var(--tbl-handle-sz); height: var(--tbl-handle-sz); border-radius: 1px; background: var(--accent); }
@@ -1341,16 +1338,9 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
   text-align: center; cursor: default;
 }
 .rw-grid .jss_worksheet > thead > tr > td.rw-grid__band { background: var(--grid-head-2); }
-.rw-grid .jss_worksheet > thead > tr > td.rw-grid__axis--excluded {
-  background: var(--grid-head-3); color: var(--fg-dim);
-}
 .rw-grid .jss_worksheet > thead > tr > td.rw-grid__sep {
   width: var(--tbl-sep-w); min-width: var(--tbl-sep-w); padding: 0;
   background: var(--grid-sep); border-color: var(--grid-sep);
-}
-.rw-grid .rw-grid__axisnote {
-  display: block; font-size: var(--fs-grid-head-sm); font-weight: var(--fw-regular);
-  color: var(--fg-dim); line-height: 1;
 }
 .rw-grid .jss_worksheet > tbody > tr > td {
   height: var(--tbl-row-h); padding: 0 var(--sp-4);
@@ -1369,7 +1359,6 @@ body.rw-resizing, body.rw-resizing * { cursor: col-resize !important; user-selec
 .rw-grid .jss_worksheet > tbody > tr > td.rw-grid__cell--num {
   font-family: var(--font-num); font-variant-numeric: tabular-nums; text-align: right;
 }
-.rw-grid .jss_worksheet > tbody > tr > td.rw-grid__cell--excluded { color: var(--fg-dim); }
 /* A reference column is a snapshot of another report: read-only, never checked. */
 .rw-grid .jss_worksheet > tbody > tr > td.rw-grid__cell--ref {
   background: var(--bg-rail); color: var(--fg-muted); font-style: italic;

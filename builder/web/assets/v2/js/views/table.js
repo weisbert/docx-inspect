@@ -1053,7 +1053,7 @@ const DENSITY = { tight: 21, normal: 25, loose: 32 };
 // removed by name so the control's classes (selection, freeze, read-only) are
 // never disturbed.
 const CELL_CLASSES = [
-  'rw-grid__sep', 'rw-grid__cell--overspec', 'rw-grid__cell--excluded',
+  'rw-grid__sep', 'rw-grid__cell--overspec',
   'rw-grid__cell--num', 'rw-grid__cell--ref', 'rw-grid__cell--index',
   'rw-grid__cell--head',
 ];
@@ -1228,7 +1228,6 @@ export function TableBlock(props) {
         if (col.kind === 'num') { el.classList.add('rw-grid__cell--index'); continue; }
         if (col.kind === 'axis') {
           el.classList.add('rw-grid__cell--num');
-          if (col.excluded) el.classList.add('rw-grid__cell--excluded');
           if (col.readOnly) el.classList.add('rw-grid__cell--ref');
           if (flagged[y + ':' + col.group + ':' + col.axis]) {
             el.classList.add('rw-grid__cell--overspec');
@@ -2626,8 +2625,15 @@ function buildNestedHeaders(model) {
   return [band, stages];
 }
 
-// Header cells the control has already built: mark the axis row, the separator
-// columns and the excluded axis, and hang the `not checked` note under it.
+// A column the spec comparison skips still holds measured values. Greying the
+// column and labelling it `not checked` said the opposite -- readers took it to
+// mean the numbers themselves were unverified -- so the fact lives in a tooltip
+// and the values look like every other measured value.
+const AXIS_NOT_FLAGGED = 'Measured like the other corners. It is the spec '
+  + 'comparison that skips this column, not the simulation.';
+
+// Header cells the control has already built: mark the axis row and the
+// separator columns.
 function decorateHeaders(host, model) {
   const table = host.querySelector('table.jss_worksheet');
   if (!table) return;
@@ -2655,11 +2661,7 @@ function decorateHeaders(host, model) {
       cell.classList.add('rw-grid__sep');
       cell.textContent = '';
     } else if (col.kind === 'axis' && col.excluded) {
-      cell.classList.add('rw-grid__axis--excluded');
-      const note = document.createElement('span');
-      note.className = 'rw-grid__axisnote';
-      note.textContent = 'not checked';
-      cell.appendChild(note);
+      cell.title = AXIS_NOT_FLAGGED;
     }
   }
 }
